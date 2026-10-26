@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.16.0")
+script_version("0.17.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -851,6 +851,16 @@ for _, v in ipairs({
         end}
 end
 
+-- WndProc's WM_SETFOCUS (0x748063): `call 0x53BC60` opens the pause menu on
+-- the next frame when the window gets focus back and no menu is up. SA-MP NOPs
+-- the call at load while its flag at samp.dll+0x26EB28 (R5) is 1, else the one at
+-- 0x7480B3. This puts it back (sampSetFocusFix.lua). A site SA-MP left alone
+-- is already stock; off writes SA-MP's NOPs back only where this wrote the call.
+gamePatches[#gamePatches + 1] = {name = "pause menu on focus (WM_SETFOCUS)", va = 0x748063,
+    from = hexBytes("90 90 90 90 90"), to = hexBytes("E8 F8 3B DF FF"),
+    phase = "late", option = "focusmenu", revertOnlyOurs = true,
+    fromSamp = true}                         -- `from` is SA-MP's; the exe holds `to`
+
 --------------------------------------------------------------------------------
 -- Optional patches
 --------------------------------------------------------------------------------
@@ -891,6 +901,7 @@ local OPTIONS = {
     nopostfx = {default = false, label = "no post effects"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
+    focusmenu = {default = false, label = "the pause menu opens when the window gets focus back (SA-MP turns this off)"},
     floatclock = {default = true,
         label = "camera moves, shakes and zooms and the weapon spread keep a smooth clock the server cannot set"},
     -- not a byte patch: read by onReceiveRpc
@@ -996,6 +1007,7 @@ end
 --- Put a site back to stock if it holds ours: "reverted", "stock" (nothing of
 --- ours) or "refused" (someone else's bytes).
 local function revertGamePatch(p)
+    if p.revertOnlyOurs and p.state ~= "ok" then return "stock" end
     local found = readBytes(p.va, #p.from)
     if not found then return "refused" end
     if bytesEqual(found, p.from) then return "stock" end

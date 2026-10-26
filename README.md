@@ -107,6 +107,8 @@ that averted a crash says so.
 | `plates` | off | custom plates on bikes, boats, planes and trailers |
 | `windowed` | on | Alt+Enter switches to windowed mode |
 | `background` | on | the game keeps running in the background and the pause menu |
+| `fogrestore` | on | the game's fog sent again after SA-MP leaves it stale |
+| `focusmenu` | off | the pause menu opens when the window gets focus back, as in single-player (SA-MP turns this off) |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |
 | `noflashes`, `nosound`, `novehiclelighting`, `nospecular`, `notargetblip`, `nointeriorreflections`, `nopostfx` | off | each takes that effect away |
 

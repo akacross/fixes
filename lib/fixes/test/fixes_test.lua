@@ -159,7 +159,7 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing == 4 and all:find('background on, crashfix on, dialoglines on, floatclock on, fogrestore on, framecaps on', 1, true)
+    ok(#listing == 4 and all:find('background on, crashfix on, dialoglines on, floatclock on, focusmenu off, fogrestore on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
     env.fixesCommand('frameclone')
@@ -861,10 +861,11 @@ do
         local checked, wrong = 0, {}
         for _, p in ipairs(upvalue(env.applyGamePatches, 'gamePatches')) do
             local o = fileOffset(p.va, #p.from)
+            local stock = p.fromSamp and p.to or p.from
             if o then
                 checked = checked + 1
-                for i = 1, #p.from do
-                    if exe:byte(o + i) ~= p.from[i] then wrong[#wrong + 1] = ('0x%X %s'):format(p.va, p.name); break end
+                for i = 1, #stock do
+                    if exe:byte(o + i) ~= stock[i] then wrong[#wrong + 1] = ('0x%X %s'):format(p.va, p.name); break end
                 end
             end
         end
@@ -945,6 +946,22 @@ local stockAgain = 0
 for _, p in ipairs(mta) do if same(get(p.va, #p.from), p.from) then stockAgain = stockAgain + 1 end end
 ok(stockAgain == 73 and chat[#chat]:find('73 site(s) changed', 1, true), 'all 73: ' .. tostring(chat[#chat]))
 env.fixesCommand('mtapatches on')
+
+print('\n== focusmenu: the pause menu on focus, off by default, SA-MP\'s NOPs kept')
+do
+    local SITE, CALL, NOPS = 0x748063, {0xE8, 0xF8, 0x3B, 0xDF, 0xFF}, {0x90, 0x90, 0x90, 0x90, 0x90}
+    put(SITE, unpack(NOPS))                                 -- SA-MP's flag was 1
+    env.applyGamePatches('late')
+    ok(same(get(SITE, 5), NOPS), 'off by default: SA-MP\'s NOPs are left')
+    env.fixesCommand('focusmenu on')
+    ok(same(get(SITE, 5), CALL), 'on: the call to 0x53BC60 is back')
+    env.fixesCommand('focusmenu off')
+    ok(same(get(SITE, 5), NOPS), 'off: SA-MP\'s NOPs again')
+    put(SITE, unpack(CALL))                                 -- SA-MP NOPed 0x7480B3 instead
+    env.fixesCommand('focusmenu on')
+    env.fixesCommand('focusmenu off')
+    ok(same(get(SITE, 5), CALL), 'a call SA-MP left in place is not NOPed by off')
+end
 
 print('\n== visual switches: crashes.asi\'s defaults, each its own option')
 for _, p in ipairs(patchList) do

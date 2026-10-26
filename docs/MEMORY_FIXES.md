@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-26):** `fixes.lua` 0.16.0. It applies the 128 `gamePatches`
+**Status (2026-10-26):** `fixes.lua` 0.17.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -42,7 +42,9 @@ crash-fix hooks follow MTA's current code (30) and carry 48 of MTA's newer
 ones (34). Since 0.15.0 it carries fogrestore.asi's fix: the game's fog is
 sent again twice a frame, after SA-MP leaves it stale (35, option
 `fogrestore`, on by default). Since 0.16.0 the RPC checks (27) also drop
-server teleports to NaN or off the world. It is published as a
+server teleports to NaN or off the world. Since 0.17.0 the pause menu can
+open again when the window gets focus back (36, option `focusmenu`, off by
+default). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -1832,3 +1834,29 @@ SkyGFX config, a site not stock, and the sites and the setter's compare
 against the real gta_sa.exe. `crashfix_dll_test.sh` runs the routine (from
 `fixes_test.lua --fog-bytes`) through the game's own setter under Wine: each
 value kept, each state queued once, the registers back.
+
+## 36. The pause menu on focus (sampSetFocusFix)
+
+```
+0x748063  90 90 90 90 90  ->  E8 F8 3B DF FF   (WndProc, WM_SETFOCUS: call 0x53BC60)
+```
+
+On WM_SETFOCUS the game sets `ForegroundApp` (0x8D621C) and calls 0x53BC60,
+which sets `FrontEndMenuManager.m_bActivateMenuNextFrame` (0xBA677B) unless a
+menu is already up or switching: the pause menu opens on the next frame
+(gta-reversed `WndProc.cpp`, `case WM_SETFOCUS`). SA-MP NOPs that call at
+load while its flag at samp.dll+0x26EB28 is 1, and NOPs 0x7480B3 instead
+otherwise (R5, the routine at samp.dll+0xAAF50, beside its other 5-byte
+NOPs). Option `focusmenu`, off by default, puts the call back in the late
+phase, after SA-MP's write; that is all sampSetFocusFix.lua did.
+
+It is a behaviour switch, not a crash fix: with it on, alt-tabbing back into
+the game opens the pause menu, as single-player does. `from` is SA-MP's NOPs
+(`fromSamp`), so the exe check compares `to` with gta_sa.exe. A site SA-MP
+left stock is already in the wanted state, and off (`revertOnlyOurs`) writes
+the NOPs back only where fixes wrote the call, so it never NOPs a call SA-MP
+kept.
+
+**Tests.** `fixes_test.lua`: off by default leaves SA-MP's NOPs, on writes
+the call, off puts the NOPs back, and a call SA-MP left in place survives on
+and off. The real gta_sa.exe holds the call at 0x748063.
