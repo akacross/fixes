@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.14.0")
+script_version("0.15.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -867,6 +867,11 @@ local OPTIONS = {
             return stopFrameCap() and 1 or 0, 0
         end},
     mtapatches = {default = true, label = "MTA's multiplayer patches (73 sites, as crashes.asi applies them with SA-MP)"},
+    fogrestore = {default = true, label = "the game's fog sent again twice a frame, after SA-MP leaves it stale (as fogrestore.asi)",
+        apply = function(on)
+            if on then return fixFogRestore() and 1 or 0, 0 end
+            return stopFogRestore() and 1 or 0, 0
+        end},
     crashfix = {default = true, label = "MTA's crash-fix hooks (lib/fixes/crashfix.dll)",
         apply = function() local c = fixCrashes("game") + fixCrashes("samp"); return c, 0 end},
     frameclone = {default = false, label = "crash fix 19 (RwFrameCloneHierarchy); breaks SkyGFX",
@@ -1630,6 +1635,149 @@ local function exceptionFilterTick()
     exceptionFilter.seen = n
     log(string.format("[fixes] SA-MP has swallowed %d exception(s) so far (stock crashes on the 11th); the first %d " ..
         "printed as warnings in chat", n, EF_SHOWN), "warn")
+end
+
+--------------------------------------------------------------------------------
+-- Fog (gta_sa.exe)
+--------------------------------------------------------------------------------
+-- fogrestore.asi's fix, carried here. RenderWare keeps each D3D render state it
+-- sent (0xC991D0 + state*8: the value, then a queued flag) and sends only
+-- changes; SA-MP sets the device's fog behind it, so the game's fog never goes
+-- back. Twice a frame in CGame::RenderScene (after the world, after the
+-- fading entities) a routine re-sends FOGENABLE, FOGCOLOR, FOGTABLEMODE and
+-- FOGVERTEXMODE through the game's own RwD3D9SetRenderState with the value it
+-- holds, poked first so the setter's compare misses; the game's next draw
+-- flushes them. Both hooks or neither. Another hook there (fogrestore.asi)
+-- keeps the sites, and ENB or SkyGFX, which own the fog, stand it down.
+-- Option "fogrestore".
+local FOG_SET    = 0x7FC2D0        -- void RwD3D9SetRenderState(state, value)
+local FOG_SHADOW = 0xC991D0
+local FOG_STATES = {0x1C, 0x22, 0x23, 0x8C}
+local FOG_SITES = {
+    {va = 0x53DFE2, from = hexBytes("6A 00 B9 40 42 BB 00")},   -- push 0 / mov ecx, 0xBB4240
+    {va = 0x53E01E, from = hexBytes("A0 28 C7 C7 00")},         -- mov al, ds:0xC7C728
+}
+local FOG_OWNERS = {"enbseries.ini", "enbseries\\enbseries.ini", "enbsuite.ini", "skygfx.ini"}
+
+local fogRestore                   -- {entries = {va, va}} once ours, {owner = text} if another's
+local fogBlock                     -- our code, kept for the next time the option goes on
+
+-- The routine, which keeps every register and the flags (absolute addresses
+-- only), then an entry per site: call it, the site's bytes, jmp back.
+local function fogRestoreCode(block)
+    local code = {}
+    local function emit(hex, dword)
+        for _, b in ipairs(hexBytes(hex)) do code[#code + 1] = b end
+        if dword then for _, b in ipairs(u32bytes(dword)) do code[#code + 1] = b end end
+    end
+    emit("9C 60")                                  -- pushfd / pushad
+    for _, state in ipairs(FOG_STATES) do
+        local shadow = FOG_SHADOW + state * 8
+        emit("A1", shadow)                         -- mov eax, [shadow]
+        emit("50 83 F0 01")                        -- push eax (the value) / xor eax, 1
+        emit("A3", shadow)                         -- mov [shadow], eax: the compare misses
+        emit("68", state)                          -- push state
+        emit("B8", FOG_SET)                        -- mov eax, RwD3D9SetRenderState
+        emit("FF D0 83 C4 08")                     -- call eax / add esp, 8
+    end
+    emit("61 9D C3")                               -- popad / popfd / ret
+    local entries = {}
+    for i, site in ipairs(FOG_SITES) do
+        entries[i] = block + #code
+        emit("E8", block - (entries[i] + 5))
+        for _, b in ipairs(site.from) do code[#code + 1] = b end
+        emit("E9", site.va + #site.from - (block + #code + 5))
+    end
+    return code, entries
+end
+
+-- The entry a site jumps to when it is ours (this run's or an earlier one's),
+-- or nil.
+local function fogEntryAt(site)
+    local b = readBytes(site.va, 5)
+    if not b or b[1] ~= 0xE9 then return nil end
+    local at = (site.va + 5 + bytesU32({b[2], b[3], b[4], b[5]})) % 0x100000000
+    if moduleAt(at) then return nil end
+    local head = readBytes(at, 5 + #site.from)
+    if not head or head[1] ~= 0xE8 then return nil end
+    for i, v in ipairs(site.from) do if head[5 + i] ~= v then return nil end end
+    return at
+end
+
+local function gameFileExists(name)
+    local ok, yes = pcall(function() return doesFileExist(getGameDirectory() .. "\\" .. name) end)
+    return ok and yes == true
+end
+
+function fixFogRestore()
+    if fogRestore and fogRestore.entries then return true end
+    for _, name in ipairs(FOG_OWNERS) do
+        if gameFileExists(name) then
+            fogRestore = {owner = name}
+            log(string.format("[fixes] fog restore: %s is here, a shader mod that owns the fog; standing down", name),
+                "info")
+            return false
+        end
+    end
+    local earlier = {fogEntryAt(FOG_SITES[1]), fogEntryAt(FOG_SITES[2])}
+    if earlier[1] and earlier[2] then
+        fogRestore = {entries = earlier}
+        log(string.format("[fixes] 0x%X, 0x%X fog restore: already hooked (an earlier run's)", FOG_SITES[1].va,
+            FOG_SITES[2].va), "info")
+        return true
+    end
+    for _, site in ipairs(FOG_SITES) do                -- both stock before either is written
+        local found = readBytes(site.va, #site.from)
+        if not bytesEqual(found, site.from) then
+            local owner = found and hookOwner(site.va, found)
+            if owner then
+                fogRestore = {owner = owner}
+                log(string.format("[fixes] 0x%X fog restore: CGame::RenderScene is hooked by %s; standing down",
+                    site.va, owner), "info")
+            else
+                log(string.format("[fixes] refusing the fog restore: 0x%X is %s, expected %s", site.va,
+                    bytesToHex(found), bytesToHex(site.from)), "warn")
+            end
+            return false
+        end
+    end
+    if not fogBlock then
+        local p = ffi.C.VirtualAlloc(nil, 0x100, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+        if p == nil then
+            log("[fixes] refusing the fog restore: VirtualAlloc failed")
+            return false
+        end
+        fogBlock = tonumber(ffi.cast("uintptr_t", p))
+    end
+    local code, entries = fogRestoreCode(fogBlock)
+    poke(fogBlock, code)
+    for i, site in ipairs(FOG_SITES) do
+        local jmp = {0xE9, unpack(u32bytes(entries[i] - (site.va + 5)))}
+        for _ = 6, #site.from do jmp[#jmp + 1] = 0x90 end
+        writeCode(site.va, jmp)
+    end
+    if fogEntryAt(FOG_SITES[1]) ~= entries[1] or fogEntryAt(FOG_SITES[2]) ~= entries[2] then
+        for _, site in ipairs(FOG_SITES) do writeCode(site.va, site.from) end
+        log("[fixes] refusing the fog restore: a hook did not stick; both sites put back", "warn")
+        return false
+    end
+    fogRestore = {entries = entries}
+    log(string.format("[fixes] 0x%X, 0x%X fog restore: FOGENABLE, FOGCOLOR, FOGTABLEMODE and FOGVERTEXMODE " ..
+        "re-sent twice a frame (code at 0x%X)", FOG_SITES[1].va, FOG_SITES[2].va, fogBlock), "info")
+    return true
+end
+
+-- Off: each site that jumps to an entry of ours gets its bytes back.
+function stopFogRestore()
+    local changed = false
+    for _, site in ipairs(FOG_SITES) do
+        if fogEntryAt(site) then
+            writeCode(site.va, site.from)
+            changed = true
+        end
+    end
+    if fogRestore and fogRestore.entries then fogRestore = nil end
+    return changed
 end
 
 --------------------------------------------------------------------------------
@@ -2543,6 +2691,13 @@ function main()
     worked = fixReferencePool()
     noteFix("entity references", worked, refPool and refPool.owner)
     fixCrashes("game")                           -- gta_sa.exe code, before the game runs much of it
+    if options.fogrestore then
+        worked = fixFogRestore()
+        noteFix("fog restore", worked, fogRestore and fogRestore.owner)
+    else
+        stopFogRestore()
+        otherFixes[#otherFixes + 1] = {"fog restore", "off (option fogrestore)"}
+    end
 
     -- Past here we need the game and SA-MP actually initialised.
     while not isSampAvailable() do wait(0) end

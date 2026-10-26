@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# lib/fixes/native/crashfix.c against gta_sa.exe's own code under Wine, in a
-# throwaway prefix, never the game's (crashfix_dll_test.c). The exe is only
-# read; the copy that runs imports only KERNEL32 and its entry point only
-# loads the test. Needs wine, python3 and i686-w64-mingw32-gcc.
+# lib/fixes/native/crashfix.c and fixes.lua's fog routine against gta_sa.exe's
+# own code under Wine, in a throwaway prefix, never the game's
+# (crashfix_dll_test.c). The exe is only read; the copy that runs imports only
+# KERNEL32 and its entry point only loads the test. Needs wine, python3,
+# luajit and i686-w64-mingw32-gcc.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 ml="$(cd "$here/../../.." && pwd)"
@@ -10,6 +11,7 @@ exe="${1:-$ml/../gta_sa.exe}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
 i686-w64-mingw32-gcc -O2 -Wall -shared -static -o "$work/crashfix_dll_test.dll" "$here/crashfix_dll_test.c"
+luajit "$here/fixes_test.lua" --fog-bytes "$work/fog.bin" >/dev/null
 python3 -I - "$exe" "$work/gta_sa.exe" <<'PY'
 import struct, sys
 d = bytearray(open(sys.argv[1], 'rb').read())

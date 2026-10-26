@@ -159,7 +159,7 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing == 4 and all:find('background on, crashfix on, dialoglines on, floatclock on, framecaps on, frameclone off', 1, true)
+    ok(#listing == 4 and all:find('background on, crashfix on, dialoglines on, floatclock on, fogrestore on, framecaps on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
     env.fixesCommand('frameclone')
@@ -833,6 +833,19 @@ do
             end
         end
         ok(checked >= 120 and #wrong == 0, ('%d checked against the file, wrong: %s'):format(checked, table.concat(wrong, '; ')))
+        local function fileHas(va, bytes)
+            local o = fileOffset(va, #bytes)
+            if not o then return false end
+            for i = 1, #bytes do if exe:byte(o + i) ~= bytes[i] then return false end end
+            return true
+        end
+        local fogSites = upvalue(env.fixFogRestore, 'FOG_SITES')
+        ok(fileHas(fogSites[1].va, fogSites[1].from) and fileHas(fogSites[2].va, fogSites[2].from),
+            'the fog restore\'s two sites are the file\'s')
+        local fogCodeFn = upvalue(env.fixFogRestore, 'fogRestoreCode')
+        local setter, shadow = hex('8B 44 24 04 8B 4C 24 08 39 0C C5'), upvalue(fogCodeFn, 'FOG_SHADOW')
+        for i = 0, 3 do setter[#setter + 1] = math.floor(shadow / 0x100 ^ i) % 0x100 end
+        ok(fileHas(upvalue(fogCodeFn, 'FOG_SET'), setter), 'and RwD3D9SetRenderState compares against its shadow table')
     end
 end
 
@@ -1189,6 +1202,109 @@ do
 end
 
 --------------------------------------------------------------------------------
+-- 0.15.0: the fog restore (fogrestore.asi's, in fixes too)
+--------------------------------------------------------------------------------
+-- The two sites in CGame::RenderScene as gta_sa.exe 1.0 US has them, and the
+-- routine as i686-w64-mingw32-as assembled it.
+local FOG_A, FOG_B = 0x53DFE2, 0x53E01E
+local FOG_A_STOCK, FOG_B_STOCK = '6A 00 B9 40 42 BB 00', 'A0 28 C7 C7 00'
+local FOG_AS = '9C60A1B092C9005083F001A3B092C900681C000000B8D0C27F00FFD083C408A1E092C9005083F001A3E092C9006822000000' ..
+    'B8D0C27F00FFD083C408A1E892C9005083F001A3E892C9006823000000B8D0C27F00FFD083C408A13096C9005083F001A33096C900' ..
+    '688C000000B8D0C27F00FFD083C408619DC3'
+local function fogSession()   -- a new session: fixes' state gone, the sites as they are
+    for _, wanted in ipairs({'fogRestore', 'fogBlock'}) do
+        local i = 1
+        while true do
+            local name = debug.getupvalue(env.fixFogRestore, i)
+            if not name then break end
+            if name == wanted then debug.setupvalue(env.fixFogRestore, i, nil) end
+            i = i + 1
+        end
+    end
+end
+local function fogStock() put(FOG_A, unpack(hex(FOG_A_STOCK))); put(FOG_B, unpack(hex(FOG_B_STOCK))) end
+local function jmpTarget(va) return mem[va] == 0xE9 and (va + 5 + getU32(va + 1)) % 0x100000000 or nil end
+
+print('\n== fog restore: the routine is the assembler\'s; each entry calls it, replays its site and goes back')
+do
+    local build = upvalue(env.fixFogRestore, 'fogRestoreCode')
+    local code, entries = build(0x40000000)
+    local routine = hex(FOG_AS)
+    ok(same(code, routine), 'the routine')
+    local function at(va) return code[va - 0x40000000 + 1] end
+    local function rel(va) return (va + 5 + (at(va + 1) + at(va + 2) * 0x100 + at(va + 3) * 0x10000 + at(va + 4) * 0x1000000))
+        % 0x100000000 end
+    ok(entries[1] == 0x40000000 + #routine and entries[2] == entries[1] + 17, 'the entries follow it: ' .. tostring(entries[1]))
+    ok(at(entries[1]) == 0xE8 and rel(entries[1]) == 0x40000000 and at(entries[2]) == 0xE8 and rel(entries[2]) == 0x40000000,
+        'each calls the routine')
+    local a, b = {}, {}
+    for i = 1, 7 do a[i] = at(entries[1] + 4 + i) end
+    for i = 1, 5 do b[i] = at(entries[2] + 4 + i) end
+    ok(same(a, hex(FOG_A_STOCK)) and same(b, hex(FOG_B_STOCK)), 'then its site\'s bytes')
+    ok(at(entries[1] + 12) == 0xE9 and rel(entries[1] + 12) == FOG_A + 7 and at(entries[2] + 10) == 0xE9
+        and rel(entries[2] + 10) == FOG_B + 5 and #code == entries[2] + 15 - 0x40000000, 'then jmps back past it')
+end
+
+print('\n== fog restore: both sites hooked, logged')
+fogSession(); fogStock()
+allocs = 0
+ok(env.fixFogRestore() == true and allocs == 1, 'applied, one block')
+local fogCode = nextBlock - 0x100000
+local fogEntryA, fogEntryB = jmpTarget(FOG_A), jmpTarget(FOG_B)
+ok(fogEntryA == fogCode + #hex(FOG_AS) and fogEntryB == fogEntryA + 17, 'each site jmps to its entry')
+ok(same(get(FOG_A + 5, 2), {0x90, 0x90}), 'the 7-byte site\'s tail NOPed')
+ok(same(get(fogCode, #hex(FOG_AS)), hex(FOG_AS)), 'the routine is in the block')
+ok(printed[#printed]:find('0x53DFE2, 0x53E01E fog restore', 1, true) and printed[#printed]:find('twice a frame', 1, true),
+    'said: ' .. tostring(printed[#printed]))
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixFogRestore() == true and allocs == 1 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)), 'again: nothing changes')
+end
+
+print('\n== fog restore: /fixes fogrestore off puts both sites back; on reuses the block')
+env.fixesCommand('fogrestore off')
+ok(same(get(FOG_A, 7), hex(FOG_A_STOCK)) and same(get(FOG_B, 5), hex(FOG_B_STOCK)), 'both stock: ' .. tostring(chat[#chat]))
+env.fixesCommand('fogrestore on')
+ok(jmpTarget(FOG_A) == fogEntryA and jmpTarget(FOG_B) == fogEntryB and allocs == 1, 'hooked again, nothing allocated')
+
+print('\n== fog restore: a reload finds the hooks an earlier run left')
+fogSession()
+ok(env.fixFogRestore() == true and allocs == 1 and jmpTarget(FOG_A) == fogEntryA, 'taken as ours, nothing allocated')
+ok(printed[#printed]:find('an earlier run', 1, true), 'said so: ' .. tostring(printed[#printed]))
+ok(env.stopFogRestore() == true and same(get(FOG_A, 7), hex(FOG_A_STOCK)) and same(get(FOG_B, 5), hex(FOG_B_STOCK)),
+    'and an earlier run\'s hooks come out when the option is off')
+
+print('\n== fog restore: fogrestore.asi (another hook) at either site: stand down, nothing written')
+for _, site in ipairs({FOG_A, FOG_B}) do
+    fogSession(); fogStock()
+    put(site, 0xE9); putU32(site + 1, 0x13375000 - (site + 5))
+    allocs = 0
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixFogRestore() == false and allocs == 0 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)),
+        ('0x%X hooked: not applied, the other site left stock'):format(site))
+    ok(printed[#printed]:find('hooked by code at 0x13375000; standing down', 1, true), 'named: ' .. tostring(printed[#printed]))
+end
+
+print('\n== fog restore: ENB or SkyGFX owns the fog: stand down')
+fogSession(); fogStock()
+env.getGameDirectory = function() return 'GAME' end
+env.doesFileExist = function(path) return path == 'GAME\\skygfx.ini' end
+allocs = 0
+ok(env.fixFogRestore() == false and allocs == 0 and same(get(FOG_A, 7), hex(FOG_A_STOCK)), 'skygfx.ini: not applied')
+ok(printed[#printed]:find('skygfx.ini is here', 1, true), 'said: ' .. tostring(printed[#printed]))
+env.getGameDirectory, env.doesFileExist = nil, nil
+
+print('\n== fog restore: a site that is not stock and no hook: refused, nothing written')
+fogSession(); fogStock()
+mem[FOG_B + 1] = 0x29
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixFogRestore() == false and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)), 'refused, nothing written')
+    ok(printed[#printed]:find('refusing the fog restore: 0x53E01E is A0 29', 1, true), 'said why: ' .. tostring(printed[#printed]))
+end
+fogSession(); fogStock()
+
+--------------------------------------------------------------------------------
 -- 0.9.0: entity references
 --------------------------------------------------------------------------------
 -- The head load in CEntity::RegisterReference, and the block's code as
@@ -1343,10 +1459,10 @@ do
     env2.fixesCommand('patches')
     local listedOthers = 0
     for _, name in ipairs({'animation wipes', 'entity references', 'removed buildings', 'text cache',
-            'server RPC checks', 'F1 help dialog off', 'smoking animation', 'animation blocks pinned'}) do
+            'server RPC checks', 'F1 help dialog off', 'smoking animation', 'animation blocks pinned', 'fog restore'}) do
         for i = fromChat + 1, #chat do if chat[i]:find(name .. ': ', 1, true) then listedOthers = listedOthers + 1; break end end
     end
-    ok(listedOthers == 8, ('/fixes patches lists all 8 other fixes with their state (%d)'):format(listedOthers))
+    ok(listedOthers == 9, ('/fixes patches lists all 9 other fixes with their state (%d)'):format(listedOthers))
     stockVis()
 end
 
@@ -1355,6 +1471,8 @@ end
 -- anim_wipe_test.c (the real plugin offset 0xB5F878, its block at 0x20000000).
 -- --filter-bytes <file>: the exception filter's tail for exception_filter_test.c,
 -- built for SA-MP R5 at its preferred base (the harness moves the counter).
+-- --fog-bytes <file>: the fog routine, which runs anywhere, for
+-- crashfix_dll_test.c.
 for i = 1, #arg do
     if arg[i] == '--filter-bytes' and arg[i + 1] then
         local build = upvalue(env.fixExceptionFilter, 'exceptionFilterCode')
@@ -1373,6 +1491,16 @@ for i = 1, #arg do
         for _, b in ipairs(bytes) do f:write(string.char(b)) end
         f:close()
         print(('\nwrote the animation-wipe code (%d bytes) to %s'):format(#bytes, arg[i + 1]))
+    end
+end
+for i = 1, #arg do
+    if arg[i] == '--fog-bytes' and arg[i + 1] then
+        local build = upvalue(env.fixFogRestore, 'fogRestoreCode')
+        local code, entries = build(0)
+        local f = assert(io.open(arg[i + 1], 'wb'))
+        for j = 1, entries[1] do f:write(string.char(code[j])) end
+        f:close()
+        print(('\nwrote the fog routine (%d bytes) to %s'):format(entries[1], arg[i + 1]))
     end
 end
 for i = 1, #arg do

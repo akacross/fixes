@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-25):** `fixes.lua` 0.14.0. It applies the 128 `gamePatches`
+**Status (2026-10-26):** `fixes.lua` 0.15.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -39,7 +39,9 @@ debug-label patches are present but switched off. Since 0.13.0 it also
 carries autofps's frame-cap patches (33, option `framecaps`); with autofps
 running, whichever hooks SA-MP's limiter first owns it. Since 0.14.0 the
 crash-fix hooks follow MTA's current code (30) and carry 48 of MTA's newer
-ones (34). It is published as a
+ones (34). Since 0.15.0 it carries fogrestore.asi's fix: the game's fog is
+sent again twice a frame, after SA-MP leaves it stale (35, option
+`fogrestore`, on by default). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -1781,3 +1783,43 @@ FxPrim, matrix, vertex-instancing, translation and fall-out code runs
 through the hooks with good data and with the bad data each one is for; the
 C parts (#1109, the vehicle pool, collision data, the rail wrap, lines of
 sight) directly. 60 checks.
+
+## 35. SA-MP leaves the game's fog stale (fogrestore.asi)
+
+```
+0x53DFE2  6A 00 B9 40 42 BB 00   ->  E9 <entry A> 90 90   (CGame::RenderScene, after RenderEverythingBarRoads)
+0x53E01E  A0 28 C7 C7 00         ->  E9 <entry B>         (after RenderFadingInEntities)
+```
+
+RenderWare keeps each D3D render state it has sent at `0xC991D0 + state*8`
+(the value, then a queued flag) and `RwD3D9SetRenderState` (0x7FC2D0) sends
+only a change: `cmp [eax*8+0xC991D0], ecx / je`, then the value, then the
+state into the queue at 0xC98B40 (count 0xC9A5EC) that the next draw
+flushes. SA-MP sets the device's fog itself, so the cache still says fog is
+as the game left it and the game's fog never goes back.
+
+Option `fogrestore`, on by default: fogrestore.asi's fix (built in this
+workspace from SAMPGraphicRestore's idea), carried here so the ASI can go.
+A 121-byte routine keeps every register and the flags and, for
+FOGENABLE (0x1C), FOGCOLOR (0x22), FOGTABLEMODE (0x23) and FOGVERTEXMODE
+(0x8C), reads the value the game holds, writes it back with bit 0 flipped so
+the compare misses, and calls the setter with the real value: the game's own
+path, no device pointer and no caps logic (the inactive one of the two fog
+modes is a no-op). Each site's entry calls it, replays the five or seven
+bytes it took and jumps back. Both sites are checked before either is
+written, and a hook that does not stick puts both back.
+
+Another hook at either site keeps both: fogrestore.asi hooks them at
+startup, so with it installed fixes names it and stands down. So do
+`enbseries.ini`, `enbseries\enbseries.ini`, `enbsuite.ini` or `skygfx.ini` in
+the game folder, as fogrestore.asi did (a shader mod there owns the fog;
+ProperShaders keeps the game's distance fog). A reload finds the hooks an
+earlier run left. `/fixes fogrestore off` puts both sites back.
+
+**Tests.** `fixes_test.lua`: the routine against i686-w64-mingw32-as, the
+entries' calls, replayed bytes and jumps, both sites hooked and logged, off
+and on (the block reused), a reload, fogrestore.asi's hook at either site, a
+SkyGFX config, a site not stock, and the sites and the setter's compare
+against the real gta_sa.exe. `crashfix_dll_test.sh` runs the routine (from
+`fixes_test.lua --fog-bytes`) through the game's own setter under Wine: each
+value kept, each state queued once, the registers back.

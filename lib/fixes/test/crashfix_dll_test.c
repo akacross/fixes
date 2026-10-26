@@ -1,7 +1,9 @@
 /* lib/fixes/native/crashfix.c against gta_sa.exe 1.0 US's own code, under
  * Wine: every hook goes in on the stock bytes and comes out leaving them as
  * they were, and the game's functions are called through the hooks with the
- * bad data each one is for, and with good data.
+ * bad data each one is for, and with good data. fixes.lua's fog routine
+ * (fog.bin beside the exe, from fixes_test.lua --fog-bytes) runs against the
+ * game's own RwD3D9SetRenderState.
  *
  *     ./crashfix_dll_test.sh [path/to/gta_sa.exe]
  *
@@ -405,6 +407,39 @@ __declspec(dllexport) int __cdecl run(void)
         b[2] = -9000;
         cf_limit_line(a, b, &cf_n_los);
         ok(a[2] == 100.0f && b[2] == 100.01f, "both out: a short line at the origin");
+    }
+
+    printf("== fixes.lua's fog routine through RwD3D9SetRenderState\n");
+    {
+        char fog[MAX_PATH];
+        strcpy(fog, path);
+        strcpy(strrchr(fog, '\\') + 1, "fog.bin");
+        FILE *f = fopen(fog, "rb");
+        uint8_t *code = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        size_t n = f ? fread(code, 1, 0x1000, f) : 0;
+        if (f) fclose(f);
+        ok(n == 121, "fog.bin read (121 bytes)");
+        if (n == 121) {
+            static const uint32_t states[4] = {0x1C, 0x22, 0x23, 0x8C}, values[4] = {1, 0x00ABCDEF, 3, 0};
+            volatile uint32_t *shadow = (uint32_t *)0xC991D0, *queue = (uint32_t *)0xC98B40, *count = (uint32_t *)0xC9A5EC;
+            for (int i = 0; i < 4; i++) shadow[states[i] * 2] = values[i], shadow[states[i] * 2 + 1] = 0;
+            *count = 0;
+            uint32_t esi, edi, ebx;
+            __asm__ volatile("mov %%esi, %0\n mov %%edi, %1\n mov %%ebx, %2" : "=m"(esi), "=m"(edi), "=m"(ebx));
+            ((void (*)(void))code)();
+            uint32_t esi2, edi2, ebx2;
+            __asm__ volatile("mov %%esi, %0\n mov %%edi, %1\n mov %%ebx, %2" : "=m"(esi2), "=m"(edi2), "=m"(ebx2));
+            int kept = 1, queued = 1;
+            for (int i = 0; i < 4; i++) {
+                if (shadow[states[i] * 2] != values[i]) kept = 0;
+                if (shadow[states[i] * 2 + 1] != 1 || queue[i] != states[i]) queued = 0;
+            }
+            ok(kept, "each state keeps the value the game holds");
+            ok(queued && *count == 4, "and is queued for the next flush, in order");
+            ok(esi == esi2 && edi == edi2 && ebx == ebx2, "the registers come back");
+            ((void (*)(void))code)();
+            ok(*count == 4, "again before a flush: already queued, not twice");
+        }
     }
 
     printf("crashfix: %d passed, %d failed\n", passed, failed);
