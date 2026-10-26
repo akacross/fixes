@@ -20,7 +20,7 @@ M.version  = require('signature_scanner.version')
 M.cache    = require('signature_scanner.cache')
 M.resolver = require('signature_scanner.resolver')
 
-M._VERSION = '0.2.0'
+M._VERSION = '0.2.1'
 
 local initialised = false
 

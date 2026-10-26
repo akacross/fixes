@@ -11,23 +11,44 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-21):** `fixes.lua` 0.9.0. It applies the 18 `gamePatches`
+**Status (2026-10-25):** `fixes.lua` 0.14.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
 visible-entity list bound (21), which stands down for a limit adjuster since
 0.8.1. Since 0.9.0 it adds a growing entity-reference pool (22), which also writes
 code of its own, and a DrawText layout cache for d3dx9_25's fonts (23, option
-`textcache`, on by default). The samp.dll side resolves
+`textcache`, on by default). Since 0.10.0 exterior occluders are off (24,
+option `occluders`, on by default). Since 0.11.0 it carries MiTurboFix's
+fixes: a GameText style bound (25), the texture-dictionary struct size (26)
+and checks on four server RPCs (27, the dialog part as option `dialoglines`,
+on by default); its hospital restart patch was already 16. Also since
+0.11.0, 21 loads of the game timer as a float read a clock the server cannot
+set (28, option `floatclock`, on by default). Since 0.12.0 SA-MP's exception
+filter swallows every exception instead of crashing on the eleventh, as the
+anticrashers by Export and DarkP1xel do, but keeps printing the first ten (29). Since 0.13.0
+it carries gtasa_crashfix (crashes.asi): MTA's crash-fix hooks in
+`lib/fixes/crashfix.dll` (30, option `crashfix`), MTA's 73 multiplayer patches
+(31, option `mtapatches`) and its visual and display switches (32). The samp.dll side resolves
 each site by signature first (`lib/signature_scanner`, cache in
 `config/signature_cache.lua`, log in `logs/akacross.log`, area sigscan) and
 falls back to a per-build table for 0.3.DL-R1, 0.3.7-R1, R3-1 and R5. It moves
 SA-MP's removed-building table (19), disables the F1 help dialog and fixes the
 smoking animation (`SmokeAnimTime`/`SmokeAnimBlend`). The radar and
-debug-label patches are present but switched off. The frame limiter
-patches are not here: frame pacing belongs to autofps. The script is not
-published and is outside the shared runtime (it prints to moonloader.log
-rather than through `akacross.log`); patches stay applied on unload by design.
+debug-label patches are present but switched off. Since 0.13.0 it also
+carries autofps's frame-cap patches (33, option `framecaps`); with autofps
+running, whichever hooks SA-MP's limiter first owns it. Since 0.14.0 the
+crash-fix hooks follow MTA's current code (30) and carry 48 of MTA's newer
+ones (34). It is published as a
+plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
+tag). It is outside the shared runtime except for two optional pieces:
+since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
+by wording; only warnings and errors also reach moonloader.log; since 0.10.2
+the patch summaries and the F1 line are info unless something was refused or
+a write did not stick), and
+`akacross.perf` times its waits, with the reference-pool tick as the row
+`thread:fixes/references`. Without the runtime, as in the public repo, it
+prints everything to moonloader.log. Patches stay applied on unload by design.
 See [MODS.md](MODS.md).
 
 ## Phases
@@ -35,10 +56,10 @@ See [MODS.md](MODS.md).
 `gta_sa.exe` is mapped before any MoonLoader script runs, so a patch against its
 code has nothing to wait for. Descriptors carry a `phase`:
 
-- **`early`** (the default, 16 of 17) - applied at the top of `main()`, before
+- **`early`** (the default, 54 of 128) - applied at the top of `main()`, before
   the `isSampAvailable()` wait. These are `.text` / `.rdata` writes whose only
   requirement is that the exe is mapped.
-- **`late`** (1 of 17, `0xC2B9CC`) - applied after the wait, because it is *data*
+- **`late`** (74 of 128: `0xC2B9CC` and MTA's 73, section 31) - applied after the wait, because it is *data*
   the game writes during `CGame::InitialiseCoreDataAfterRW`. Run early it would
   read uninitialised memory, refuse, and then be overwritten with `0.9f` anyway.
 
@@ -82,12 +103,35 @@ site:
 | `ok` | the site matched `from`, was rewritten, and read back correct. |
 | `refused` | none of the above, so something patched it a way we do not recognise or the address is wrong for this exe. Left untouched and logged with found-vs-expected. |
 
-Each phase ends with a summary line:
+Since 0.11.0 every site gets its own line as it is applied, the way the
+samp.dll patches and the code-writing fixes announce themselves. The counts
+come once, as the last line, after every fix has run (the per-phase counts
+before it landed in the middle of startup and covered only the byte patches):
 
 ```
-[fixes] gta_sa.exe patches (early): 14 applied, 0 already set, 2 owned elsewhere, 0 refused
-[fixes] gta_sa.exe patches (late): 1 applied, 0 already set, 0 owned elsewhere, 0 refused
+[fixes] 0x69F2D8 (CMessages::AddBigMessage style bound): applied, 32 byte(s) written
+[fixes] 0x6E1D4F (CVehicle::DoVehicleLights rear-right tail light): already in the wanted state
+[fixes] 0x6FB9A0 (CCoronas::RenderReflections depth) is owned by SilentPatch; standing down
+...
+[fixes] server RPC checks on: animations (86, 173), menus (76), list dialog lines (61, on)
+...
+[fixes] started - gta_sa.exe patches: 13 applied, 4 already set, 3 owned elsewhere, 0 refused, 2 off;
+        other fixes: 7 in place, 1 left to other mods, 0 off, 0 not in place
 ```
+
+Applied, already set and owned lines are info; a refused site is a warning,
+and so is the last line when a site was refused or a fix is not in place (it
+names those). The other fixes are the animation wipes (20), entity
+references (22), removed buildings (19), text cache (23), the server RPC
+checks (27, which need SAMPFUNCS), the F1 and smoking patches, and the
+animation-block preload (18). If every site of a phase refuses, the warning
+that this is not the 1.0 US exe is still logged at once.
+
+In game, `/fixes` shows the same summary under the options (with how many
+are off by option), and `/fixes patches` lists every site with its state
+(`applied`, `already set`, `owned by X`, `refused - why`, `off (option X)`,
+`not applied yet` before the late phase), then each of the other fixes with
+its state (`in place`, `left to X`, `off (option X)`, `not in place`).
 
 If every patch in a phase refuses, the exe is not the build these offsets came
 from and the log says so explicitly rather than corrupting the process.
@@ -109,11 +153,13 @@ always write first.
 | 0x745BC9, 0x7459E1 | ~~SAMPGraphicRestore.asi~~ | It wrote `mov ecx, 0x9090` / `mov word [0x745BC9], cx` / `mov word [0x7459E1], dx` - byte for byte the same patch, so these used to land as `already`. **Removed 2026-08-14** (renamed to `.asi.disabled`), so they now land as `applied`. |
 | 0x7459E1 | SilentPatchSA.asi | also writes a word here (`mov eax, 0x7459E1` / `mov [eax], si`). |
 | 0x747FFE | ~~SAMPGraphicRestore.asi~~ | 6 NOPs. Adopted into `gamePatches` when the ASI was removed - see section 18. |
-| 0x6D6517, 0x6D0E43 | SilentPatchSA.asi | `mov eax, 0x6D6517` / `mov word [eax], cx` and the same for 0x6D0E43, alongside redirecting the `call 0x6A2F30` at 0x6D0E53 into its own code. `cx` is not set in that instruction window, so the resulting bytes are only knowable at runtime - the log's `already in the wanted state:` line names them if they match. |
+| 0x6D6517, 0x6D0E43 | SilentPatchSA.asi | `mov eax, 0x6D6517` / `mov word [eax], cx` and the same for 0x6D0E43, alongside redirecting the `call 0x6A2F30` at 0x6D0E53 into its own code. `cx` is not set in that instruction window, so the resulting bytes are only knowable at runtime - the site's `already in the wanted state` line names them if they match. |
 
 Nothing else in the folder (`AimCameraShakeFix`, `#FixGameMapBuilding_byAIR`,
 `flickr`, `FxLimiter`, `ImprovedStreaming.SA`, `CLEO`, `SAMPFUNCS`, `modloader`,
-`samp.dll`) references any of the 17 addresses.
+`samp.dll`) references any of the 17 addresses. The sites 25 and 26 patch
+(0x69F2D8-0x69F2F7, 0x730FE1, 0x73109B) are referenced by none of them either;
+samp.dll, CLEO and MoonLoader name 0x69F2B0 only to call `AddBigMessage`.
 
 ### Removed: SAMPGraphicRestore.asi (2026-08-14)
 
@@ -590,6 +636,9 @@ Killing the write-back pins the index at whatever it currently is (0 in
 practice), so every call rewrites slot 0 and nothing overflows. The trade-off is
 that hospital restart points effectively stop registering, which is a non-issue
 under SA-MP because the server owns respawns.
+
+MiTurboFix makes the same patch once SA-MP is up, so with both installed this
+lands as `already`.
 
 ---
 
@@ -1146,3 +1195,589 @@ It checks:
 
 `--bench` adds the timing runs, and `TEXTCACHEFIX_ASI=<path>` adds the ASI
 for comparison.
+
+---
+
+## 24. The game's occluders hide objects a server maps behind them
+
+```
+0x71F960   83 EC 10 -> 32 C0 C3       sub esp,0x10 -> xor al,al / ret
+```
+
+Option `occluders`, on by default. It replaces #FixGameMapBuilding_byAIR.asi
+(by AIR, blast.hk), which does the same through a hook: its `jmp` at
+0x71F960 calls the original, throws the answer away and returns false.
+
+**The bug.** `COcclusion::ProcessBeforeRendering` (0x7201C0) keeps the
+map's exterior occluders in two lists. `COccluder::NearCamera` (0x71F960) is
+true within 250 units of the camera, past the occluder's half length. Its
+answer moves an occluder from the far list to the near list (0x72022E) and
+back (0x720347). Only near occluders become active and cull what is behind
+them. They describe the stock map, so on a server with custom mapping they
+hide the server's objects behind a wall that may not exist any more: new
+buildings and objects vanish depending on where the camera is.
+
+**The fix.** `NearCamera` returns false, so no exterior occluder ever joins
+the near list and none culls. Both callers only test `al`
+(`test al,al / jz|jnz`), and it is a thiscall with no arguments, so
+`xor al,al / ret` is the whole function. Interior occluders are processed
+separately (0x7203FC) and keep working.
+
+**Cost.** Everything an exterior occluder would have hidden is drawn. On
+stock-map areas that is more geometry; `/fixes occluders off` puts the stock
+prologue back at once.
+
+**Gating.** A `call`/`jmp` rel32 at 0x71F960 is another mod's hook (AIR's
+ASI while installed): the patch counts as owned elsewhere and names the
+module. Otherwise the three stock bytes must match.
+
+**Tests.** `lib/fixes/test/fixes_test.lua`: the patch on by default, nothing
+past three bytes, `/fixes occluders off` and on again, and AIR's real hook
+bytes standing it down.
+
+## 25. A GameText style past 6 writes outside BIGMessages
+
+```
+0x69F2D8   8A 4C 24 14 33 D2 83 C4 10 3A CA 8D 44 24 04 74 0F
+           8D A4 24 00 00 00 00 8A 48 01 40 3A CA 75 F8
+        -> 31 D2 83 C4 10 66 83 BC 24 30 03 00 00 06 77 71  + 16 NOPs
+```
+
+From MiTurboFix (public domain, https://github.com/povargek/MiTurboFix),
+which hooks `CMessages::AddBigMessage` (0x69F2B0) and drops the call instead.
+
+**The bug.** `AddBigMessage(text, duration, style)` indexes `BIGMessages`
+(0xC1A970, 7 entries of 0xC0 bytes) with the 16-bit style and no check:
+
+```
+69F2F8:  movzx eax, word [esp+330h]     ; style
+69F300:  mov   ecx, [esp+32Ch]          ; duration
+69F307:  lea   eax, [eax+eax*2]
+69F30A:  shl   eax, 6                   ; * 0xC0
+69F30D:  mov   [eax+0xC1A978], ecx      ; ... and eleven more stores
+```
+
+SA-MP passes a server's GameText style straight in, so any style past 6
+writes the message over the game data after the array, and the client
+crashes or misbehaves later.
+
+**The fix.** Between the two helper calls and the style load sits a strlen
+loop over the message (0x69F2D8-0x69F2F7) whose result `eax` is overwritten
+by the `movzx` before anything reads it. Its 32 bytes now hold:
+
+```
+69F2D8:  xor  edx, edx                   ; as stock: edx = 0 is stored below
+69F2DA:  add  esp, 10h                   ; as stock: the helpers' args
+69F2DD:  cmp  word [esp+330h], 6
+69F2E6:  ja   69F359                     ; pop esi / add esp,320h / ret
+69F2E8:  16 x nop                        ; into the style load at 0x69F2F8
+```
+
+Styles 0-6 run as before; anything larger returns without writing. It
+covers every caller, not only SA-MP's GameText.
+
+**Gating.** A `call`/`jmp` rel32 at 0x69F2D8 is another mod's hook and is
+named; otherwise the 32 stock bytes must match. A hook at the function's
+entry (MiTurboFix's) leaves this site stock, so both apply.
+
+**Tests.** `fixes_test.lua`: the patched bytes against the assembler's, the
+`ja` landing on the epilogue, the style load after the site untouched, a
+second run, a hook standing it down, a changed site refused.
+
+## 26. A texture dictionary's struct size is trusted
+
+```
+0x730FE1   8B 54 24 08 52 -> 6A 04 90 90 90     mov edx,[esp+8] / push edx -> push 4
+0x73109B   8B 54 24 08 52 -> 6A 04 90 90 90
+```
+
+From MiTurboFix, which hooks `CTxdStore::LoadTxd(int, const char*)`
+(0x7320B0), opens the file and refuses it unless the first child of the
+dictionary chunk is a 4-byte struct.
+
+**The bug.** `RwTexDictionaryGtaStreamRead` (0x730FC0) finds the struct
+chunk and reads it into a 4-byte local (texture count, device id) with the
+size from the file:
+
+```
+730FD5:  call RwStreamFindChunk(stream, rwID_STRUCT, &size, &version)
+730FE1:  mov  edx, [esp+8]               ; size, from the file
+730FE5:  push edx
+730FE6:  lea  eax, [esp+8]               ; the 4-byte local
+730FEC:  call RwStreamRead(stream, &local, size)
+730FF1:  mov  ecx, [esp+14h]
+730FF8:  cmp  eax, ecx                    ; read == size, else return NULL
+```
+
+A size over 4 overwrites the stack frame. `RwTexDictionaryGtaStreamRead1`
+(0x731070), the first half of a dictionary streamed in two parts, has the
+same read at 0x73109B.
+
+**The fix.** Both reads ask for 4 bytes. The `read == size` check that
+follows already exists, so any size but 4 now returns NULL and the
+dictionary fails to load, as a damaged file does. Every real TXD's struct is
+4 bytes, so nothing that loads today changes. This sits under
+`CTxdStore::LoadTxd` (0x731DD0, which 0x7320B0 calls), so it covers the file
+MiTurboFix checks, and streamed dictionaries too, without opening anything.
+
+**Gating.** A `call`/`jmp` rel32 at either site is named; otherwise the five
+stock bytes must match.
+
+**Tests.** `fixes_test.lua`: both sites, nothing past five bytes.
+
+## 27. Server RPCs whose sizes SA-MP trusts
+
+Checks from MiTurboFix's RPC hooks, in `onReceiveRpc` (SAMPFUNCS raises it).
+They run before SA-MP's handlers and are the same on every build. Only these
+four ids are read; the read offset is put back afterwards.
+
+| RPC | id | check | otherwise |
+|---|---|---|---|
+| ApplyAnimation | 86 | library name 1-15 bytes, animation name 1-24 | dropped |
+| ApplyActorAnimation | 173 | the same | dropped |
+| InitMenu | 76 | menu id < 128, column flag 0 or 1, every 32-byte line (title, headers, rows) holds its terminator, at most 12 rows per column | dropped |
+| ShowDialog | 61 | list styles (2, 4, 5): lines at most 128 characters; tablists (4, 5) per cell | cut, the rest passes |
+
+**Why.** SA-MP hands the animation names to its script-command builder,
+which copies them into a fixed buffer. Its menu pool holds 128 menus and
+accepts id 128 (`cmp al,80h / ja`, R5). R3-1 and DL also take any row count
+and copy menu lines without a bound; R5 checks both. 15 and 24 are the
+longest block and animation names an IFP file holds.
+
+**Changed from MiTurboFix.**
+
+- InitMenu is read in SA-MP's layout: the column flag, the enabled flag and
+  the twelve row flags are 4-byte BOOLs (R5's handler reads each with
+  `push 20h`). MiTurboFix reads the enabled flags as one byte each, so every
+  field after them is read from the wrong place and valid menus can be
+  dropped. The column-flag check is ours.
+- MiTurboFix cuts every list line to 128 characters. A tablist row is several
+  cells, and SA-MP itself copies each cell up to 128 (R5, 0x1006F7C0), so
+  here tablists are cut per cell and valid rows keep all their columns. Plain
+  lists are cut per line, as MiTurboFix does. R5's own list parser copies up
+  to 256 per line, so this can shorten a long valid line: option
+  `dialoglines`, on by default, `/fixes dialoglines off` stops it.
+
+**Logging.** Each drop or cut is a warning naming what was wrong; after 5 of
+a kind they are only counted. `/fixes` shows the counts once there are any
+(`server data: N animation(s) and N menu(s) dropped, N dialog(s) cut`).
+
+**Tests.** `fixes_test.lua` checks that well-formed RPCs pass byte for byte
+untouched with the read offset back at the start: player and actor
+animations (with the longest names), menus with one and two columns and up
+to 12 rows, list, tablist (rows of 360 characters, no cell over 128),
+message-box and input dialogs, and an RPC that is not one of the four. Cases
+that send each check bad data are not written yet.
+
+## 28. The game timer as a float
+
+```
+21 sites   DB 05 84 CB B7 00 ... 7D 06  ->  DB 05 80 CB B7 00 ... EB 06
+           fild [m_snTimeInMilliseconds] ... jge  ->  fild [m_snTimeInMillisecondsNonClipped] ... jmp
+```
+
+Option `floatclock`, on by default. From a Lua script by an unnamed author
+whose notes say: "Fixes the loss of precision where the code converts
+`CTimer::m_snTimeInMilliseconds` to a float (`fild dword ptr
+[m_snTimeInMilliseconds]`), by redirecting it to the audio clock. The server
+can set `m_snTimeInMilliseconds` to anything with the onUpdateGlobalTimer
+RPC. Example: several bullets flew into one point." This port keeps the idea
+and changes the clock, the sign test and the set of sites (below).
+`/fixes patches` shows the 21 as one line.
+
+**The bug.** SA-MP's RPC 60 handler (R5 `0x100A1750`) writes the server's
+value into `m_snTimeInMilliseconds`, masked to 30 bits. D3D runs the FPU at
+float precision, so every float computed from that timer moves in steps of
+its ulp: 2 ms past 2^24 ms (4.7 hours), 128 ms at 2^30. SA-MP's
+InterpolateCamera* use `CCamera::VectorMoveLinear`/`VectorTrackLinear`, so
+camera moves step at a few frames a second; shakes and FOV lerps likewise;
+and the weapon spread, `sin(t * 2pi/1000)` in `CWeapon::FireInstantHit`,
+repeats the same offset for every shot inside one step.
+
+**The clock.** `m_snTimeInMillisecondsNonClipped` (0xB7CB80) is advanced by
+`CTimer::UpdateVariables` with the same step as the game timer (without the
+300 ms cap on a long frame), stops when the game pauses, follows the time
+scale, starts at 1 and is written by nothing but CTimer: no reference in
+samp.dll, omp-client.dll, SAMPFUNCS, CLEO, MoonLoader or SilentPatch. It
+counts from game start, so it reaches 2 ms steps only after 4.7 hours of play.
+The script's clock, `CAESmoothFadeThread::m_currentTime` (0xB610E0, the
+smooth-fade thread's copy of the audio time), keeps running in a pause,
+ignores slow motion and is refreshed by a `Service(); Sleep(1)` loop: 15.6 ms
+steps on Windows without a 1 ms timer period.
+
+**The sign test.** MSVC converts a uint32 with `fild`, then `test reg,reg /
+jge +6 / fadd [0x858C54]` (2^32), where `reg` is the game timer loaded
+separately. The new clock is far below 2^31, so each site's `jge` becomes a
+`jmp`; the script left it testing the game timer.
+
+**Which loads.** gta_sa.exe 1.0 US has 47 `fild [0xB7CB84]`; the script lists
+46 (it misses 0x516415). A load can move only when its float never meets a
+stamp kept on the game's own clock: it is a sin/cos phase, or every writer and
+reader of the stamp it makes is in the list. Every access to each stamp was
+found by disassembling the whole `.text`; the fields are written nowhere else
+(`CCamera::InitialiseScriptableComponents` sets them to -1.0, which is in the
+past on either clock).
+
+| site | function | the float | here |
+|---|---|---|---|
+| 0x50D166 | `CCamera::VectorMoveLinear` | writes move start/end (+0xCBC/+0xCC0) | yes |
+| 0x50D1D6 | `CCamera::VectorTrackLinear` | writes track start/end (+0xC5C/+0xC60) | yes |
+| 0x50D254 | `CCamera::AddShakeSimple` | writes shake start/end (+0xC94/+0xC98) | yes |
+| 0x516415 | shake start (0x516400) | writes shake start/end | yes (not in the script) |
+| 0x50D286 | `CCamera::LerpFOV` | writes zoom start/end (+0xCA4/+0xCA8) | yes |
+| 0x474876, 0x4748A6 | script "track/move finished" (TheCamera) | reads +0xC60 / +0xCC0 | yes |
+| 0x516446 | `CCamera::ProcessVectorTrackLinear` | reads +0xC5C/+0xC60 | yes |
+| 0x5164A6 | `CCamera::ProcessVectorMoveLinear` | reads +0xCBC/+0xCC0 | yes |
+| 0x516506 | `CCamera::ProcessFOVLerp` | reads +0xCA4/+0xCA8 | yes |
+| 0x51A6F6, 0x52BA31 | camera shake, `CCamera::Process` | reads +0xC94/+0xC98 | yes |
+| 0x739DB3 | `CShotInfo::AddShot` | writes `m_DestroyTime` (its only writer) | yes |
+| 0x739EB6 | `CShotInfo::Update` | reads `m_DestroyTime` (its only reader) | yes |
+| 0x67F7DC, 0x67F885 | `CTaskSimpleJetPack::RenderJetPack` | t / 79.6 -> sin, cos (flame) | yes |
+| 0x6802F6 | `CTaskSimpleJetPack::ProcessPed` | sin (wobble) | yes |
+| 0x703A46, 0x703B92 | `CPostEffects::UnderWaterRipple` | sin (ripple) | yes |
+| 0x7400E7, 0x74057F | `CWeapon::FireInstantHit` | sin(t * 2pi/1000) (spread) | yes |
+| 0x736116 | `CBulletInfo::Update` | vs `m_nDestroyTime`, which `AddBullet` makes from the integer clock + 1000 | no |
+| 0x7376D8 | `CExplosion::Update` | vs `m_nExpireTime`, made from the integer clock | no |
+| 0x736EE8, 0x736FA1 | `CExplosion::AddExplosion` | `m_nCreatedTime`, next to that expiry; no reader found | no |
+| 0x503BF3, 0x503CAA | `CAEWeaponAudioEntity` | a sound's `ClientVariable`, read back as `(uint32)v + 820 < GetTimeInMS()` | no |
+| 0x539FC2 | `CFireManager` | an integer stamp (`int(t + x)`) at fire +0x18 | no |
+| 0x6200F6, 0x620130 | `CTaskSimpleThrowControl` | an integer stamp at ped +0x744 | no |
+| 0x6A8853, 0x6A8881 | `CAutomobile::SpawnFlyingComponent` | `m_nRemovalTime`, an integer stamp (0x6A88A4 writes it from the integer clock) | no |
+| 0x71BC1F | `CGlass::GeneratePanesForWindow` | a pane's integer created time | no |
+| 0x41BC3B, 0x431422 | (unreversed) | an integer stamp, `int(t - a * b)` | no |
+| 0x6DC18D | `CVehicle::ProcessBoatControl` | a stamp in +0x498, which other vehicles use as `m_f2ndSteerAngle` | no |
+| 0x51D78E | `CCam::Process_Fixed` | minus an integer stamp (`fisub`) | no |
+| 0x512F47, 0x518885, 0x5192C3 | arrest and wasted cameras | statics 0xB6EC60/0xB70024/0xB70054; 0xB70024 is only read and 0xB70054 only written by address | no: not shown closed |
+| 0x50A285, 0x51787F, 0x5179E5, 0x517BF5, 0x517F4E, 0x51D3E5, 0x522CA2 | `CIdleCam` | 12 float time fields, some written in unreversed code | no: not shown closed |
+
+Left out of the port: the script's `alwaysPerfectShooting`, which feeds the
+spread a different value.
+
+**Gating.** Each site's bytes from the `fild` through its `jge` must be stock;
+the script's variant (operand 0xB610E0, everything else stock) counts as
+owned by it, and `/fixes floatclock off` leaves those alone. Nothing runs per
+frame.
+
+**Tests.** `lib/fixes/test/fixes_test.lua`: all 21 move with nothing else in
+or after their bytes changed; two of the 26 left alone stay stock; a site the
+script patched is named and left; `/fixes floatclock off` and on; the group's
+line in `/fixes patches`.
+
+## 29. SA-MP's exception filter gives up after ten (samp.dll)
+
+```
+R5 0x60A4D (37 bytes)   call print / add esp,14h / mov eax,[count] / cmp eax,10 / jge zero / inc / store / mov eax,1 / ret 0Ch / zero: xor eax,eax / ret 0Ch
+                     -> call shown / add esp,14h / inc dword [count] / mov eax,1 / ret 0Ch / shown: cmp dword [count],10 / jae done / jmp print / done: ret
+```
+
+SA-MP runs game opcodes (ScriptCommand) and ten other calls of its own
+under `__except(filter(code, info, name))`. The filter (R5 0x609B0) prints
+"Warning(opcode 0x%X): Exception 0x%X at 0x%X" (or "Warning(%s)...") to the
+chat and returns 1, `EXCEPTION_EXECUTE_HANDLER`, while its counter (R5
+0x10125A58) is under ten; the eleventh exception gets 0 and the game
+crashes. With no chat yet the entry jumps straight to the counter (R5
+`je 0x10060A55`, +8 from the call). The add_car_component opcode has a path
+of its own that prints and returns 1 every time.
+
+**The anticrashers** (`/mnt/data/Projects/samp/AntiCrasher`) all patch this
+filter:
+
+| file | by | build | what it writes |
+|---|---|---|---|
+| anticrasher037.txt / .cs (CLEO) | Export | 0.3.7 R1 | NOPs the warning call (+0x5CF2C, 5) and `cmp/jge` (+0x5CF39, 5): every exception swallowed, nothing printed |
+| anticrasher037.asi | Export | R1 | the same four writes, then two chat lines |
+| anticrasher_03DL.txt / .cs (CLEO) | Export | 0.3.DL | the same at +0x604CC / +0x604D9 |
+| anticrasher_03DL.asi | Export | DL | **broken**: all four writes go to +0x604CC, so only 4 of the call's 5 bytes are NOPs; the leftover `00` and the next bytes decode as `add [ebx+0x70A114C4], al`, which eats the `add esp,14h`: the first exception crashes |
+| AntiCrasher0.3.7-R4.txt / .CS (CLEO) | DarkP1xel | R4 | 26 NOPs from the counter load (+0x60A05) through `xor eax,eax`: the warning still prints and the filter returns whatever the print left in `eax` |
+
+The compiled .cs files match their sources; the rest of each file is the
+compiler's table of global variable names.
+
+**The fix.** Every exception is swallowed, as the anticrashers do, but the
+first ten still print, as stock, so the chat still says which opcode failed.
+The 37-byte tail is rewritten in place: the warning call now calls into the
+bytes the dead `xor eax,eax / ret 0Ch` held, which print only while the
+counter is under ten (a tail jmp to the print, which returns to the
+`add esp,14h`). The counter is incremented on every exception, so it is the
+session's total. +8 still starts an instruction (`inc dword [count]`), so the
+entry's no-chat jump lands where it did. Nothing is allocated.
+
+**Finding it.** The warning call is the `push eax / call` right after the
+push of "Warning(%s): Exception 0x%X at 0x%X", one string and one push in
+every build: R1 0x5CF2C, R3-1 0x602CC, R4 0x609FD, R5 0x60A4D, DL 0x604CC.
+The call's bytes are not used to find it, so a site another tool patched is
+still recognised. Only sections `VirtualQuery` reports committed and readable
+are read (the string in data, the push in code): R1/R2's packed sections can
+be unmapped by then, and a fault in `ffi.string` is not a Lua error.
+
+**Gating.** The whole stock tail must match, with both counter operands the
+same. Ours (a reload) is reported with its count. Export's NOPs and
+DarkP1xel's stand down, named; the broken DL ASI's stands down with a
+warning to remove it. Anything else is refused.
+
+**Reporting.** Once a second the main loop reads the counter; a rise is a
+warning line ("SA-MP has swallowed N exception(s) so far"), and `/fixes`
+shows the session's total.
+
+**Tests.** `lib/fixes/test/fixes_test.lua`: the tail against the assembler's
+at SA-MP's own base and relocated, nothing outside its 37 bytes, a reload,
+the three anticrashers' patches standing it down, a changed tail refused, no
+string, an unmapped section left unread, and the count in the log and
+`/fixes`. `exception_filter_test.c` runs
+SA-MP R5's real filter under Wine (samp.dll loaded without DllMain, off its
+preferred base, its print redirected): stock swallows ten and refuses the
+eleventh; patched, 30 exceptions are all swallowed, ten printed, 30 counted,
+the "%s" branch and the no-chat path go through the tail, add_car_component
+is unchanged, and the stack and callee-saved registers come back intact.
+
+## 30. MTA's crash-fix hooks (lib/fixes/crashfix.dll)
+
+From gtasa_crashfix (`crashes.asi` 2.x by Whitetigerswt, GPLv3), whose
+hooks are MTA:SA's (multitheftauto/mtasa-blue, GPLv3); fixes is GPLv3 too.
+Since 0.14.0 they follow MTA's current code (docs/MTA_CRASHFIX_UPDATES.md),
+and MTA's newer hooks are in the same DLL (34).
+Option `crashfix`, on by default. The hooks are native code, so they live in
+`lib/fixes/crashfix.dll` (source `lib/fixes/native/crashfix.c`, built by
+`build.sh` with mingw), loaded once like the text cache and never freed.
+fixes installs them one by one (`CrashFix_Install`): each site's stock bytes
+must match first, another mod's `jmp` or `call` there (rel32, or through a
+pointer as SA-MP's are) is named and left alone, and
+every hook logs its own line. While `crashes.asi` is installed it owns all of
+these sites, so every one stands down until it is removed.
+
+| key | site | what it stops |
+|---|---|---|
+| misc1 | 0x5D9A6E | ped shadow render with no shadow data |
+| misc2 | 0x6B18B0 | vehicle without colmodel, coldata or suspension lines |
+| misc4 | 0x4F02D2 | division by zero in `CAESoundManager::Service` |
+| misc5 | 0x5DF949 | ped model info without a model |
+| misc6, 11, 13 | 0x4D1750, 0x4D2C62, 0x4D464E | bad animation pointers |
+| misc12 | 0x4D41C5 | a bad animation in `UncompressAnimation`: option `oldcrashfixes`, off (MTA no longer installs it) |
+| misc7 | 0x417BF8 | missing colmodel |
+| misc8 | 0x73485D | missing 2d-effect plugin |
+| misc9 | 0x738B64 | invalid projectile |
+| misc10 | 0x5334FE | invalid vector pointer (output zeroed) |
+| misc14 | 0x4DD4B5 | frontend audio event before its volume table exists |
+| freeze15 | 0x156CDAE | the loading thread's unbounded wait (now 4 s + 1 s) |
+| misc16 | 0x5E5815 | `CPed::PlayFootSteps` with no first association |
+| misc17 | 0x7F120E | a missing frame member: option `oldcrashfixes`, off (MTA no longer installs it) |
+| misc24 | 0x7F0DC8 | `_RwFrameForAllChildren` on a missing frame |
+| misc18 | 0x4C7DAD | `GetWheelPosn` with no wheel frame (zero position) |
+| misc19 | 0x7F0BF7 | `RwFrameCloneHierarchy` bad data: option `frameclone`, off (breaks SkyGFX) |
+| misc20 | 0x54F3B0 | `CPlaceable::RemoveMatrix` on null |
+| misc21 | 0x648EE0 | `FinishAnimFallOutCB` on data that is not a fall-out task; a vehicle the pool does not hold is dropped |
+| misc22 | 0x4CEF08 | `CAnimBlendAssociation::Init` with a bad node array |
+| misc23 | 0x6E3D10 | a door index past 15 |
+| misc25 | 0x646026 | door-open callback with no vehicle |
+| misc26 | 0x739FA0 | `CShotInfo::Update` past its array |
+| misc27 | 0x6377FB | die-in-car task with no vehicle (counted) |
+| misc28 | 0x44A4FD | garage door with no door object |
+| misc29 | 0x4E022C | `IsSoundBankLoaded` with a slot below 0 or past the slot count |
+| copyanim | 0x4CE130 | an animation id with no hierarchy (nearest valid one); weapon fire (224) from a group without it, from the Python group (MTA #1109) |
+| frame | 0x4C53C0 | a missing vehicle frame (a neighbouring id) |
+| fxquality, shadow | 0x49EA50, 0x70BDA0 | blob shadows for peds and five vehicles; option `volshadows` |
+| impact | 0x49F3E8 | sand and dust bullet impacts at most every 500 ms |
+| mouse | 0x745423 | no `SetCursorPos` while another window has focus |
+| samp | samp.dll, by pattern | SA-MP's association helper on a bad pointer |
+
+**Changed from crashes.asi** (whose versions are live in the game while it
+is installed):
+
+- misc3 is gone, as in MTA.
+- misc14 and misc16 returned without unwinding their function's exception
+  frame and saved registers; they now return the way the function does.
+- misc21 is MTA's current test: the callback's data must have
+  `CTaskSimpleCarFallOut`'s vtable (0x86EFD0), and a vehicle pointer the
+  game's vehicle pool (0xB74494) does not hold, alive, is cleared (the
+  callback handles none). crashes.asi checked a registry of live
+  associations it never filled.
+- misc29 compared a byte with 0xFFFF; it is MTA's range check.
+- misc5 reads the model infos through 0x403DA7 (34).
+- `frame` calls the original through its own entry, not through the hook.
+- the SA-MP check also refuses a bad pointer at +10h.
+
+**Reporting.** Each hook has its own counter in the DLL; the main loop logs
+a rise ("crash fix X averted a crash (N so far)"), at most once a minute per
+hook (some fire on every frame for one broken model), and `/fixes` shows the
+session's total. `/fixes patches` has one line for all of them.
+
+**Tests.** `fixes_test.lua` drives the Lua side against a stand-in for the
+DLL: one line per hook (hooked, owned elsewhere, refused), misc19, 12 and 17
+only with their options, the SA-MP site found by pattern, the averted counts
+and their minute, and the options. `crashfix_dll_test.sh` runs the DLL's
+code against gta_sa.exe's own (34).
+
+## 31. MTA's multiplayer patches
+
+73 byte patches, option `mtapatches`, on by default, applied in the late
+phase (SA-MP is up), as crashes.asi applies them when samp.dll is loaded:
+single-player systems a server does not want (population, wanted level,
+roadblocks, gang wars, conversations, replays, idle camera and animations,
+stats messages, ambient traffic streaming) and multiplayer fixes (satchels,
+drive-by fall-off, the first bullets after a reload, paintjob colours,
+trains, garages, DirectInput mouse, model loading priority, bird height,
+interior music, clouds). `/fixes patches` shows them as one line.
+
+Every `from` is gta_sa.exe 1.0 US's own bytes. SA-MP R5 writes a few of
+these sites itself: where it wrote the same value they land as already set;
+its satchel hook (0x738F3A) and its bigger values at 0x550FBA (5000) and
+0x54F3A1 (6000 matrices, where MTA's would shrink it to 1800) are SA-MP's
+and stand down. SA-MP's satchel hook is a `jmp [ptr]` (FF 25), so `hookOwner`
+reads indirect jumps and calls too. Other mods' (the first in-game run,
+2026-10-25): SilentPatch writes the same non-exclusive mouse at 0x7469A0
+(`xor al,al` for MTA's `mov al,0`), and ProperShaders.asi sets the value at
+0x8A5A84 (22 instead of the file's 12); both stand down, named.
+
+Not ported: the main.scm and loading-screen skips (they run before any
+script), 0xBAB318 (crashes.asi's vsync byte, a display change; 0x53E94C,
+the other frame-sleep byte, is section 33's GTA frame delay), 0x717180 (it
+writes the bytes already there), and 0x6E1D4F (entry 1).
+
+**Tests.** All 73 apply late and not early, SA-MP's values and hook stand
+down, `/fixes mtapatches off` restores all 73; and every `gamePatches` entry's
+`from` is checked against the real gta_sa.exe file.
+
+## 32. crashes.asi's visual and display switches
+
+Each is an option with crashes.asi's default (they match the user's
+crashes.cfg except where noted):
+
+| option | default | site |
+|---|---|---|
+| noheathaze | on | 0x701780 ret |
+| noclouds | on | 0x53E1B4, the cloud render call |
+| noflashes | off | 0x7000E0 ret (crashes.asi's default is on; the user's cfg keeps flashes) |
+| nosound, novehiclelighting, nospecular, notargetblip, nointeriorreflections, nopostfx | off | 0x507750, 0x5D9A8F, 0x5D9ABE, 0x53E1EC, 0x555854, 0x53E227 |
+| windowed | on | 0x74872D, Alt+Enter windowed mode |
+| background | on | 0x53E9B3 and 0x561AF6: the game keeps running unfocused and in the pause menu |
+
+Its black-roads fix is entry 7 and its resolution unlock 11 and 12. A call
+another mod redirected at one of these sites is that mod's: SilentPatch
+redirects the windowed-mode call at 0x74872D, so with it installed
+`windowed` stands down and SilentPatch's own windowed mode is the one that
+works.
+
+**Not ported:** fast loading and the intro/legal skips, multiple instances
+and the main.scm skip (all run before any script: they need an ASI); the
+FPS-limit unlock is section 33; SA-MP's connect delay (0.3x/0.3z only); the
+brightness override (a numeric setting; off in the user's crashes.cfg); the
+F6+Esc mouse fix; and its crash handler, minidumps and watchdog
+(diagnostics, not fixes).
+
+## 33. SA-MP's and GTA's frame caps (autofps's patches)
+
+```
+samp.dll FrameLimiter +0Ch   A1 <lastRecalc> 85 C0  ->  E9 <stub> 90 90
+                     +1Ah   A3 5C CB B7 00         ->  5 NOPs   (ms_fTimeStep store)
+                     +182h  52 FF 15 <Sleep>       ->  7 NOPs   (the 100 fps sleep)
+samp.dll FrameSleepStub     6A 01                  ->  6A 00    (Sleep(1) -> Sleep(0))
+0x53E94A                    83 F8 0E 72 E1         ->  83 F8 00 72 E1   (GTA's 14 ms spin)
+```
+
+Option `framecaps`, on by default: autofps's port of crashes.asi's
+`disableFPSLock` + `FPSStrafeHook` and its `frameSleepOff2`, carried here as
+well, so the frame caps come off without autofps. SA-MP's limiter sleeps to
+~100 fps and every 250 ms writes 50/fps over `CTimer::ms_fTimeStep` (wrong
+strafing speed when frame times are not capped). The hook at +0Ch goes to a
+19-byte stub that reads GTA's Frame Limiter setting (0xBA6794): off goes to
+the init arm at +15h (no measuring, no timestep write, no sleep), on to the
+stock test at +11h. The stub's `cmp` sets the flags the `jne` at +13h runs
+on. With the in-game Frame Limiter on, nothing changes; off, the game is
+uncapped (autofps then paces it, if installed).
+
+SA-MP's sites are per build (R1, R3-1, R5, DL, autofps's verified table, not
+the signature scanner: its pattern covers bytes this hook overwrites), and
+the function's shape is checked first. A hook already at +0Ch is its owner's:
+autofps's stub (the same shape, not in a module) or crashes.asi's; fixes then
+writes only the default sleep and Sleep(0), the same bytes either way, and
+autofps does the same when fixes was first. `/fixes framecaps off` puts the
+hook and the timestep store back; the sleeps stay off until a restart.
+
+**Tests.** `fixes_test.lua` on SA-MP R5's real bytes: the jmp, the stub and
+its two targets, the NOPs, Sleep(0), a reload changing nothing, the option off
+and on, autofps's stub and another hook standing it down (sleeps still set),
+a wrong shape refused; the GTA delay's `from` against the real gta_sa.exe.
+
+## 34. MTA's newer crash fixes
+
+MTA added these after the copy gtasa_crashfix made (docs/MTA_CRASHFIX_UPDATES.md
+has the review). They are in `lib/fixes/crashfix.dll` with the others (30),
+under option `crashfix`, each installed, logged and standing down on its own.
+Every site's bytes were checked against gta_sa.exe and every return address
+against MTA's. In game (2026-10-26, SA-MP R5) two stand down: misc34 to
+SilentPatch, which writes its own jmp there, and blendanim to samp.dll, which
+hooks `CAnimManager::BlendAnimation` with `jmp [0x4D4609]` (its pointer in
+the padding before the function). colalloc goes in; SilentPatch only reads
+that thunk.
+
+| keys | sites | what they stop |
+|---|---|---|
+| matrix, matmul | 0x59AD70, 0x7F18B0 | `UpdateRwMatrix` into a null, low or unaligned matrix; `RwMatrixMultiply` with a null one (dst returned) |
+| allocmatrix1, 2 | 0x54F5A6, 0x54F5C5 | a matrix handed out with its old attach matrix |
+| misc43, 44, 45 | 0x4E028C, 0x4E0347, 0x4E02E8 | `GetSoundBuffer`: a slot out of range, impossible slot data, a sound past its slot's buffer |
+| misc47, 48, 49 | 0x4DFE7D, 0x4DFF78, 0x4E0094 | `CAEMP3BankLoader::Service`: stream sizes clamped to the buffer and the slot |
+| misc30, misc32 | 0x4CEBE8, 0x4CEA80 | `SetFinishCallback` on null; `SetCurrentTime` on null or with no hierarchy |
+| misc33, 35, 36, 37 | 0x7F39F0, 0x7F374A, 0x7F3A09, 0x7F39B3 | texture dictionaries: a bad dictionary or name, an entry that can't be read, a list head that does not link back |
+| misc39 | 0x4C7510 | `CVehicleModelInfo::FindTextureCB` copying a long remap name into 32 bytes |
+| misc34 | 0x5D9CB2 | the car env-map pipeline with no env-map data |
+| misc38, vbv3d, vbmorph, vbweights, dynvb | 0x7C91C0, 0x752AD0, 0x753B60, 0x752320, 0x7F5A36 | vertex buffers that failed to lock or be created (out of video memory) |
+| translation | 0x4CFCB5 | `GetCurrentTranslation` past the key frames |
+| assocgroups | 0x4D3D52 | anim groups for a model not loaded |
+| draggedout, draggedout2 | 0x6485AC, 0x648AAF | a jacked driver's tasks once the vehicle is gone |
+| train | 0x6F8F89 | the rail distance wrap that never ends with no track length |
+| placename | 0x571F39 | the zone name for a ped in a vehicle with none |
+| colliding | 0x56508C | `FindObjectsKindaCollidingSectorList` on a model with no colmodel |
+| allatomics, firstassoc, blendanim | 0x749B70, 0x4D6A70, 0x4D4610 | a null clump |
+| getalpha, setalpha | 0x732B20, 0x732B00 | clump alpha with no clump (whole functions) |
+| fxprim | 0x4A9F50 | `FxPrim_c::Enable` on null (whole function) |
+| fire | 0x53A6FC | a fire put out, or attached to nothing, while it burns (MTA #1757) |
+| furniture | 0x593BF0 | the interior furniture counter, never reset |
+| colalloc | 0x40F740 | shadow data no model has, before `CCollisionData::Copy` |
+| misc50, 51, 52 | 0x156650D, 0x156658A, 0x15665C9 | `AreTexturesUsedByRequestedModels` on a model with no model info |
+| txdnext, txdconvert | 0x408F6E, 0x40C8CE | a texture dictionary freed while its request is queued |
+| contact | 0x6080B2 | a ped's contact entity destroyed under it |
+| pathnodes | 0x156F966 | path nodes that failed to allocate |
+| los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end) |
+
+**SA-MP moves the model infos.** SA-MP R5 copies
+`CModelInfo::ms_modelInfoPtrs` (0xA9B0C8) to its own 65535-entry array and
+rewrites the 707 instructions that read it, after checking each one's first
+byte (so a hooked site keeps the old array). Every hook that reads the array
+reads where it is now, through the displacement at 0x403DA7 (one of those
+instructions, which no hook touches), and the five whose own bytes hold the
+displacement (misc5, assocgroups, colliding, misc50-52) accept it rewritten.
+
+**Changed from MTA**, where its code is wrong for the game or for SA-MP:
+
+- translation returned with `ret 8` from inside the function's frame (three
+  registers and 18h of locals still pushed); it leaves through the
+  function's own exit (0x4CFD7B), and checks the index against the
+  sequence's frame count rather than 10000.
+- colliding skipped to the loop's end with the distance still on the FPU
+  stack; it pops it first.
+- misc48 left its clamp in eax, which the code after it stores as the slot's
+  sound id (-1); misc47 and misc48 keep eax.
+- FindTextureCB is the game's lookup with the remap copy bounded; MTA's also
+  walks parent dictionaries.
+- train wraps by the track length the game's loop uses, with `fmodf`.
+- RwMatrixMultiply checks all three matrices and returns dst.
+- placename clears bInVehicle in its copy of the flags, not on the ped.
+- the vertex-buffer checks are MTA's, without its streaming-memory relief.
+
+Not taken: the CEntity::GetBoundRect and GetAnimHierarchyFromSkinClump hooks
+(MTA logs there, nothing more), CVehicle::AddUpgrade, the volumetric shadow
+zones and printf (MTA's crash reports), FxSystemBP_c::Load,
+LoadVehicleColours and the 24H2 sscanf fix (startup, before any script),
+the train crossing barriers (an MTA feature), AreAnimsUsedByRequestedModels
+(fixes pins the blocks, 18), VBInstIndicesRemap and CreateAssociations
+(defined in MTA, not installed) and MallocAlign.
+
+**Tests.** `crashfix_dll_test.sh` builds `crashfix.c` into a test DLL and runs
+it inside a copy of gta_sa.exe whose entry point only loads it and which
+imports only KERNEL32, in a throwaway Wine prefix: every hook goes in on the
+stock bytes and comes out leaving them, a moved model-info array is
+accepted, SA-MP's `jmp [ptr]` and a `call [ptr]` are another mod's hook, and the game's own texture-dictionary, sound-bank, clump-alpha,
+FxPrim, matrix, vertex-instancing, translation and fall-out code runs
+through the hooks with good data and with the bad data each one is for; the
+C parts (#1109, the vehicle pool, collision data, the rail wrap, lines of
+sight) directly. 60 checks.

@@ -1,8 +1,30 @@
 script_name("fixes")
-script_version("0.9.0")
+script_version("0.14.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
+-- a named /perf row for per-frame work; a plain call without the runtime
+local timed do
+    local ok, perf = pcall(require, 'akacross.perf')
+    timed = (ok and type(perf) == 'table' and perf.timed) or function(_, fn, ...) return fn(...) end
+end
+
+-- akacross.log (logs\akacross.log, levelled by wording) when the shared runtime
+-- is installed, else moonloader.log.
+local logLine, logScope do
+    local ok, logM = pcall(require, 'akacross.log')
+    local okSetup, lg = false, nil
+    if ok and type(logM) == 'table' and logM.setup then okSetup, lg = pcall(logM.setup, {name = 'fixes'}) end
+    logLine = okSetup and type(lg) == 'table' and lg.line or nil
+    logScope = okSetup and type(lg) == 'table' and type(lg.scope) == 'function' and lg.scope() or nil
+end
+-- log(text[, level]): `level` ('info', 'warn') where the wording would mislead
+-- ("0 refused" is not a warning).
+local function log(text, level)
+    if level and logScope and logScope[level] then
+        logScope[level]('%s', (text:gsub('^%[fixes%]%s*', '')))
+    elseif logLine then logLine(text) else print(text) end
+end
 
 local memory = require("memory")
 local ffi = require("ffi")
@@ -34,7 +56,7 @@ end
 
 -- samp.dll RVAs for when signature_scanner is unavailable, verified against the
 -- DLLs (R1 1d22eaa2, R3-1 08cf4166, R5 5ba5f0be, DL 449e4f98; the F1 pair on R5
--- and DL also in game). 'R3' is R3-1. The frame-cap symbols are autofps's.
+-- and DL also in game). 'R3' is R3-1. The frame cap's are FC_RVA.
 local sampFallback = {
     F1KeyHandler       = {['DLR1'] = 0x75456, ['R1'] = 0x713D6, ['R3'] = 0x752C6, ['R5'] = 0x759D5},
     ShowHelpDialogCall = {['DLR1'] = 0x75472, ['R1'] = 0x713F2, ['R3'] = 0x752E2, ['R5'] = 0x759F1},
@@ -96,7 +118,7 @@ function sigscanReady()
         sigscan.init{cache_file = "config/signature_cache.lua"}
     end)
     if not sigscanStarted then
-        print("[fixes] signature_scanner failed to initialise; using the offset table")
+        log("[fixes] signature_scanner failed to initialise; using the offset table")
     end
     return sigscanStarted
 end
@@ -135,18 +157,18 @@ end
 function disableF1KeyAndDialog()
     local keyVa, callVa, how = locateF1Sites()
     if not keyVa then
-        print("[fixes] F1 key and help dialog disabling is not supported: " .. tostring(how))
+        log("[fixes] F1 key and help dialog disabling is not supported: " .. tostring(how))
         return false
     end
 
     if alreadyPatched(keyVa) then
-        print(string.format("[fixes] F1 handler at 0x%X is already NOPed; nothing to do", keyVa))
+        log(string.format("[fixes] F1 handler at 0x%X is already NOPed; nothing to do", keyVa))
         return true
     end
 
     local sane, why = looksLikeF1Block(keyVa, callVa)
     if not sane then
-        print(string.format("[fixes] refusing to patch 0x%X via %s: %s", keyVa, how, tostring(why)))
+        log(string.format("[fixes] refusing to patch 0x%X via %s: %s", keyVa, how, tostring(why)))
         return false
     end
 
@@ -154,9 +176,9 @@ function disableF1KeyAndDialog()
     memory.fill(callVa, 0x90, F1_CALL_SIZE,  true)
 
     local verified = alreadyPatched(keyVa) and readU8(callVa) == 0x90
-    print(string.format("[fixes] F1 help disabled on SAMP %s via %s: handler 0x%X (rva 0x%X), call 0x%X -- %s",
+    log(string.format("[fixes] F1 help disabled on SAMP %s via %s: handler 0x%X (rva 0x%X), call 0x%X -- %s",
         getSampVersion(), how, keyVa, keyVa - getModuleHandle("samp.dll"), callVa,
-        verified and "33 bytes NOPed" or "WRITE DID NOT STICK"))
+        verified and "33 bytes NOPed" or "WRITE DID NOT STICK"), verified and "info" or "warn")
     return verified
 end
 
@@ -176,7 +198,7 @@ function forceRadarVisible(forceOn)
     if forceOn == nil then forceOn = true end
     local va, how, why = resolveSamp("RadarToggleBranch")
     if not va then
-        print("[fixes] radar toggle patch is not supported: " .. tostring(why))
+        log("[fixes] radar toggle patch is not supported: " .. tostring(why))
         return false
     end
 
@@ -186,7 +208,7 @@ function forceRadarVisible(forceOn)
     local ok, b0 = pcall(readU8, va)
     local _, b1 = pcall(readU8, va + 1)
     if not ok then
-        print(string.format("[fixes] cannot read the radar branch at 0x%X; not patching", va))
+        log(string.format("[fixes] cannot read the radar branch at 0x%X; not patching", va))
         return false
     end
 
@@ -196,7 +218,7 @@ function forceRadarVisible(forceOn)
 
     -- Only ever between the two known encodings.
     if not (b0 == other[1] and b1 == other[2]) then
-        print(string.format("[fixes] refusing to patch the radar branch at 0x%X via %s: found %02X %02X, expected %02X %02X",
+        log(string.format("[fixes] refusing to patch the radar branch at 0x%X via %s: found %02X %02X, expected %02X %02X",
             va, how, b0, b1, other[1], other[2]))
         return false
     end
@@ -205,7 +227,7 @@ function forceRadarVisible(forceOn)
     memory.setuint8(va + 1, want[2], true)
 
     local verified = readU8(va) == want[1] and readU8(va + 1) == want[2]
-    print(string.format("[fixes] radar %s on SAMP %s via %s: 0x%X (rva 0x%X) -- %s",
+    log(string.format("[fixes] radar %s on SAMP %s via %s: 0x%X (rva 0x%X) -- %s",
         forceOn and "forced visible" or "restored to stock", getSampVersion(), how,
         va, va - getModuleHandle("samp.dll"),
         verified and "2 bytes written" or "WRITE DID NOT STICK"))
@@ -223,18 +245,18 @@ local DEBUG_LABEL_LEN = 135
 function blankDebugEntityLabels()
     local va, how, why = resolveSamp("DebugLabelFormat")
     if not va then
-        print("[fixes] debug label blanking is not supported: " .. tostring(why))
+        log("[fixes] debug label blanking is not supported: " .. tostring(why))
         return false
     end
 
     local ok, first = pcall(readU8, va)
     if not ok then
-        print(string.format("[fixes] cannot read the debug label string at 0x%X; not patching", va))
+        log(string.format("[fixes] cannot read the debug label string at 0x%X; not patching", va))
         return false
     end
 
     if first == 0 then
-        print(string.format("[fixes] debug labels at 0x%X are already blank; nothing to do", va))
+        log(string.format("[fixes] debug labels at 0x%X are already blank; nothing to do", va))
         return true
     end
 
@@ -243,7 +265,7 @@ function blankDebugEntityLabels()
     for i = 1, #expected do
         local okByte, got = pcall(readU8, va + i - 1)
         if not okByte or got ~= expected:byte(i) then
-            print(string.format("[fixes] refusing to blank 0x%X via %s: expected %q at +%d, got %s",
+            log(string.format("[fixes] refusing to blank 0x%X via %s: expected %q at +%d, got %s",
                 va, how, expected:sub(i, i), i - 1,
                 okByte and string.format("%02X", got) or "<unreadable>"))
             return false
@@ -255,7 +277,7 @@ function blankDebugEntityLabels()
     memory.protect(va, DEBUG_LABEL_LEN, oldProtection)
 
     local verified = readU8(va) == 0
-    print(string.format("[fixes] debug entity labels blanked on SAMP %s via %s: 0x%X (rva 0x%X) -- %s",
+    log(string.format("[fixes] debug entity labels blanked on SAMP %s via %s: 0x%X (rva 0x%X) -- %s",
         getSampVersion(), how, va, va - getModuleHandle("samp.dll"),
         verified and (DEBUG_LABEL_LEN .. " bytes zeroed") or "WRITE DID NOT STICK"))
     return verified
@@ -297,31 +319,31 @@ end
 function fixSmokingAnimation()
     local timeVa, how, why = resolveSamp("SmokeAnimTime")
     if not timeVa then
-        print("[fixes] the smoking animation fix is not supported: " .. tostring(why))
+        log("[fixes] the smoking animation fix is not supported: " .. tostring(why))
         return false
     end
     local blendVa, how2, why2 = resolveSamp("SmokeAnimBlend")
     if not blendVa then
-        print("[fixes] the smoking animation fix is not supported: " .. tostring(why2))
+        log("[fixes] the smoking animation fix is not supported: " .. tostring(why2))
         return false
     end
     how = (how == how2) and how or (how .. "/" .. how2)
 
     -- The two operands belong to one call, 13 bytes apart, or neither is written.
     if blendVa ~= timeVa + SMOKE_OPERAND_GAP then
-        print(string.format("[fixes] refusing the smoking animation fix via %s: operands are not %d bytes apart (0x%X vs 0x%X)",
+        log(string.format("[fixes] refusing the smoking animation fix via %s: operands are not %d bytes apart (0x%X vs 0x%X)",
             how, SMOKE_OPERAND_GAP, blendVa, timeVa + SMOKE_OPERAND_GAP))
         return false
     end
 
     local okRead, time, blend = pcall(function() return readU32(timeVa), readU32(blendVa) end)
     if not okRead then
-        print(string.format("[fixes] cannot read the smoking animation operands at 0x%X; not patching", timeVa))
+        log(string.format("[fixes] cannot read the smoking animation operands at 0x%X; not patching", timeVa))
         return false
     end
 
     if time == SMOKE_TIME_WANT and blend == SMOKE_BLEND_WANT then
-        print(string.format("[fixes] the smoking animation at 0x%X is already patched; nothing to do", timeVa))
+        log(string.format("[fixes] the smoking animation at 0x%X is already patched; nothing to do", timeVa))
         return true
     end
 
@@ -330,7 +352,7 @@ function fixSmokingAnimation()
             or checkSmokeOperand(blendVa, "blend", blend, SMOKE_BLEND_STOCK, SMOKE_BLEND_WANT)
     end)
     if not okCheck or why3 then
-        print(string.format("[fixes] refusing to patch 0x%X via %s: %s", timeVa, how,
+        log(string.format("[fixes] refusing to patch 0x%X via %s: %s", timeVa, how,
             okCheck and tostring(why3) or "the site is unreadable"))
         return false
     end
@@ -339,7 +361,7 @@ function fixSmokingAnimation()
     memory.setfloat(blendVa, 4.0, true)
 
     local verified = readU32(timeVa) == SMOKE_TIME_WANT and readU32(blendVa) == SMOKE_BLEND_WANT
-    print(string.format("[fixes] smoking animation fixed on SAMP %s via %s: time 0x%X (rva 0x%X), blend 0x%X -- %s",
+    log(string.format("[fixes] smoking animation fixed on SAMP %s via %s: time 0x%X (rva 0x%X), blend 0x%X -- %s",
         getSampVersion(), how, timeVa, timeVa - getModuleHandle("samp.dll"), blendVa,
         verified and "2 operands rewritten" or "WRITE DID NOT STICK"))
     return verified
@@ -431,6 +453,22 @@ local function limitAdjusterName()
         if ok and handle and handle ~= 0 then return name end
     end
     return "a limit adjuster"
+end
+
+-- Who owns a site that starts with a call or jmp (another mod's hook), or nil:
+-- rel32 (E8/E9) or through a pointer (FF 15/FF 25, as SA-MP's satchel hook).
+local function hookOwner(va, found)
+    local target
+    if found[1] == 0xE8 or found[1] == 0xE9 then
+        target = (va + 5 + readU32(va + 1)) % 0x100000000
+    elseif found[1] == 0xFF and (found[2] == 0x15 or found[2] == 0x25) then
+        local ok, at = pcall(function() return readU32(readU32(va + 2)) end)
+        if not ok then return string.format("an indirect jump at 0x%X", va) end
+        target = at
+    else
+        return nil
+    end
+    return moduleAt(target) or string.format("code at 0x%X", target)
 end
 
 local gamePatches = {
@@ -569,11 +607,9 @@ local gamePatches = {
         name = "CRenderer::AddEntityToRenderList visible list bound",
         va = 0x553521,
         standDown = function(found)
-            if found[1] == 0xE8 or found[1] == 0xE9 then
-                -- the Open Limit Adjuster's "unlimited" hooks the count read
-                local target = (0x553521 + 5 + readU32(0x553522)) % 0x100000000
-                return string.format("%s (it hooks the store)", moduleAt(target) or string.format("code at 0x%X", target))
-            end
+            -- the Open Limit Adjuster's "unlimited" hooks the count read
+            local owner = hookOwner(0x553521, found)
+            if owner then return owner .. " (it hooks the store)" end
             local array = readU32(VISIBLE_ENTITY_OPERAND)
             if array == VISIBLE_ENTITY_PTRS then return nil end
             return string.format("%s (ms_aVisibleEntityPtrs moved to 0x%X)", limitAdjusterName(), array)
@@ -582,8 +618,238 @@ local gamePatches = {
             " 90 90 90 90 90 90 90 90 90 90 90"),
         to = hexBytes("EB 12 73 0E 90 89 34 85 98 58 B7 00 40 A3 44 68 B7 00 5E C3" ..
             " A1 44 68 B7 00 66 3D E8 03 EB E3")
+    },
+    {   -- COccluder::NearCamera returns false: no exterior occluder ever joins
+        -- the nearby list, so none culls. The game's occluders otherwise hide
+        -- objects a server maps behind them. Interior occluders do not use it.
+        -- #FixGameMapBuilding_byAIR.asi does the same through a hook.
+        name = "COccluder::NearCamera exterior occluders off",
+        va = 0x71F960, from = hexBytes("83 EC 10"), to = hexBytes("32 C0 C3"),   -- xor al,al / ret
+        standDown = function(found) return hookOwner(0x71F960, found) end,
+        option = "occluders"
+    },
+    {   -- AddBigMessage indexes BIGMessages[7] with the style unchecked, and
+        -- SA-MP passes a server's GameText style straight in. The style check
+        -- goes where a strlen loop whose result is never used sat:
+        -- xor edx,edx / add esp,10h / cmp word [esp+330h],6 / ja epilogue.
+        -- From MiTurboFix, which hooks the function instead
+        name = "CMessages::AddBigMessage style bound",
+        va = 0x69F2D8,
+        from = hexBytes("8A 4C 24 14 33 D2 83 C4 10 3A CA 8D 44 24 04 74 0F 8D A4 24 00 00 00 00 8A 48 01 40 3A CA 75 F8"),
+        to = hexBytes("31 D2 83 C4 10 66 83 BC 24 30 03 00 00 06 77 71" ..
+            " 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90"),
+        standDown = function(found) return hookOwner(0x69F2D8, found) end
+    },
+    {   -- RwTexDictionaryGtaStreamRead reads the dictionary's struct chunk,
+        -- whatever size the file gives, into 4 bytes on the stack. It now reads
+        -- 4 (push 4 for push size) and the existing `size == read` check fails
+        -- any other size. MiTurboFix checks the same field in CTxdStore::LoadTxd
+        name = "RwTexDictionaryGtaStreamRead struct size",
+        va = 0x730FE1, from = hexBytes("8B 54 24 08 52"), to = hexBytes("6A 04 90 90 90"),
+        standDown = function(found) return hookOwner(0x730FE1, found) end
+    },
+    {   -- the same read in the first half of a streamed dictionary
+        name = "RwTexDictionaryGtaStreamRead1 struct size",
+        va = 0x73109B, from = hexBytes("8B 54 24 08 52"), to = hexBytes("6A 04 90 90 90"),
+        standDown = function(found) return hookOwner(0x73109B, found) end
     }
 }
+
+-- The game timer as a float. SA-MP's RPC 60 sets CTimer::m_snTimeInMilliseconds
+-- to the server's value (30 bits on R5), and with the FPU at float precision
+-- `fild [m_snTimeInMilliseconds]` then moves in steps of up to 128 ms: camera
+-- moves and shakes stutter and the weapon spread repeats. These loads read
+-- m_snTimeInMillisecondsNonClipped (0xB7CB80) instead: counted from game start,
+-- paused and slowed with the game, and set by nothing but CTimer. It stays
+-- below 2^31, so the uint32 sign test (the jge over `fadd 2^32`) becomes a jmp.
+-- Only the 21 loads whose float is a sin/cos phase, or whose every writer and
+-- reader is in this list (the camera's move, track, shake and FOV stamps,
+-- CShotInfo's destroy time); the other 26 meet stamps kept on the game's own
+-- clock (docs/MEMORY_FIXES.md 28). From a Lua script that pointed 46 of them
+-- at the audio clock. Option "floatclock".
+local FLOAT_CLOCK_SITES = {     -- the fild through its jge
+    {0x50D166, "CCamera::VectorMoveLinear start/end", "DB 05 84 CB B7 00 85 C0 56 7D 06"},
+    {0x50D1D6, "CCamera::VectorTrackLinear start/end", "DB 05 84 CB B7 00 85 C0 56 7D 06"},
+    {0x50D254, "CCamera::AddShakeSimple start/end", "DB 05 84 CB B7 00 A1 84 CB B7 00 85 C0 7D 06"},
+    {0x516415, "CCamera shake start/end (0x516400)", "DB 05 84 CB B7 00 A1 84 CB B7 00 85 C0 7D 06"},
+    {0x50D286, "CCamera::LerpFOV start/end", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x474876, "CCamera vector track finished (script)", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x4748A6, "CCamera vector move finished (script)", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x516446, "CCamera::ProcessVectorTrackLinear", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x5164A6, "CCamera::ProcessVectorMoveLinear", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x516506, "CCamera::ProcessFOVLerp", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x51A6F6, "CCamera shake (0x51A6F6)", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x52BA31, "CCamera::Process shake", "DB 05 84 CB B7 00 85 C9 7D 06"},
+    {0x739DB3, "CShotInfo::AddShot destroy time", "DB 05 84 CB B7 00 7D 06"},
+    {0x739EB6, "CShotInfo::Update destroy time",
+        "DB 05 84 CB B7 00 8B 15 84 CB B7 00 8B 78 18 83 C4 08 85 D2 89 44 24 18 7D 06"},
+    {0x67F7DC, "CTaskSimpleJetPack::RenderJetPack flame (1)", "DB 05 84 CB B7 00 85 D2 7D 06"},
+    {0x67F885, "CTaskSimpleJetPack::RenderJetPack flame (2)", "DB 05 84 CB B7 00 85 D2 7D 06"},
+    {0x6802F6, "CTaskSimpleJetPack::ProcessPed wobble", "DB 05 84 CB B7 00 85 C0 7D 06"},
+    {0x703A46, "CPostEffects::UnderWaterRipple (1)", "DB 05 84 CB B7 00 85 C9 7D 06"},
+    {0x703B92, "CPostEffects::UnderWaterRipple (2)", "DB 05 84 CB B7 00 7D 06"},
+    {0x7400E7, "CWeapon::FireInstantHit spread (1)", "DB 05 84 CB B7 00 8B 0D 84 CB B7 00 85 C9 7D 06"},
+    {0x74057F, "CWeapon::FireInstantHit spread (2)", "DB 05 84 CB B7 00 8B 0D 84 CB B7 00 85 C9 7D 06"},
+}
+
+for _, s in ipairs(FLOAT_CLOCK_SITES) do
+    local from = hexBytes(s[3])
+    local to, script = {unpack(from)}, {unpack(from)}
+    to[3], to[4], to[5], to[6] = 0x80, 0xCB, 0xB7, 0x00            -- fild [m_snTimeInMillisecondsNonClipped]
+    to[#to - 1] = 0xEB                                             -- jge -> jmp: never 2^32 to add
+    script[3], script[4], script[5], script[6] = 0xE0, 0x10, 0xB6, 0x00   -- that script's audio clock
+    gamePatches[#gamePatches + 1] = {name = s[2] .. " clock", va = s[1], from = from, to = to,
+        option = "floatclock", group = "game timer as a float",
+        conflicts = {{bytes = script, by = "a timer script (the audio clock, 0xB610E0)"}}}
+end
+
+-- MTA's multiplayer patches, as gtasa_crashfix (crashes.asi 2.x) applies them
+-- with SA-MP: single-player systems a server does not want (population,
+-- wanted level, roadblocks, gang wars, conversations, replays, idle camera,
+-- stats messages) and multiplayer fixes (satchels, drive-by fall-off, the
+-- first bullets after a reload, paintjob colours, trains, garages, the mouse
+-- after alt-tab). MTA:SA's, GPLv3. Late: SA-MP is up and has written its own;
+-- where SA-MP writes a site itself (its satchel hook, a bigger matrix array)
+-- it is SA-MP's. Not here: the main.scm and loading-screen skips (they run
+-- before any script), the frame-sleep bytes (autofps's), 0x717180 (it writes
+-- what is there) and 0x6E1D4F (entry 1). docs/MEMORY_FIXES.md 31. Option
+-- "mtapatches".
+local MTA_PATCHES = {     -- va, name, stock, theirs
+    {0x8A5A84, "value_8A5A84_127", "0C 00 00 00", "7F 00 00 00"},
+    {0x550F82, "value_550F82_8000", "00 7D 00 00", "40 1F 00 00"},
+    {0x742685, "jmp_742685", "0F 84", "90 E9"},
+    {0x7399B0, "disableRemoveAllProjectiles", "53", "C3"},
+    {0x4629E0, "disableGenerateRoadblocks", "6A", "C3"},
+    {0x4E8410, "ret_4E8410", "51", "C3"},
+    {0x614720, "disableAddToPopulation", "6A FF 68", "32 C0 C3"},
+    {0x61EFFE, "jmp_61EFFE", "74", "EB"},
+    {0x441770, "ret_441770", "83", "C3"},
+    {0x532010, "disableReportCrime", "83", "C3"},
+    {0x4DCF87, "nop_4DCF87", "50 E8 33 D9 FC FF", "90 90 90 90 90 90"},
+    {0x6A436C, "nop_6A436C", "75 53", "90 90"},
+    {0x738F3A, "satchelCrashFix", "8B 4B 04 8A 51 36 80 E2 07 80 FA 03 0F 85 C6 08 00 00 E8 9F 69 EA FF 84 C0 0F 84 B9 08 00 00 8B 7B 04 6A 28 8B CF E8 9B 62 EA FF 6B C0 1C 83 BC 38 A0 05 00 00 28 75 1B 6A 28 8B CF E8 85 62 EA FF 6B C0 1C 8B 8C 38 AC 05 00 00 85 C9 0F 85 85 08 00 00", "90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90"},
+    {0x6B5B17, "drivebyFallOffFix", "0F 85 05 04 00 00", "90 90 90 90 90 90"},
+    {0x5B8342, "patch_5B8342", "8B 7C 24 0C 8B C7", "33 C0 B0 FF 8B F8"},
+    {0x4486F7, "nop_4486F7", "C6 41 4D 02", "90 90 90 90"},
+    {0x559FD5, "nop_559FD5", "D9 14 8D 80 93 B7 00", "90 90 90 90 90 90 90"},
+    {0x559FEB, "nop_559FEB", "D9 1C 8D 80 93 B7 00", "90 90 90 90 90 90 90"},
+    {0x55B980, "disableStatsMessages", "51", "C3"},
+    {0x559760, "ret_559760", "6A", "C3"},
+    {0x53BC78, "disableMenuAfterAltTab", "01", "00"},
+    {0x6F2089, "patch_6F2089", "E8 02 93 EA FF", "58 90 90 90 90"},
+    {0x550FBA, "patch_550FBA", "0F 27", "00 10"},
+    {0x5E68A0, "jmp_5E68A0", "74", "EB"},
+    {0x561FA4, "disableWantedHelis", "74 03", "90 90"},
+    {0x53BFF6, "disableWantedUpdateEachFrame", "E8 65 63 02 00", "90 90 90 90 90"},
+    {0x60EBCC, "disableWantedUpdate", "E8 BF 40 F5 FF", "90 90 90 90 90"},
+    {0x632140, "alwaysCanSunbathe", "A0 53 01", "B0 01 C3"},
+    {0x644C18, "carDrivePassengerExitFix", "0F 84", "90 E9"},
+    {0x5E8E84, "noSetClumpAlphaPlayer", "E8 77 9C 14 00", "90 90 90 90 90"},
+    {0x6D29CB, "noSetClumpAlphaVehicle", "E8 30 01 06 00", "90 90 90 90 90"},
+    {0x6872C0, "disableIdleAnimations", "83 EC 20", "C2 04 00"},
+    {0x6F701D, "trainRailSpeedFix1", "D9 96 A4 05 00 00", "90 90 90 90 90 90"},
+    {0x6F7069, "trainRailSpeedFix2", "75", "EB"},
+    {0x73FDF9, "instantHitBulletFix", "75", "EB"},
+    {0x6D65C5, "paintjobColorFix", "A8 04 75 22 C6 86 34 04 00 00 01", "90 90 90 90 90 90 90 90 90 90 90"},
+    {0x547441, "vehicleDetachmentFix", "3C 02 0F 85 F7", "E9 FA 02 00 00"},
+    {0x522C80, "disableIdleCam", "51", "C3"},
+    {0x53A982, "burningBmxFix", "75", "EB"},
+    {0x4F9CCE, "patch_4F9CCE", "EE", "CE"},
+    {0x576CCC, "dinputMouseReinitFix1", "74", "EB"},
+    {0x576EBA, "dinputMouseReinitFix2", "74", "EB"},
+    {0x576F8A, "dinputMouseReinitFix3", "74", "EB"},
+    {0x7469A0, "dinputNonExclusiveMouse", "8A 44 24 04", "B0 00 90 90"},
+    {0x5EFFE0, "ret18_5EFFE0", "8B 44 24 04", "C2 18 00 90"},
+    {0x40E7DF, "noAmbientTrafficStreaming", "75", "EB"},
+    {0x611FC0, "disableManagePed", "51", "C3"},
+    {0x616698, "stopPopulationUpdate", "E8 63", "5E C3"},
+    {0x460500, "disableReplayUpdate", "A0", "C3"},
+    {0x605A30, "disableScanForNearbyEntities", "55", "C3"},
+    {0x446610, "disableGangWars", "83", "C3"},
+    {0x43C590, "disableConversations", "E9", "C3"},
+    {0x43B0F0, "disablePedToPlayerConversations", "64", "C3"},
+    {0x4322B0, "disableRemoveCarsIfPoolFull", "A1", "C3"},
+    {0x40B650, "disableStreamVehiclesAlways", "6A", "C3"},
+    {0x54F3A1, "placeableMatrixArraySize", "84 03 00 00", "08 07 00 00"},
+    {0x71240E, "birdHeightFix1", "00 00 20 41", "00 00 A0 41"},
+    {0x712413, "birdHeightFix2", "00 00 00 40", "00 00 40 41"},
+    {0x712447, "birdHeightFix3", "00 00 50 41", "00 00 B8 41"},
+    {0x71244C, "birdHeightFix4", "00 00 80 40", "00 00 60 41"},
+    {0x508450, "noInteriorMusic1", "89 2D BC DC B6 00", "90 90 90 90 90 90"},
+    {0x508817, "noInteriorMusic2", "89 2D BC DC B6 00", "90 90 90 90 90 90"},
+    {0x716380, "noCloudsRender", "A1", "C3"},
+    {0x615FE3, "jmp_615FE3", "7A", "EB"},
+    {0x40892A, "modelLoadingPriority", "6A 08", "53 90"},
+    {0x4341C0, "skipGenerateRandomCars", "A0", "C3"},
+    {0x449C50, "garagesKeepVehicles1", "83", "C3"},
+    {0x449D10, "garagesKeepVehicles2", "83", "C3"},
+    {0x542483, "jmp_542483", "74", "EB"},
+    {0x5E1E72, "patch_5E1E72a", "0F 84 B8", "E9 B9 00"},
+    {0x5E1E77, "patch_5E1E72b", "00", "90"},
+    {0x6E1DBC, "vehicleLightsEngineOff", "A8 10 0F 84 2B 0B 00 00", "90 90 90 90 90 90 90 90"},
+    {0x82C5CC, "s0beitAntiCrash", "83 EC", "C9 C3"},
+}
+
+local SAMP_WRITES = {          -- what samp.dll R5 writes at a site of these
+    [0x550FBA] = hexBytes("88 13"),          -- 5000
+    [0x54F3A1] = hexBytes("70 17 00 00"),    -- 6000 matrices, more than MTA's 1800
+}
+local MTA_OWNERS = {           -- another mod's bytes at a site of these
+    [0x7469A0] = {bytes = hexBytes("30 C0 90 90"), by = "SilentPatch (xor al,al: the same non-exclusive mouse)"},
+}
+local MTA_VALUE_OWNERS = {     -- data another mod sets, whatever the value
+    [0x8A5A84] = "ProperShaders.asi",
+}
+
+for _, m in ipairs(MTA_PATCHES) do
+    local va, from = m[1], hexBytes(m[3])
+    gamePatches[#gamePatches + 1] = {name = "MTA " .. m[2], va = va, from = from, to = hexBytes(m[4]),
+        phase = "late", option = "mtapatches", group = "MTA's multiplayer patches",
+        standDown = function(found)
+            if bytesEqual(found, from) then return nil end           -- stock: several start with the call they NOP
+            local owner = hookOwner(va, found)
+            if owner then return owner end
+            if SAMP_WRITES[va] and bytesEqual(found, SAMP_WRITES[va]) then return "samp.dll (it writes this site itself)" end
+            local mod = MTA_OWNERS[va]
+            if mod and bytesEqual(found, mod.bytes) then return mod.by end
+            local valueOwner = MTA_VALUE_OWNERS[va]
+            if valueOwner and not bytesEqual(found, hexBytes(m[4])) then
+                local ok, handle = pcall(getModuleHandle, valueOwner)
+                if ok and handle and handle ~= 0 then return valueOwner .. " (it sets this value)" end
+            end
+        end}
+end
+
+-- GTA's own 14 ms frame delay (0x53E920, a busy-wait before CTimer::Update):
+-- `cmp eax, 0Eh` -> `cmp eax, 0`, so its `jb` never spins (MTA's "remove 14ms
+-- wait", crashes.asi's frameSleepOff2; autofps writes the same byte). The
+-- Frame Limiter setting is untouched. Option "framecaps", with SA-MP's.
+gamePatches[#gamePatches + 1] = {name = "GTA frame delay", va = 0x53E94A, from = hexBytes("83 F8 0E 72 E1"),
+    to = hexBytes("83 F8 00 72 E1"), option = "framecaps",
+    standDown = function(found) return hookOwner(0x53E94A, found) end}
+
+-- gtasa_crashfix's visual and display switches (its crashes.cfg keys); each
+-- is an option. Its black-roads fix is entry 7, its resolution unlock 11 and 12.
+for _, v in ipairs({
+    {0x701780, "heat haze off", "83", "C3", "noheathaze"},
+    {0x53E1B4, "cloud render call off", "E8 C7 81 1D 00", "90 90 90 90 90", "noclouds"},
+    {0x7000E0, "flashes off", "8B", "C3", "noflashes"},
+    {0x507750, "all sound off", "56", "C3", "nosound"},
+    {0x5D9A8F, "vehicle lighting off", "01", "00", "novehiclelighting"},
+    {0x5D9ABE, "specular vehicle lighting off", "01", "00", "nospecular"},
+    {0x53E1EC, "target blip off", "74", "EB", "notargetblip"},
+    {0x555854, "interior reflections off", "E8 97 15 1D 00", "90 90 90 90 90", "nointeriorreflections"},
+    {0x53E227, "post effects off", "E9", "C3", "nopostfx"},
+    {0x74872D, "Alt+Enter windowed mode", "E8 AE E1 FF FF 85 C0 75 0F", "90 90 90 90 90 90 90 90 90", "windowed"},
+    {0x53E9B3, "keep running in the background (unpaused)", "0F 85 60 01 00 00", "75 44 90 90 90 90", "background"},
+    {0x561AF6, "keep running in the pause menu", "01", "00", "background"},
+}) do
+    local va, from = v[1], hexBytes(v[3])
+    gamePatches[#gamePatches + 1] = {name = v[2], va = va, from = from, to = hexBytes(v[4]), option = v[5],
+        standDown = function(found)            -- a call there redirected (SilentPatch's windowed mode)
+            if not bytesEqual(found, from) then return hookOwner(va, found) end
+        end}
+end
 
 --------------------------------------------------------------------------------
 -- Optional patches
@@ -594,6 +860,37 @@ local gamePatches = {
 -- may share a key.
 local OPTIONS = {
     plates = {default = false, label = "custom plates on bikes, boats, planes and trailers"},
+    occluders = {default = true, label = "no exterior occlusion, so server-mapped objects stop vanishing"},
+    framecaps = {default = true, label = "SA-MP's and GTA's frame caps off while the in-game Frame Limiter is off (as autofps)",
+        apply = function(on)
+            if on then return fixFrameCap() and 1 or 0, 0 end
+            return stopFrameCap() and 1 or 0, 0
+        end},
+    mtapatches = {default = true, label = "MTA's multiplayer patches (73 sites, as crashes.asi applies them with SA-MP)"},
+    crashfix = {default = true, label = "MTA's crash-fix hooks (lib/fixes/crashfix.dll)",
+        apply = function() local c = fixCrashes("game") + fixCrashes("samp"); return c, 0 end},
+    frameclone = {default = false, label = "crash fix 19 (RwFrameCloneHierarchy); breaks SkyGFX",
+        apply = function() return fixCrashes("game"), 0 end},
+    oldcrashfixes = {default = false, label = "crash fixes 12 and 17 (UncompressAnimation, RwFrameForAllObjects), which MTA no longer installs",
+        apply = function() return fixCrashes("game"), 0 end},
+    volshadows = {default = false, label = "volumetric vehicle shadows (off: cheap blob shadows, as crashes.asi)",
+        apply = function(on) return setCrashFixShadows(on) and 1 or 0, 0 end},
+    noheathaze = {default = true, label = "no heat haze"},
+    noclouds = {default = true, label = "no clouds (a few frames)"},
+    noflashes = {default = false, label = "no flash effects"},
+    nosound = {default = false, label = "no game sound at all"},
+    novehiclelighting = {default = false, label = "no vehicle lighting"},
+    nospecular = {default = false, label = "no specular vehicle lighting"},
+    notargetblip = {default = false, label = "no target blip over aimed peds"},
+    nointeriorreflections = {default = false, label = "no interior floor reflections"},
+    nopostfx = {default = false, label = "no post effects"},
+    windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
+    background = {default = true, label = "the game keeps running in the background and the pause menu"},
+    floatclock = {default = true,
+        label = "camera moves, shakes and zooms and the weapon spread keep a smooth clock the server cannot set"},
+    -- not a byte patch: read by onReceiveRpc
+    dialoglines = {default = true, label = "cut list dialog lines (tablist cells) past 128 characters",
+        apply = function() return 1, 0 end},
     -- not a byte patch: switched through fixTextCache / stopTextCache
     textcache = {default = true, label = "replay SA-MP's text layouts instead of laying them out every frame",
         apply = function(on)
@@ -679,13 +976,13 @@ function reportGameInitState()
         return ffi.cast("int32_t*", STREAMING_INITIALISED)[0]
     end)
     if not ok then
-        print("[fixes] cannot read CStreaming::ms_bIsInitialised")
+        log("[fixes] cannot read CStreaming::ms_bIsInitialised")
         return nil
     end
 
     initialised = tonumber(initialised) ~= 0
     if not initialised then
-        print("[fixes] CStreaming::Init2 has not run yet -- init-time constants " ..
+        log("[fixes] CStreaming::Init2 has not run yet -- init-time constants " ..
               "(e.g. ms_rwObjectInstances.Init at 0x5B8E55) are patchable from here after all")
     end
     return initialised
@@ -711,9 +1008,11 @@ function setOption(key, on)
     local changed, refused = 0, 0
     for _, p in ipairs(gamePatches) do
         if p.option == key then
-            local state = on and applyGamePatch(p) or revertGamePatch(p)
+            local state, why
+            if on then state, why = applyGamePatch(p) else state = revertGamePatch(p) end
             if state == "ok" or state == "reverted" then changed = changed + 1
             elseif state == "refused" then refused = refused + 1 end
+            if on or state ~= "refused" then p.state, p.why = state, why end
         end
     end
     if OPTIONS[key] and OPTIONS[key].apply then
@@ -726,9 +1025,22 @@ end
 
 -- phase: "early" (gta_sa.exe code, nothing needs to be up; the default) or
 -- "late" (needs game init).
+-- One line per site, as the other fixes announce themselves.
+local function logGamePatch(p, state, why)
+    if state == "ok" then
+        log(string.format("[fixes] 0x%X (%s): applied, %d byte(s) written", p.va, p.name, #p.to), "info")
+    elseif state == "already" then
+        -- named, so a site another mod owns is visible
+        log(string.format("[fixes] 0x%X (%s): already in the wanted state", p.va, p.name), "info")
+    elseif state == "conflict" then
+        log(string.format("[fixes] 0x%X (%s) is owned by %s; standing down", p.va, p.name, tostring(why)), "info")
+    else
+        log(string.format("[fixes] refusing 0x%X (%s): %s", p.va, p.name, tostring(why)), "warn")
+    end
+end
+
 function applyGamePatches(phase)
     local counts = {ok = 0, already = 0, conflict = 0, refused = 0}
-    local alreadySet = {}
     local considered = 0
 
     for _, p in ipairs(gamePatches) do
@@ -737,30 +1049,15 @@ function applyGamePatches(phase)
 
             local state, why = applyGamePatch(p)
             counts[state] = counts[state] + 1
-
-            if state == "refused" then
-                print(string.format("[fixes] refusing 0x%X (%s): %s", p.va, p.name, tostring(why)))
-            elseif state == "conflict" then
-                print(string.format("[fixes] 0x%X (%s) is owned by %s; standing down",
-                    p.va, p.name, tostring(why)))
-            elseif state == "already" then
-                -- Named, so a site another mod owns is visible.
-                alreadySet[#alreadySet + 1] = string.format("0x%X (%s)", p.va, p.name)
-            end
+            p.state, p.why = state, why
+            logGamePatch(p, state, why)
         end
     end
 
-    if #alreadySet > 0 then
-        print(string.format("[fixes] %s: already in the wanted state: %s",
-            phase, table.concat(alreadySet, ", ")))
-    end
-
+    -- the counts are logged once, by reportStartup, when every fix has run
     if considered > 0 and counts.refused == considered then
-        print(string.format("[fixes] every %s gta_sa.exe patch refused; this is not the 1.0 US exe the offsets came from",
-            phase))
-    else
-        print(string.format("[fixes] gta_sa.exe patches (%s): %d applied, %d already set, %d owned elsewhere, %d refused",
-            phase, counts.ok, counts.already, counts.conflict, counts.refused))
+        log(string.format("[fixes] every %s gta_sa.exe patch refused; this is not the 1.0 US exe the offsets came from",
+            phase), "warn")
     end
     return counts
 end
@@ -925,17 +1222,17 @@ end
 function fixRemovedBuildings()
     local storeVa, how, why = resolveSamp("RemoveBuildingStore")
     if not storeVa then
-        print("[fixes] the removed-buildings fix is not supported: " .. tostring(why))
+        log("[fixes] the removed-buildings fix is not supported: " .. tostring(why))
         return false
     end
     local lookupVa, how2, why2 = resolveSamp("RemoveBuildingLookup")
     if not lookupVa then
-        print("[fixes] the removed-buildings fix is not supported: " .. tostring(why2))
+        log("[fixes] the removed-buildings fix is not supported: " .. tostring(why2))
         return false
     end
     how = (how == how2) and how or (how .. "/" .. how2)
     local function refuse(fmt, ...)
-        print(string.format("[fixes] refusing the removed-buildings fix via %s: " .. fmt, how, ...))
+        log(string.format("[fixes] refusing the removed-buildings fix via %s: " .. fmt, how, ...))
         return false
     end
 
@@ -943,7 +1240,7 @@ function fixRemovedBuildings()
     local owner = hookedBy(storeVa + RB_HANDLER) or hookedBy(lookupVa + RB_LOOKUP_FUNC)
     if owner then
         removedBuildings = {owner = owner}
-        print(string.format("[fixes] removed buildings: SA-MP's handler and lookup are replaced by %s, " ..
+        log(string.format("[fixes] removed buildings: SA-MP's handler and lookup are replaced by %s, " ..
             "which keeps its own table; standing down", owner))
         return false
     end
@@ -968,7 +1265,7 @@ function fixRemovedBuildings()
             return refuse("the block at 0x%X is not this script's", block)
         end
         removedBuildings = {count = lookup.count, cap = bytesU32({h[5], h[6], h[7], h[8]})}
-        print(string.format("[fixes] removed buildings: already moved to 0x%X (%d stored, room for %d)",
+        log(string.format("[fixes] removed buildings: already moved to 0x%X (%d stored, room for %d)",
             lookup.table, readU32(lookup.count), removedBuildings.cap))
         return true
     end
@@ -1000,7 +1297,7 @@ function fixRemovedBuildings()
     for i = 0, carried * RB_ENTRY - 1 do dst[i] = src[i] end
     if count > RB_STOCK_CAP then
         ffi.cast("uint32_t*", store.count)[0] = RB_STOCK_CAP
-        print(string.format("[fixes] SA-MP had already stored %d removed buildings and run over its own " ..
+        log(string.format("[fixes] SA-MP had already stored %d removed buildings and run over its own " ..
             "memory; kept the first %d. Restart the game if anything misbehaves.", count, RB_STOCK_CAP))
     end
 
@@ -1011,11 +1308,328 @@ function fixRemovedBuildings()
 
     local verified = readU32(lookupVa) == tableVa and readU8(storeVa) == 0xE9
     if verified then removedBuildings = {count = store.count, cap = RB_CAP} end
-    print(string.format("[fixes] removed buildings on SAMP %s via %s: table moved from 0x%X to 0x%X, room for %d " ..
+    log(string.format("[fixes] removed buildings on SAMP %s via %s: table moved from 0x%X to 0x%X, room for %d " ..
         "(was %d), each entry kept once; %d carried over -- %s",
         getSampVersion(), how, store.table, tableVa, RB_CAP, RB_STOCK_CAP, carried,
         verified and "store and lookup rewritten" or "WRITE DID NOT STICK"))
     return verified
+end
+
+--------------------------------------------------------------------------------
+-- SA-MP's exception filter (samp.dll)
+--------------------------------------------------------------------------------
+-- SA-MP runs game opcodes, and some calls of its own, under an exception filter
+-- that prints "Warning(opcode 0x%X): Exception 0x%X at 0x%X" and swallows the
+-- exception: ten times, and the eleventh crashes the game. The anticrashers by
+-- Export (0.3.7 R1, 0.3.DL; CLEO and ASI) and DarkP1xel (R4) NOP the warning
+-- and the cap. Here every exception is swallowed and the first ten still
+-- print: the filter's 37-byte tail is rewritten in place, and its warning call
+-- goes through a check in the dead `xor eax,eax / ret`. The entry's jump to
+-- the counter (no chat yet, at +8) still lands on an instruction, and the
+-- counter counts every exception. The warning call is the `push eax / call`
+-- after the push of "Warning(%s)...", the same on every build (R1 0x5CF2C,
+-- R3-1 0x602CC, R4 0x609FD, R5 0x60A4D, DL 0x604CC).
+-- Bytes from i686-w64-mingw32-as; lib/fixes/test/exception_filter_test.c runs
+-- them inside SA-MP R5's own filter.
+local EF_FORMAT = "Warning(%s): Exception 0x%X at 0x%X\0"
+local EF_SIZE   = 37
+local EF_SHOWN  = 10           -- warnings printed, as stock
+
+local exceptionFilter          -- {count = va, seen = n} once in place, {owner = text} if another mod's
+
+-- The stock tail from the warning call. -> counter va, print va, or nil.
+local function efStock(site, t)
+    local function at(i, hex)
+        local want = hexBytes(hex)
+        for k = 1, #want do if t[i + k - 1] ~= want[k] then return false end end
+        return true
+    end
+    if not (t[1] == 0xE8 and at(6, "83 C4 14 A1") and at(14, "83 F8 0A 7D 0E 40 A3")
+            and at(25, "B8 01 00 00 00 C2 0C 00 33 C0 C2 0C 00")) then return nil end
+    local count = bytesU32({t[10], t[11], t[12], t[13]})
+    if bytesU32({t[21], t[22], t[23], t[24]}) ~= count then return nil end
+    return count, (site + 5 + bytesU32({t[2], t[3], t[4], t[5]})) % 0x100000000
+end
+
+local function exceptionFilterCode(site, count, print)
+    local out = {}
+    local function emit(hex, dword)
+        for _, b in ipairs(hexBytes(hex)) do out[#out + 1] = b end
+        if dword then for _, b in ipairs(u32bytes(dword)) do out[#out + 1] = b end end
+    end
+    emit("E8 11 00 00 00")        -- call shown           ; the warning, through the check
+    emit("83 C4 14")              -- add  esp, 14h        ; its five args, as stock
+                                  -- +8 (the entry's jump when there is no chat):
+    emit("FF 05", count)          -- inc  dword [count]
+    emit("B8 01 00 00 00")        -- mov  eax, 1          ; EXCEPTION_EXECUTE_HANDLER, always
+    emit("C2 0C 00")              -- ret  0Ch
+                                  -- shown:
+    emit("83 3D", count)          -- cmp  dword [count], 10
+    emit("0A")
+    emit("73 05")                 -- jae  done
+    emit("E9", print - (site + 0x24))   -- jmp print     ; returns to the add esp
+                                  -- done:
+    emit("C3")                    -- ret
+    return out
+end
+
+pcall(ffi.cdef, [[ size_t VirtualQuery(const void*, void*, size_t); ]])
+
+-- True when [va, va + size) is committed and readable: R1/R2's packed sections
+-- can be unmapped by now, and a fault in ffi.string is not a Lua error.
+local function readable(va, size)
+    local mbi = ffi.new("uint32_t[7]")          -- MEMORY_BASIC_INFORMATION
+    local at, stop = va, va + size
+    while at < stop do
+        if ffi.C.VirtualQuery(ffi.cast("const void*", at), mbi, 28) == 0 then return false end
+        local protect = tonumber(mbi[5])
+        if tonumber(mbi[4]) ~= 0x1000 or protect % 0x200 >= 0x100 or protect == 0x01 or protect == 0 then
+            return false                        -- not MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS
+        end
+        at = tonumber(mbi[0]) + tonumber(mbi[3])   -- BaseAddress + RegionSize
+    end
+    return true
+end
+
+-- samp.dll's mapped sections: {va, size, code}.
+local function moduleSections(base)
+    local nt = base + readU32(base + 0x3C)
+    local count = readU8(nt + 6) + readU8(nt + 7) * 0x100
+    local first = nt + 24 + readU8(nt + 20) + readU8(nt + 21) * 0x100
+    local out = {}
+    for i = 0, count - 1 do
+        local s = first + i * 40
+        local size, rva, flags = readU32(s + 8), readU32(s + 12), readU32(s + 36)
+        if size == 0 then size = readU32(s + 16) end
+        if size > 0 and readable(base + rva, size) then
+            out[#out + 1] = {va = base + rva, size = size, code = flags % 0x40 >= 0x20}   -- IMAGE_SCN_CNT_CODE
+        end
+    end
+    return out
+end
+
+-- The first `needle` in the mapped sections of that kind, as a va.
+local function findInSections(sections, code, needle)
+    for _, s in ipairs(sections) do
+        if s.code == code then
+            local at = ffi.string(ffi.cast("const char*", s.va), s.size):find(needle, 1, true)
+            if at then return s.va + at - 1 end
+        end
+    end
+end
+
+-- The warning call: the push of the "Warning(%s)" format, then `push eax`. Its
+-- bytes are not read here, so another mod's patch there is still found.
+local function locateExceptionFilter(base)
+    local ok, sections = pcall(moduleSections, base)
+    if not ok then return nil, "samp.dll's sections are unreadable" end
+    local s = findInSections(sections, false, EF_FORMAT)
+    if not s then return nil, "its warning string is not in samp.dll" end
+    local push = findInSections(sections, true, string.char(0x68, unpack(u32bytes(s))))
+    if not push then return nil, "nothing pushes its warning string" end
+    if readU8(push + 5) ~= 0x50 then return nil, "no `push eax` after the string's push" end
+    return push + 6
+end
+
+function fixExceptionFilter()
+    local base = getModuleHandle("samp.dll")
+    if not base or base == 0 then
+        log("[fixes] the exception filter fix is not supported: samp.dll is not loaded")
+        return false
+    end
+    local site, why = locateExceptionFilter(base)
+    if not site then
+        log("[fixes] the exception filter fix is not supported: " .. why)
+        return false
+    end
+    local t = readBytes(site, EF_SIZE)
+    if not t then
+        log(string.format("[fixes] refusing the exception filter fix: 0x%X is unreadable", site))
+        return false
+    end
+    local rva = site - base
+
+    if bytesEqual({unpack(t, 1, 5)}, hexBytes("E8 11 00 00 00")) and t[9] == 0xFF and t[10] == 0x05 then
+        local count = bytesU32({t[11], t[12], t[13], t[14]})
+        exceptionFilter = {count = count, seen = readU32(count)}
+        log(string.format("[fixes] SA-MP's exception filter: already patched (0x%X, %d exceptions swallowed so far)",
+            site, exceptionFilter.seen), "info")
+        return true
+    end
+
+    local count, print = efStock(site, t)
+    if not count then
+        -- the anticrashers' own patches
+        local nop5 = nops(5)
+        local owner
+        if bytesEqual({unpack(t, 1, 5)}, nop5) and bytesEqual({unpack(t, 14, 18)}, nop5) then
+            owner = "an anticrasher (Export's: no warnings, every exception swallowed)"
+        elseif bytesEqual({unpack(t, 9, 34)}, nops(26)) then
+            owner = "DarkP1xel's anticrasher (R4), whose filter returns whatever the warning left in eax"
+        elseif bytesEqual({unpack(t, 1, 4)}, nops(4)) and t[5] ~= 0x90 then
+            owner = "the 0.3.DL anticrasher ASI, which NOPs 4 of the call's 5 bytes: the first exception " ..
+                "crashes the game - remove it"
+        end
+        if owner then
+            exceptionFilter = {owner = owner}
+            log(string.format("[fixes] SA-MP's exception filter (rva 0x%X) is patched by %s; standing down", rva, owner),
+                owner:find("remove it", 1, true) and "warn" or "info")
+            return false
+        end
+        log(string.format("[fixes] refusing the exception filter fix: 0x%X (rva 0x%X) holds %s", site, rva, bytesToHex(t)))
+        return false
+    end
+
+    writeCode(site, exceptionFilterCode(site, count, print))
+    local verified = bytesEqual(readBytes(site, EF_SIZE), exceptionFilterCode(site, count, print))
+    if verified then exceptionFilter = {count = count, seen = readU32(count)} end
+    log(string.format("[fixes] SA-MP's exception filter at 0x%X (rva 0x%X): every exception is swallowed, the first %d " ..
+        "still print -- %s", site, rva, EF_SHOWN, verified and "tail rewritten" or "WRITE DID NOT STICK"),
+        verified and "info" or "warn")
+    return verified
+end
+
+--------------------------------------------------------------------------------
+-- SA-MP's frame cap (samp.dll)
+--------------------------------------------------------------------------------
+-- autofps's port of crashes.asi (disableFPSLock + FPSStrafeHook), carried here
+-- too. SA-MP's frame limiter sleeps to ~100 fps and, every 250 ms, writes
+-- 50/fps over CTimer::ms_fTimeStep. A 7-byte jmp at +0Ch goes to a stub that
+-- reads GTA's Frame Limiter setting (0xBA6794): off -> +15h, the init arm (no
+-- measuring, no timestep write, no sleep); on -> +11h, stock. Its compare's
+-- flags drive the `jne` at +13h, so the stub keeps them. The ms_fTimeStep
+-- store (+1Ah) and the default sleep (+182h) are NOPed, and SA-MP's Sleep(1)
+-- in GTA's limiter spin becomes Sleep(0). With the in-game Frame Limiter on,
+-- nothing changes. A hook already at +0Ch (autofps, crashes.asi) is left to
+-- its owner: the other writes are the same bytes either way. Option
+-- "framecaps"; GTA's own 14 ms delay is the gamePatches entry beside it.
+local FC_RVA = {                   -- verified against R1, R3-1, R5 and DL (autofps's table)
+    limiter = {DLR1 = 0xA1A30, R1 = 0x9D170, R3 = 0xA14E0, R5 = 0xA1C10},
+    sleep   = {DLR1 = 0xA2201, R1 = 0x9D8F1, R3 = 0xA1CB1, R5 = 0xA23E1},   -- the push's imm8
+}
+local FC_PREF     = 0xBA6794       -- CMenuManager::m_bFrameLimiter
+local FC_HOOK     = 0x0C           -- mov eax,[lastRecalc] / test eax,eax: 7 bytes
+local FC_ON       = 0x11
+local FC_OFF      = 0x15
+local FC_TIMESTEP = 0x1A           -- mov ds:0xB7CB5C, eax
+local FC_SLEEP    = 0x182          -- push edx / call [Sleep]
+local FC_SHAPE = {
+    {0x00, "51 56 57 8B F9"}, {FC_HOOK, "A1"}, {FC_ON, "85 C0 75 2C"},
+    {FC_OFF, "B8 00 00 80 3F"}, {FC_TIMESTEP, "A3 5C CB B7 00"},
+}
+
+local frameCap                     -- {stub = va, saved = bytes} once ours, {owner = text} if another's
+
+local function frameCapSites()
+    local base = getModuleHandle("samp.dll")
+    if not base or base == 0 then return nil, nil, "samp.dll is not loaded" end
+    local version = getSampVersion()
+    local rva, sleep = FC_RVA.limiter[version], FC_RVA.sleep[version]
+    if not rva then return nil, nil, "no offsets for SAMP " .. version end
+    return base + rva, base + sleep
+end
+
+local function frameCapStubCode(stub, va)
+    local out = {}
+    local function emit(hex, dword)
+        for _, b in ipairs(hexBytes(hex)) do out[#out + 1] = b end
+        if dword then for _, b in ipairs(u32bytes(dword)) do out[#out + 1] = b end end
+    end
+    emit("80 3D", FC_PREF); emit("00")     -- cmp byte [frame limiter setting], 0
+    emit("75 05")                          -- jne on
+    emit("E9", va + FC_OFF - (stub + 14))  -- jmp the init arm: uncapped
+    emit("E9", va + FC_ON - (stub + 19))   -- on: jmp the stock test
+    return out
+end
+
+-- The two writes that are the same whoever hooks: the default sleep, SA-MP's
+-- Sleep(1). -> a word for the log
+local function frameCapSleeps(va, sleepVa)
+    local said = {}
+    local s = readBytes(va + FC_SLEEP, 7)
+    if bytesEqual(s, nops(7)) or (s and s[1] == 0x00 and s[2] == 0xFF and s[3] == 0x90) then
+        said[#said + 1] = "sleep already off"
+    elseif s and s[1] == 0x52 and s[2] == 0xFF and s[3] == 0x15 then
+        writeCode(va + FC_SLEEP, nops(7)); said[#said + 1] = "sleep NOPed"
+    else
+        said[#said + 1] = "sleep not stock (" .. bytesToHex(s) .. "), left"
+    end
+    local imm = readU8(sleepVa)
+    if imm == 0 then said[#said + 1] = "Sleep(0) already"
+    elseif imm == 1 and readU8(sleepVa - 1) == 0x6A then writeCode(sleepVa, {0}); said[#said + 1] = "Sleep(1) -> Sleep(0)"
+    else said[#said + 1] = ("the frame sleep is %02X, left"):format(imm) end
+    return table.concat(said, ", ")
+end
+
+function fixFrameCap()
+    local va, sleepVa, why = frameCapSites()
+    if not va then
+        log("[fixes] the SAMP frame cap removal is not supported: " .. why)
+        return false
+    end
+    local head = readBytes(va + FC_HOOK, 5)
+    if head and head[1] == 0xE9 then
+        local target = (va + FC_HOOK + 5 + bytesU32({head[2], head[3], head[4], head[5]})) % 0x100000000
+        if frameCap and frameCap.stub == target then return true end
+        local okStub = readBytes(target, 2)
+        if okStub and okStub[1] == 0x80 and okStub[2] == 0x3D and not moduleAt(target) then
+            -- a dispatch stub of this shape: ours from an earlier run, or autofps's
+            frameCap = {owner = "a frame-cap stub at " .. string.format("0x%X", target) .. " (autofps, or an earlier run)"}
+        else
+            frameCap = {owner = moduleAt(target) or string.format("code at 0x%X", target)}
+        end
+        log(string.format("[fixes] SAMP frame cap: +0x%X is hooked by %s; standing down (%s)",
+            FC_HOOK, frameCap.owner, frameCapSleeps(va, sleepVa)), "info")
+        return false
+    end
+    for _, part in ipairs(FC_SHAPE) do
+        local want = hexBytes(part[2])
+        if not bytesEqual(readBytes(va + part[1], #want), want) then
+            log(string.format("[fixes] refusing the SAMP frame cap removal: +0x%X is %s, expected %s",
+                part[1], bytesToHex(readBytes(va + part[1], #want)), part[2]))
+            return false
+        end
+    end
+    local p = ffi.C.VirtualAlloc(nil, 0x20, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if p == nil then
+        log("[fixes] refusing the SAMP frame cap removal: VirtualAlloc failed")
+        return false
+    end
+    local stub = tonumber(ffi.cast("uintptr_t", p))
+    poke(stub, frameCapStubCode(stub, va))
+    local saved = {hook = readBytes(va + FC_HOOK, 7), timestep = readBytes(va + FC_TIMESTEP, 5)}
+    writeCode(va + FC_HOOK, {0xE9, unpack(u32bytes(stub - (va + FC_HOOK + 5)))})
+    writeCode(va + FC_HOOK + 5, nops(2))
+    writeCode(va + FC_TIMESTEP, nops(5))
+    local sleeps = frameCapSleeps(va, sleepVa)
+    local verified = readU8(va + FC_HOOK) == 0xE9 and bytesEqual(readBytes(va + FC_TIMESTEP, 5), nops(5))
+    if verified then frameCap = {stub = stub, saved = saved} end
+    log(string.format("[fixes] SAMP frame cap on SAMP %s: 0x%X (rva 0x%X) dispatches on the Frame Limiter setting " ..
+        "(stub 0x%X), timestep store NOPed, %s -- %s", getSampVersion(), va, va - getModuleHandle("samp.dll"), stub,
+        sleeps, verified and "uncapped while the in-game Frame Limiter is off" or "WRITE DID NOT STICK"),
+        verified and "info" or "warn")
+    return verified
+end
+
+-- Off: our hook and timestep NOPs go back (the sleeps stay off until a restart).
+function stopFrameCap()
+    if not frameCap or not frameCap.stub then return false end
+    local va = frameCapSites()
+    if not va then return false end
+    writeCode(va + FC_HOOK, frameCap.saved.hook)
+    writeCode(va + FC_TIMESTEP, frameCap.saved.timestep)
+    frameCap = nil
+    return true
+end
+
+-- A line when SA-MP has swallowed more exceptions; from the main loop.
+local function exceptionFilterTick()
+    if not exceptionFilter or not exceptionFilter.count then return end
+    local n = readU32(exceptionFilter.count)
+    if n == exceptionFilter.seen then return end
+    exceptionFilter.seen = n
+    log(string.format("[fixes] SA-MP has swallowed %d exception(s) so far (stock crashes on the 11th); the first %d " ..
+        "printed as warnings in chat", n, EF_SHOWN), "warn")
 end
 
 --------------------------------------------------------------------------------
@@ -1124,26 +1738,26 @@ function fixAnimationWipe()
         local h = readBytes(block, 16)
         if h and bytesU32({h[1], h[2], h[3], h[4]}) == AW_MAGIC then
             animWipe = {told = block + 4}
-            print(string.format("[fixes] animation wipes: already patched (block 0x%X, %d task callbacks run so far)",
+            log(string.format("[fixes] animation wipes: already patched (block 0x%X, %d task callbacks run so far)",
                 block, readU32(block + 4)))
             return true
         end
         animWipe = {owner = hookedBy(AW_VA)}
-        print(string.format("[fixes] animation wipes: RpAnimBlendClumpRemoveAllAssociations (0x%X) is replaced by %s; " ..
+        log(string.format("[fixes] animation wipes: RpAnimBlendClumpRemoveAllAssociations (0x%X) is replaced by %s; " ..
             "standing down", AW_VA, animWipe.owner))
         return false
     end
 
     local found = readBytes(AW_VA, #AW_STOCK)
     if not bytesEqual(found, AW_STOCK) then
-        print(string.format("[fixes] refusing the animation-wipe fix: 0x%X holds %s, expected %s",
+        log(string.format("[fixes] refusing the animation-wipe fix: 0x%X holds %s, expected %s",
             AW_VA, bytesToHex(found), bytesToHex(AW_STOCK)))
         return false
     end
 
     local p = ffi.C.VirtualAlloc(nil, AW_SIZE, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
     if p == nil then
-        print(string.format("[fixes] refusing the animation-wipe fix: VirtualAlloc of %d bytes failed", AW_SIZE))
+        log(string.format("[fixes] refusing the animation-wipe fix: VirtualAlloc of %d bytes failed", AW_SIZE))
         return false
     end
     local block = tonumber(ffi.cast("uintptr_t", p))
@@ -1162,7 +1776,7 @@ function fixAnimationWipe()
     writeCode(AW_VA, {0xE9, unpack(u32bytes(block + AW_CODE - (AW_VA + 5)))})
     local verified = readU8(AW_VA) == 0xE9 and (AW_VA + 5 + readU32(AW_VA + 1)) % 0x100000000 == block + AW_CODE
     if verified then animWipe = {told = block + 4} end
-    print(string.format("[fixes] animation wipes: RpAnimBlendClumpRemoveAllAssociations now runs the game's %d " ..
+    log(string.format("[fixes] animation wipes: RpAnimBlendClumpRemoveAllAssociations now runs the game's %d " ..
         "task delete callbacks before deleting (block 0x%X) -- %s",
         #AW_CALLBACKS, block, verified and "jmp written" or "WRITE DID NOT STICK"))
     return verified
@@ -1226,24 +1840,24 @@ function fixReferencePool()
         local block = target - REF_CODE
         if readU32(block) == REF_MAGIC then
             refPool = {ready = block + 4, used = block + 8, made = block + 12}
-            print(string.format("[fixes] entity references: already patched (block 0x%X, %d reserves used)",
+            log(string.format("[fixes] entity references: already patched (block 0x%X, %d reserves used)",
                 block, readU32(block + 8)))
             return true
         end
         refPool = {owner = moduleAt(target) or string.format("code at 0x%X", target)}
-        print(string.format("[fixes] entity references: the free-list read at 0x%X is hooked by %s; standing down",
+        log(string.format("[fixes] entity references: the free-list read at 0x%X is hooked by %s; standing down",
             REF_VA, refPool.owner))
         return false
     end
     if not bytesEqual(head, REF_STOCK) then
-        print(string.format("[fixes] refusing the entity-reference fix: 0x%X holds %s, expected %s",
+        log(string.format("[fixes] refusing the entity-reference fix: 0x%X holds %s, expected %s",
             REF_VA, bytesToHex(head), bytesToHex(REF_STOCK)))
         return false
     end
 
     local p = ffi.C.VirtualAlloc(nil, REF_SIZE, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
     if p == nil then
-        print(string.format("[fixes] refusing the entity-reference fix: VirtualAlloc of %d bytes failed", REF_SIZE))
+        log(string.format("[fixes] refusing the entity-reference fix: VirtualAlloc of %d bytes failed", REF_SIZE))
         return false
     end
     local block = tonumber(ffi.cast("uintptr_t", p))
@@ -1257,7 +1871,7 @@ function fixReferencePool()
     writeCode(REF_VA, {0xE8, unpack(u32bytes(block + REF_CODE - (REF_VA + 5)))})
     local verified = readU8(REF_VA) == 0xE8 and (REF_VA + 5 + readU32(REF_VA + 1)) % 0x100000000 == block + REF_CODE
     if verified then refPool = {ready = block + 4, used = block + 8, made = block + 12} end
-    print(string.format("[fixes] entity references: past the game's 3000, reserves of %d (up to %d) " ..
+    log(string.format("[fixes] entity references: past the game's 3000, reserves of %d (up to %d) " ..
         "(block 0x%X) -- %s", REF_PER, REF_MAX, block, verified and "call written" or "WRITE DID NOT STICK"))
     return verified
 end
@@ -1351,30 +1965,30 @@ function fixTextCache()
     local lib, why = loadTextCache()
     if not lib then
         textCacheState = {why = why}
-        print("[fixes] refusing the text cache: " .. why)
+        log("[fixes] refusing the text cache: " .. why)
         return false
     end
     local base = getModuleHandle("d3dx9_25.dll")
     if not base or base == 0 then
         textCacheState = {why = "d3dx9_25.dll is not loaded"}
-        print("[fixes] text cache: d3dx9_25.dll is not loaded, nothing to cache")
+        log("[fixes] text cache: d3dx9_25.dll is not loaded, nothing to cache")
         return false
     end
     local foreign = ffi.new("uintptr_t[1]")
     local result = lib.TextCache_Install(ffi.cast("void*", base), foreign)
     if result == 1 then
         textCacheState = {installed = true}
-        print("[fixes] text cache: d3dx9_25's DrawText now replays layouts it has drawn before")
+        log("[fixes] text cache: d3dx9_25's DrawText now replays layouts it has drawn before")
         return true
     end
     if result == 2 then
         local at = tonumber(foreign[0])
         textCacheState = {owner = moduleAt(at) or string.format("code at 0x%X", at)}
-        print(string.format("[fixes] text cache: d3dx9_25's font is hooked by %s; standing down", textCacheState.owner))
+        log(string.format("[fixes] text cache: d3dx9_25's font is hooked by %s; standing down", textCacheState.owner))
         return false
     end
     textCacheState = {why = string.format("d3dx9_25.dll is not build 0x%08X", D3DX_BUILD)}
-    print("[fixes] refusing the text cache: " .. textCacheState.why)
+    log("[fixes] refusing the text cache: " .. textCacheState.why)
     return false
 end
 
@@ -1395,6 +2009,161 @@ local function textCacheStats()
     local st = ffi.new("FxTextCacheStats")
     textCacheLib.TextCache_Stats(st)
     return st
+end
+
+--------------------------------------------------------------------------------
+-- Crash fixes (lib/fixes/crashfix.dll)
+--------------------------------------------------------------------------------
+-- MTA:SA's crash-fix hooks (GPLv3), as gtasa_crashfix (crashes.asi 2.x by
+-- Whitetigerswt, GPLv3) copied them and as MTA has them now, built as a DLL
+-- from lib/fixes/native/crashfix.c. Loaded once and never freed; each hook is
+-- installed by number, so one another mod already hooks (crashes.asi while it
+-- is installed) stands down alone, and every one logs a line. Option
+-- "crashfix"; the hooks in CRASHFIX_OPTION only with their own option too.
+-- docs/MEMORY_FIXES.md 30, 34.
+pcall(ffi.cdef, [[
+    int CrashFix_Count(void);
+    const char* CrashFix_Key(int i);
+    const char* CrashFix_Name(int i);
+    uint32_t CrashFix_Address(int i);
+    int CrashFix_SetSampSite(uint32_t va);
+    void CrashFix_SetShadows(int volumetric);
+    int CrashFix_Install(int i, uint32_t* found);
+    int CrashFix_Uninstall(int i);
+    int CrashFix_Installed(int i);
+    uint32_t CrashFix_Averted(int i);
+]])
+local CRASHFIX_DLL = getWorkingDirectory() .. "\\lib\\fixes\\crashfix.dll"
+local CRASHFIX_SAMP = string.char(0x74, 0x12, 0x8B, 0x50, 0x10, 0x8B, 0x02)   -- je / mov edx,[eax+10h] / mov eax,[edx]
+
+local crashFixLib
+local crashFixes = {}              -- key -> {name, va, state, why, seen}, in DLL order
+
+local function loadCrashFix()
+    if crashFixLib then return crashFixLib end
+    local ok, handle = pcall(function() return tonumber(ffi.cast("uintptr_t", ffi.C.LoadLibraryA(CRASHFIX_DLL))) end)
+    if not ok or not handle or handle == 0 then return nil, "cannot load " .. CRASHFIX_DLL end
+    local okLib, lib = pcall(ffi.load, CRASHFIX_DLL)
+    if not okLib then return nil, tostring(lib) end
+    crashFixLib = lib
+    return lib
+end
+
+-- Off unless their option is on: 19 breaks SkyGFX; MTA no longer installs 12 and 17.
+local CRASHFIX_OPTION = {misc19 = "frameclone", misc12 = "oldcrashfixes", misc17 = "oldcrashfixes"}
+
+local function crashFixWanted(key)
+    if options.crashfix == false then return false end
+    if CRASHFIX_OPTION[key] then return options[CRASHFIX_OPTION[key]] == true end
+    return true
+end
+
+-- part: "game" (gta_sa.exe, from the start) or "samp" (samp.dll's helper,
+-- once SA-MP is up). -> hooks installed or removed now.
+function fixCrashes(part)
+    local lib, why = loadCrashFix()
+    if not lib then
+        log("[fixes] refusing the crash fixes: " .. why, "warn")
+        return 0
+    end
+    lib.CrashFix_SetShadows(options.volshadows and 1 or 0)
+    local changed = 0
+    for i = 0, lib.CrashFix_Count() - 1 do
+        local key = ffi.string(lib.CrashFix_Key(i))
+        if (key == "samp") == (part == "samp") then
+            local entry = crashFixes[key] or {name = ffi.string(lib.CrashFix_Name(i)), seen = 0}
+            crashFixes[key] = entry
+            if part == "samp" and lib.CrashFix_Installed(i) == 0 then
+                local base = getModuleHandle("samp.dll")
+                local site = base and base ~= 0 and findInSections(moduleSections(base), true, CRASHFIX_SAMP)
+                if site then lib.CrashFix_SetSampSite(site) end
+            end
+            entry.va = tonumber(lib.CrashFix_Address(i))
+            if not crashFixWanted(key) then
+                if lib.CrashFix_Installed(i) == 1 and lib.CrashFix_Uninstall(i) == 1 then
+                    changed = changed + 1
+                    log(string.format("[fixes] crash fix %s (%s): removed", key, entry.name), "info")
+                end
+                entry.state, entry.why = "off", nil
+            elseif entry.va == 0 then
+                entry.state, entry.why = "refused", "its pattern is not in samp.dll"
+                log(string.format("[fixes] refusing crash fix %s (%s): %s", key, entry.name, entry.why), "info")
+            else
+                local found = ffi.new("uint32_t[1]")
+                local r = lib.CrashFix_Install(i, found)
+                local at = tonumber(found[0])
+                if r == 1 then
+                    changed = changed + 1
+                    entry.state, entry.why = "ok", nil
+                    log(string.format("[fixes] 0x%X crash fix %s (%s): hooked", entry.va, key, entry.name), "info")
+                elseif r == 2 then
+                    entry.state, entry.why = "already", nil
+                    log(string.format("[fixes] 0x%X crash fix %s (%s): already hooked", entry.va, key, entry.name), "info")
+                elseif r == 3 then
+                    entry.state, entry.why = "conflict", moduleAt(at) or string.format("code at 0x%X", at)
+                    log(string.format("[fixes] 0x%X crash fix %s (%s) is owned by %s; standing down",
+                        entry.va, key, entry.name, entry.why), "info")
+                else
+                    entry.state = "refused"
+                    entry.why = r == 0 and ("found " .. bytesToHex(u32bytes(at)) .. " ...") or "unreadable"
+                    log(string.format("[fixes] refusing 0x%X crash fix %s (%s): %s", entry.va, key, entry.name, entry.why),
+                        "warn")
+                end
+            end
+        end
+    end
+    return changed
+end
+
+function setCrashFixShadows(on)
+    if not crashFixLib then return false end
+    crashFixLib.CrashFix_SetShadows(on and 1 or 0)
+    return true
+end
+
+-- -> in place, owned elsewhere, refused, off
+local function crashFixCounts()
+    local n = {ok = 0, owned = 0, refused = 0, off = 0}
+    for _, e in pairs(crashFixes) do
+        if e.state == "ok" or e.state == "already" then n.ok = n.ok + 1
+        elseif e.state == "conflict" then n.owned = n.owned + 1
+        elseif e.state == "off" then n.off = n.off + 1
+        elseif e.state then n.refused = n.refused + 1 end
+    end
+    return n
+end
+
+-- The hooks' state as one of otherFixes' ("in place", "left to X", "off ...",
+-- "not in place").
+function crashFixState()
+    if not crashFixLib then return options.crashfix == false and "off (option crashfix)" or "not in place" end
+    local n, owners, seen = crashFixCounts(), {}, {}
+    for _, e in pairs(crashFixes) do
+        if e.state == "conflict" and not seen[e.why] then seen[e.why] = true; owners[#owners + 1] = e.why end
+    end
+    table.sort(owners)
+    if n.refused > 0 then return "not in place" end
+    if n.owned > 0 then return "left to " .. table.concat(owners, ", ") .. (" (%d of %d hooks)"):format(n.owned, n.ok + n.owned) end
+    if n.ok == 0 then return "off (option crashfix)" end
+    return "in place"
+end
+
+-- A line for each hook that averted crashes since its last line, at most one
+-- a minute per hook (some fire every frame on a broken model); from the main
+-- loop.
+local CRASHFIX_QUIET = 60
+local function crashFixTick(now)
+    if not crashFixLib then return end
+    now = now or os.clock()
+    for i = 0, crashFixLib.CrashFix_Count() - 1 do
+        local e = crashFixes[ffi.string(crashFixLib.CrashFix_Key(i))]
+        local n = tonumber(crashFixLib.CrashFix_Averted(i))
+        if e and n ~= e.seen and (not e.said or now - e.said >= CRASHFIX_QUIET) then
+            e.seen, e.said = n, now
+            log(string.format("[fixes] crash fix %s (%s) averted a crash (%d so far)",
+                ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "warn")
+        end
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -1430,13 +2199,13 @@ end
 function pinAnimBlocks()
     local idBase = animBlockModelIdBase()
     if not idBase then
-        print("[fixes] not pinning anim blocks: 0x48C36B is not `lea eax,[edi+imm32]` any more")
+        log("[fixes] not pinning anim blocks: 0x48C36B is not `lea eax,[edi+imm32]` any more")
         return false
     end
 
     local count = memory.read(0xB4EA30, 4, true)   -- CAnimManager::ms_numAnimBlocks
     if not count or count < 1 or count > NUM_ANIM_BLOCKS then
-        print(string.format("[fixes] not pinning anim blocks: ms_numAnimBlocks is %s", tostring(count)))
+        log(string.format("[fixes] not pinning anim blocks: ms_numAnimBlocks is %s", tostring(count)))
         return false
     end
 
@@ -1447,7 +2216,7 @@ function pinAnimBlocks()
     for id = 1, count - 1 do
         local refs = animBlockRefCount(id)
         if refs == nil then
-            print(string.format("[fixes] not pinning anim blocks: cannot read RefCnt of block %d", id))
+            log(string.format("[fixes] not pinning anim blocks: cannot read RefCnt of block %d", id))
             return false
         elseif refs > 0 then
             held = held + 1          -- already referenced, do not stack another one
@@ -1459,26 +2228,248 @@ function pinAnimBlocks()
     end
 
     if pinned > 0 then loadAllModelsNow() end
-    print(string.format("[fixes] anim blocks (base id %d): %d pinned, %d already referenced",
+    log(string.format("[fixes] anim blocks (base id %d): %d pinned, %d already referenced",
         idBase, pinned, held))
     return true
+end
+
+--------------------------------------------------------------------------------
+-- Server data SA-MP trusts (RPCs)
+--------------------------------------------------------------------------------
+-- Sizes SA-MP's handlers use unchecked: the RPC is dropped before it reaches
+-- them, or a dialog's list lines are cut. The checks are MiTurboFix's (public
+-- domain, github.com/povargek/MiTurboFix); the menu is read in SA-MP's own
+-- layout, where the enabled flags are 4-byte BOOLs. Needs SAMPFUNCS, which
+-- raises onReceiveRpc.
+local RPC_SHOW_DIALOG, RPC_INIT_MENU, RPC_APPLY_ANIM, RPC_APPLY_ACTOR_ANIM = 61, 76, 86, 173
+local ANIM_LIB_MAX, ANIM_NAME_MAX = 15, 24          -- an IFP block name, an animation name
+local MENU_MAX, MENU_ITEMS, MENU_LINE = 128, 12, 32
+local DIALOG_LINE_MAX = 128
+local DIALOG_TABLIST = {[4] = true, [5] = true}     -- tablist, tablist with headers: cut per cell
+local DIALOG_LIST = {[2] = true, [4] = true, [5] = true}
+local RPC_LOGGED = 5                                -- lines logged per kind; the rest are counted
+
+local rpcCounts = {anim = 0, menu = 0, dialog = 0}
+local RPC_KIND = {[RPC_APPLY_ANIM] = "anim", [RPC_APPLY_ACTOR_ANIM] = "anim",
+                  [RPC_INIT_MENU] = "menu", [RPC_SHOW_DIALOG] = "dialog"}
+
+local function skipBytes(bs, n) if n > 0 then raknetBitStreamIgnoreBits(bs, n * 8) end end
+
+-- nil, or what is wrong with the animation's names
+local function checkAnimation(bs)
+    raknetBitStreamIgnoreBits(bs, 16)                       -- player or actor id
+    local lib = raknetBitStreamReadInt8(bs)
+    if lib < 1 or lib > ANIM_LIB_MAX then return ("a library name of %d bytes"):format(lib) end
+    skipBytes(bs, lib)
+    local name = raknetBitStreamReadInt8(bs)
+    if name < 1 or name > ANIM_NAME_MAX then return ("an animation name of %d bytes"):format(name) end
+end
+
+-- a 32-byte menu line holding its terminator
+local function menuLineOk(bs)
+    local terminated = false
+    for _ = 1, MENU_LINE do
+        if raknetBitStreamReadInt8(bs) == 0 then terminated = true end
+    end
+    return terminated
+end
+
+-- nil, or what is wrong with the menu
+local function checkMenu(bs)
+    local id = raknetBitStreamReadInt8(bs)
+    if id >= MENU_MAX then return ("menu id %d"):format(id) end
+    local two = raknetBitStreamReadInt32(bs)
+    if two ~= 0 and two ~= 1 then return ("a column flag of %d"):format(two) end
+    if not menuLineOk(bs) then return "an unterminated title" end
+    skipBytes(bs, 4 * (3 + two))                            -- x, y, the column widths
+    skipBytes(bs, 4 * (1 + MENU_ITEMS))                     -- enabled, and each row's
+    for column = 1, 1 + two do
+        if not menuLineOk(bs) then return ("an unterminated header in column %d"):format(column) end
+        local rows = raknetBitStreamReadInt8(bs)
+        if rows > MENU_ITEMS then return ("%d rows in column %d"):format(rows, column) end
+        for row = 1, rows do
+            if not menuLineOk(bs) then return ("an unterminated row %d in column %d"):format(row, column) end
+        end
+    end
+end
+
+-- Cuts a list dialog's long lines (a tablist's long cells) in place. -> how
+-- many were cut, and the longest, or nil.
+local function cutDialogLines(bs)
+    raknetBitStreamIgnoreBits(bs, 16)                       -- dialog id
+    local style = raknetBitStreamReadInt8(bs)
+    if not DIALOG_LIST[style] then return nil end
+    for _ = 1, 3 do skipBytes(bs, raknetBitStreamReadInt8(bs)) end   -- title, two buttons
+    local at = raknetBitStreamGetReadOffset(bs)
+    local text = raknetBitStreamDecodeString(bs, 4096)
+    local sep = DIALOG_TABLIST[style] and "\t" or "\n"
+    local cut, longest, parts = 0, 0, {}
+    for part in (text .. sep):gmatch("(.-)" .. sep) do
+        if sep == "\t" then                                 -- a cell may end a line
+            local cells = {}
+            for cell in (part .. "\n"):gmatch("(.-)\n") do
+                if #cell > DIALOG_LINE_MAX then
+                    cut, longest = cut + 1, math.max(longest, #cell)
+                    cell = cell:sub(1, DIALOG_LINE_MAX)
+                end
+                cells[#cells + 1] = cell
+            end
+            part = table.concat(cells, "\n")
+        elseif #part > DIALOG_LINE_MAX then
+            cut, longest = cut + 1, math.max(longest, #part)
+            part = part:sub(1, DIALOG_LINE_MAX)
+        end
+        parts[#parts + 1] = part
+    end
+    if cut == 0 then return nil end
+    raknetBitStreamSetWriteOffset(bs, at)
+    raknetBitStreamEncodeString(bs, table.concat(parts, sep))
+    return cut, longest
+end
+
+local function noteRpc(kind, text)
+    rpcCounts[kind] = rpcCounts[kind] + 1
+    if rpcCounts[kind] <= RPC_LOGGED then
+        log("[fixes] " .. text .. (rpcCounts[kind] == RPC_LOGGED and " (further ones are only counted)" or ""), "warn")
+    end
+end
+
+-- false drops the RPC
+local function screenRpc(id, bs)
+    if id == RPC_APPLY_ANIM or id == RPC_APPLY_ACTOR_ANIM then
+        local why = checkAnimation(bs)
+        if why then
+            noteRpc("anim", ("dropped a server %s animation with %s"):format(
+                id == RPC_APPLY_ANIM and "player" or "actor", why))
+            return false
+        end
+    elseif id == RPC_INIT_MENU then
+        local why = checkMenu(bs)
+        if why then
+            noteRpc("menu", "dropped a server menu with " .. why)
+            return false
+        end
+    elseif id == RPC_SHOW_DIALOG and options.dialoglines ~= false then
+        local cut, longest = cutDialogLines(bs)
+        if cut then
+            noteRpc("dialog", ("cut %d dialog line(s) to %d characters (the longest had %d)"):format(
+                cut, DIALOG_LINE_MAX, longest))
+        end
+    end
+    return true
+end
+
+function onReceiveRpc(id, bs)
+    if not RPC_KIND[id] then return end
+    local start = raknetBitStreamGetReadOffset(bs)
+    local ok, keep = pcall(screenRpc, id, bs)
+    raknetBitStreamSetReadOffset(bs, start)
+    if not ok then log("[fixes] RPC " .. id .. " check failed: " .. tostring(keep)) return end
+    if keep == false then return false end
 end
 
 local function say(text)
     sampAddChatMessage("{9ACD32}[fixes]{FFFFFF} " .. text, -1)
 end
 
---- /fixes - the options and their state; /fixes <option> on|off - switch one.
+-- The fixes that are not gamePatches entries, in the order main runs them:
+-- {name, state}, state "in place", "left to <mod>", "off (option <key>)" or
+-- "not in place".
+local otherFixes = {}
+
+local function noteFix(name, worked, owner)
+    otherFixes[#otherFixes + 1] = {name, worked and "in place" or owner and ("left to " .. owner) or "not in place"}
+end
+
+-- A gta_sa.exe patch's state, as /fixes patches shows it.
+local function patchState(p)
+    if not optionOn(p) then return "off (option " .. p.option .. ")" end
+    if p.state == "ok" then return "applied" end
+    if p.state == "already" then return "already set" end
+    if p.state == "conflict" then return "owned by " .. tostring(p.why) end
+    if p.state == "refused" then return "refused - " .. tostring(p.why) end
+    return "not applied yet"
+end
+
+local function patchCounts()
+    local n = {ok = 0, already = 0, conflict = 0, refused = 0, off = 0, pending = 0}
+    for _, p in ipairs(gamePatches) do
+        local key = not optionOn(p) and "off" or (n[p.state or ""] and p.state) or "pending"
+        n[key] = n[key] + 1
+    end
+    return n
+end
+
+local function patchSummary()
+    local n = patchCounts()
+    return ("gta_sa.exe patches: %d applied, %d already set, %d owned elsewhere, %d refused, %d off%s"):format(
+        n.ok, n.already, n.conflict, n.refused, n.off, n.pending > 0 and (", %d not yet"):format(n.pending) or "")
+end
+
+-- One line once every fix has run: all the patches and fixes, counted. A
+-- warning when a site was refused or a fix is not in place.
+function reportStartup()
+    local placed, owned, off, missing = 0, 0, 0, {}
+    for _, f in ipairs(otherFixes) do
+        if f[2] == "in place" then placed = placed + 1
+        elseif f[2]:find("^left to ") then owned = owned + 1
+        elseif f[2]:find("^off") then off = off + 1
+        else missing[#missing + 1] = f[1] end
+    end
+    local refused = patchCounts().refused
+    log(("[fixes] started - %s; other fixes: %d in place, %d left to other mods, %d off, %d not in place%s"):format(
+        patchSummary(), placed, owned, off, #missing,
+        #missing > 0 and (" (" .. table.concat(missing, ", ") .. ")") or ""),
+        (refused > 0 or #missing > 0) and "warn" or "info")
+end
+
+--- /fixes - the options and their state; /fixes patches - every patch;
+--- /fixes <option> on|off - switch one.
 function fixesCommand(params)
     local key, value = tostring(params or ""):lower():match("^%s*(%S*)%s*(%S*)")
+    if key == "patches" then
+        say(patchSummary())
+        local groups, order = {}, {}       -- a group is one line: its sites' states, counted
+        for _, p in ipairs(gamePatches) do
+            if p.group then
+                if not groups[p.group] then groups[p.group] = {n = 0}; order[#order + 1] = p.group end
+                local g, state = groups[p.group], patchState(p)
+                g.n = g.n + 1
+                g[state] = (g[state] or 0) + 1
+            else
+                say(("0x%X %s: %s"):format(p.va, p.name, patchState(p)))
+            end
+        end
+        for _, name in ipairs(order) do
+            local g, parts = groups[name], {}
+            for state, count in pairs(g) do
+                if state ~= "n" then parts[#parts + 1] = ("%d %s"):format(count, state) end
+            end
+            table.sort(parts)
+            say(("%s (%d sites): %s"):format(name, g.n, table.concat(parts, ", ")))
+        end
+        local cf = crashFixCounts()
+        say(("crash fixes (%d hooks): %d hooked, %d owned elsewhere, %d refused, %d off"):format(
+            cf.ok + cf.owned + cf.refused + cf.off, cf.ok, cf.owned, cf.refused, cf.off))
+        for _, f in ipairs(otherFixes) do say(("%s: %s"):format(f[1], f[2])) end
+        if #otherFixes == 0 then say("other fixes: not run yet") end
+        return
+    end
+    if OPTIONS[key] and value == "" then
+        say(("%s: %s - %s"):format(key, options[key] and "on" or "off", OPTIONS[key].label))
+        return
+    end
     if key == "" then
-        local names = {}
+        local names, line = {}, {}
         for name in pairs(OPTIONS) do names[#names + 1] = name end
         table.sort(names)
-        for _, name in ipairs(names) do
-            say(("%s: %s - %s"):format(name, options[name] and "on" or "off", OPTIONS[name].label))
+        for _, name in ipairs(names) do      -- a few to a line
+            line[#line + 1] = ("%s %s"):format(name, options[name] and "on" or "off")
+            if #line == 6 then say("options: " .. table.concat(line, ", ")); line = {} end
         end
-        say("/fixes <option> on|off switches one at once.")
+        if #line > 0 then say("options: " .. table.concat(line, ", ")) end
+        say("/fixes <option> says what one does; /fixes <option> on|off switches it at once.")
+        say(patchSummary() .. " - /fixes patches lists them")
         if removedBuildings and removedBuildings.owner then
             say(("removed buildings: left to %s, which replaces SA-MP's code"):format(removedBuildings.owner))
         elseif removedBuildings then
@@ -1500,6 +2491,24 @@ function fixesCommand(params)
             say(("entity references: %d of %d reserves of %d made, %d handed to the game"):format(
                 readU32(refPool.made), REF_MAX, REF_PER, readU32(refPool.used)))
         end
+        if rpcCounts.anim + rpcCounts.menu + rpcCounts.dialog > 0 then
+            say(("server data: %d animation(s) and %d menu(s) dropped, %d dialog(s) cut"):format(
+                rpcCounts.anim, rpcCounts.menu, rpcCounts.dialog))
+        end
+        if next(crashFixes) then
+            local cf, averted = crashFixCounts(), 0
+            if crashFixLib then
+                for i = 0, crashFixLib.CrashFix_Count() - 1 do averted = averted + tonumber(crashFixLib.CrashFix_Averted(i)) end
+            end
+            say(("crash fixes: %d hooked, %d left to other mods (%s); %d crash(es) averted this session"):format(
+                cf.ok, cf.owned, crashFixState(), averted))
+        end
+        if exceptionFilter and exceptionFilter.owner then
+            say("exception filter: left to " .. exceptionFilter.owner)
+        elseif exceptionFilter then
+            say(("exception filter: %d exception(s) swallowed this session (stock crashes on the 11th)"):format(
+                readU32(exceptionFilter.count)))
+        end
         if animWipe and animWipe.owner then
             say(("animation wipes: left to %s, which replaces the game's code"):format(animWipe.owner))
         elseif animWipe then
@@ -1509,8 +2518,8 @@ function fixesCommand(params)
         return
     end
     if not OPTIONS[key] or (value ~= "on" and value ~= "off") then
-        say("/fixes <option> on|off - options: " .. table.concat((function()
-            local t = {}; for name in pairs(OPTIONS) do t[#t + 1] = name end; return t end)(), ", "))
+        say("/fixes patches, or /fixes <option> on|off - options: " .. table.concat((function()
+            local t = {}; for name in pairs(OPTIONS) do t[#t + 1] = name end; table.sort(t); return t end)(), ", "))
         return
     end
     local changed, refused = setOption(key, value == "on")
@@ -1529,30 +2538,62 @@ function main()
     end
     reportGameInitState()
     applyGamePatches("early")
-    fixAnimationWipe()            -- gta_sa.exe code too: before any ped changes its skin
-    fixReferencePool()
+    local worked = fixAnimationWipe()            -- gta_sa.exe code too: before any ped changes its skin
+    noteFix("animation wipes", worked, animWipe and animWipe.owner)
+    worked = fixReferencePool()
+    noteFix("entity references", worked, refPool and refPool.owner)
+    fixCrashes("game")                           -- gta_sa.exe code, before the game runs much of it
 
     -- Past here we need the game and SA-MP actually initialised.
     while not isSampAvailable() do wait(0) end
 
     -- First: a server sends its removed buildings as soon as it accepts the
     -- connection.
-    fixRemovedBuildings()         -- samp.dll
-    if options.textcache then fixTextCache() else stopTextCache() end   -- d3dx9_25.dll, which samp.dll loads
+    worked = fixRemovedBuildings()               -- samp.dll
+    noteFix("removed buildings", worked, removedBuildings and removedBuildings.owner)
+    worked = fixExceptionFilter()
+    noteFix("exception filter", worked, exceptionFilter and exceptionFilter.owner)
+    if options.framecaps then
+        worked = fixFrameCap()
+        noteFix("SAMP frame cap", worked, frameCap and frameCap.owner)
+    else
+        otherFixes[#otherFixes + 1] = {"SAMP frame cap", "off (option framecaps)"}
+    end
+    fixCrashes("samp")
+    otherFixes[#otherFixes + 1] = {"crash fixes", crashFixState()}
+    if options.textcache then                    -- d3dx9_25.dll, which samp.dll loads
+        worked = fixTextCache()
+        noteFix("text cache", worked, textCacheState and textCacheState.owner)
+    else
+        stopTextCache()
+        otherFixes[#otherFixes + 1] = {"text cache", "off (option textcache)"}
+    end
 
     applyGamePatches("late")      -- data the game writes during CGame init
+    worked = isSampfuncsLoaded and isSampfuncsLoaded()
+    if worked then
+        log(("[fixes] server RPC checks on: animations (86, 173), menus (76), list dialog lines (61, %s)"):format(
+            options.dialoglines and "on" or "off: option dialoglines"), "info")
+    else
+        log("[fixes] server RPC checks are off: they need SAMPFUNCS, which is not loaded", "warn")
+    end
+    noteFix("server RPC checks", worked)
     sampRegisterChatCommand("fixes", fixesCommand)
 
-    disableF1KeyAndDialog()       -- samp.dll
-    fixSmokingAnimation()
+    noteFix("F1 help dialog off", disableF1KeyAndDialog())   -- samp.dll
+    noteFix("smoking animation", fixSmokingAnimation())
     --forceRadarVisible(true)
     --blankDebugEntityLabels()
     if sigscanOk then pcall(sigscan.flush) end   -- remember the offsets for next launch
 
-    pinAnimBlocks()               -- needs the streamer and CAnimManager up
+    noteFix("animation blocks pinned", pinAnimBlocks())   -- needs the streamer and CAnimManager up
+    reportStartup()
 
+    local nextFilterCheck = 0
     while true do
         wait(0)
-        refPoolTick()
+        timed('thread:fixes/references', refPoolTick)
+        local now = os.clock()
+        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); crashFixTick(now) end
     end
 end

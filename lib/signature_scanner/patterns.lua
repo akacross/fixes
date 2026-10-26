@@ -375,13 +375,14 @@ M.common.SmokeAnimBlend = {
 --   inc  ecx / mov [count], ecx / pop esi / ret
 --
 -- The lookup SA-MP's CFileLoader::LoadObjectInstance hook calls:
---   mov  eax, [count]             A1 <count>
---   push ebx/ebp/esi/edi, xor edi,edi, test eax,eax, jz, two arg loads
---   mov  esi, table               BE <table>           <- RemoveBuildingLookup (+24)
+--   mov  eax, [count]             A1 <count>           ; the pattern starts after it:
+--   push ebx/ebp/esi/edi, xor edi,edi, test eax,eax,   ; open.mp's client hooks the
+--   jz, two arg loads                                  ; lookup with a 5-byte jmp
+--   mov  esi, table               BE <table>           <- RemoveBuildingLookup (+19)
 --
 -- Identical code on every build. Unique in .text:
 --   R1 0x98D8F / 0x98A08, R3-1 0x9CCDF / 0x9C958, R5 0x9D3EF / 0x9D068,
---   DLR1 0x9D22F / 0x9CAF8
+--   DLR1 0x9D22F / 0x9CAF8; the lookup also R2 0x98AA8, R3 0x9C958, R4 0x9D098
 M.common.RemoveBuildingStore = {
     pattern  = '8B 54 24 20 8D 04 89 C1 E0 02 89 B0 ?? ?? ?? ?? 89 90 ?? ?? ?? ?? 8B 54 24 24 89 90 ?? ?? ?? ?? ' ..
                '8B 54 24 28 83 C4 14 89 90 ?? ?? ?? ?? 8B 54 24 18 41 89 90 ?? ?? ?? ?? 89 0D ?? ?? ?? ?? 5E C3',
@@ -392,10 +393,10 @@ M.common.RemoveBuildingStore = {
 }
 
 M.common.RemoveBuildingLookup = {
-    pattern  = 'A1 ?? ?? ?? ?? 53 55 56 57 33 FF 85 C0 74 4D 8B 5C 24 20 8B 6C 24 1C BE ?? ?? ?? ??',
+    pattern  = '53 55 56 57 33 FF 85 C0 74 4D 8B 5C 24 20 8B 6C 24 1C BE ?? ?? ?? ??',
     sections = { '.text' },
-    offset   = 24,
-    expect   = { DLR1 = 0x9CAF8, R1 = 0x98A08, R3 = 0x9C958, R5 = 0x9D068 },
+    offset   = 19,
+    expect   = { DLR1 = 0x9CAF8, R1 = 0x98A08, R2 = 0x98AA8, R3 = 0x9C958, R4 = 0x9D098, R5 = 0x9D068 },
     note     = 'imm32 of `mov esi, table` in the removed-building lookup (fixes points it at its own table)',
     size     = 4,
 }
