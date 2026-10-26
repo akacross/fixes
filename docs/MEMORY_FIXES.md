@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-26):** `fixes.lua` 0.15.0. It applies the 128 `gamePatches`
+**Status (2026-10-26):** `fixes.lua` 0.16.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -41,7 +41,8 @@ running, whichever hooks SA-MP's limiter first owns it. Since 0.14.0 the
 crash-fix hooks follow MTA's current code (30) and carry 48 of MTA's newer
 ones (34). Since 0.15.0 it carries fogrestore.asi's fix: the game's fog is
 sent again twice a frame, after SA-MP leaves it stale (35, option
-`fogrestore`, on by default). It is published as a
+`fogrestore`, on by default). Since 0.16.0 the RPC checks (27) also drop
+server teleports to NaN or off the world. It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -115,7 +116,7 @@ before it landed in the middle of startup and covered only the byte patches):
 [fixes] 0x6E1D4F (CVehicle::DoVehicleLights rear-right tail light): already in the wanted state
 [fixes] 0x6FB9A0 (CCoronas::RenderReflections depth) is owned by SilentPatch; standing down
 ...
-[fixes] server RPC checks on: animations (86, 173), menus (76), list dialog lines (61, on)
+[fixes] server RPC checks on: animations (86, 173), menus (76), teleports (12, 13, 159), list dialog lines (61, on)
 ...
 [fixes] started - gta_sa.exe patches: 13 applied, 4 already set, 3 owned elsewhere, 0 refused, 2 off;
         other fixes: 7 in place, 1 left to other mods, 0 off, 0 not in place
@@ -1331,7 +1332,7 @@ stock bytes must match.
 
 Checks from MiTurboFix's RPC hooks, in `onReceiveRpc` (SAMPFUNCS raises it).
 They run before SA-MP's handlers and are the same on every build. Only these
-four ids are read; the read offset is put back afterwards.
+seven ids are read; the read offset is put back afterwards.
 
 | RPC | id | check | otherwise |
 |---|---|---|---|
@@ -1339,12 +1340,18 @@ four ids are read; the read offset is put back afterwards.
 | ApplyActorAnimation | 173 | the same | dropped |
 | InitMenu | 76 | menu id < 128, column flag 0 or 1, every 32-byte line (title, headers, rows) holds its terminator, at most 12 rows per column | dropped |
 | ShowDialog | 61 | list styles (2, 4, 5): lines at most 128 characters; tablists (4, 5) per cell | cut, the rest passes |
+| SetPlayerPos, SetPlayerPosFindZ | 12, 13 | x, y, z are numbers; \|x\|, \|y\| at most 20000, z from -10000 to 100000 | dropped |
+| SetVehiclePos | 159 | the same, after the vehicle id | dropped |
 
 **Why.** SA-MP hands the animation names to its script-command builder,
 which copies them into a fixed buffer. Its menu pool holds 128 menus and
 accepts id 128 (`cmp al,80h / ja`, R5). R3-1 and DL also take any row count
 and copy menu lines without a bound; R5 checks both. 15 and 24 are the
-longest block and animation names an IFP file holds.
+longest block and animation names an IFP file holds. A teleport to NaN or
+far off the map puts the ped or vehicle where the streamer and collision
+code fail (InvalidPositionFix.lua's check). Its limits are the world's
+absolute ones, not SetWorldBounds': a server may teleport a player outside
+those, and stale bounds from the last server would drop valid teleports.
 
 **Changed from MiTurboFix.**
 
@@ -1362,14 +1369,16 @@ longest block and animation names an IFP file holds.
 
 **Logging.** Each drop or cut is a warning naming what was wrong; after 5 of
 a kind they are only counted. `/fixes` shows the counts once there are any
-(`server data: N animation(s) and N menu(s) dropped, N dialog(s) cut`).
+(`server data: N animation(s), N menu(s) and N teleport(s) dropped, N dialog(s) cut`).
 
 **Tests.** `fixes_test.lua` checks that well-formed RPCs pass byte for byte
 untouched with the read offset back at the start: player and actor
 animations (with the longest names), menus with one and two columns and up
 to 12 rows, list, tablist (rows of 360 characters, no cell over 128),
-message-box and input dialogs, and an RPC that is not one of the four. Cases
-that send each check bad data are not written yet.
+message-box and input dialogs, and an RPC that is not one of the seven.
+Teleports on the map (player, find-Z, vehicle, just inside the limits) pass
+untouched; NaN and off-world ones are dropped with the read offset back, and
+`/fixes` counts them. Bad animation, menu and dialog data is not tested yet.
 
 ## 28. The game timer as a float
 

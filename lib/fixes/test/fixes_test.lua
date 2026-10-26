@@ -799,6 +799,42 @@ local listedServer = false
 for i = before + 1, #chat do if chat[i]:find('server data', 1, true) then listedServer = true end end
 ok(not listedServer, 'no server data line')
 
+print('\n== RPCs: teleports on the map pass, NaN and off-world ones are dropped')
+do
+    local fbits = require('ffi').new('union { float f; uint32_t u; }')
+    local function wf(bs, v) fbits.f = v; w32(bs, fbits.u) end
+    env.raknetBitStreamReadFloat = function(bs)
+        fbits.u = env.raknetBitStreamReadInt32(bs) % 0x100000000
+        return fbits.f
+    end
+    local function pos(id, x, y, z)
+        local bs = newBs()
+        if id == 159 then w16(bs, 412) end
+        wf(bs, x); wf(bs, y); wf(bs, z)
+        return bs
+    end
+    allPass(12, pos(12, 1544.0, -1675.0, 13.5), 'a player teleport in Los Santos')
+    allPass(13, pos(13, -2000.0, 150.0, 0.0), 'a find-Z teleport')
+    allPass(159, pos(159, 2500.0, 2500.0, 10.0), 'a vehicle teleport')
+    allPass(12, pos(12, 19999.0, -19999.0, 99999.0), 'a teleport just inside the absolute limits')
+    local function dropped(id, x, y, z, what)
+        local r, untouched, back = screen(id, pos(id, x, y, z))
+        ok(r == false and untouched and back, what .. ': dropped, read offset back at the start')
+    end
+    dropped(12, 0 / 0, 0.0, 0.0, 'a NaN player teleport')
+    dropped(159, 100.0, 0 / 0, 5.0, 'a NaN vehicle teleport')
+    dropped(13, 25000.0, 0.0, 10.0, 'a find-Z teleport past 20000')
+    dropped(12, 0.0, 0.0, -20000.0, 'a teleport under the world')
+    dropped(159, 0.0, 0.0, 1e9, 'a vehicle teleport into the sky')
+end
+
+print('\n== RPCs: /fixes counts the teleports it dropped')
+before = #chat
+env.fixesCommand('')
+local teleports = false
+for i = before + 1, #chat do if chat[i]:find('5 teleport(s) dropped', 1, true) then teleports = true end end
+ok(teleports, 'the server data line counts 5 teleports')
+
 --------------------------------------------------------------------------------
 -- 0.13.0: every patch's stock bytes are gta_sa.exe 1.0 US's
 --------------------------------------------------------------------------------

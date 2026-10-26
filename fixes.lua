@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.15.0")
+script_version("0.16.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -2396,10 +2396,17 @@ local DIALOG_LINE_MAX = 128
 local DIALOG_TABLIST = {[4] = true, [5] = true}     -- tablist, tablist with headers: cut per cell
 local DIALOG_LIST = {[2] = true, [4] = true, [5] = true}
 local RPC_LOGGED = 5                                -- lines logged per kind; the rest are counted
+-- A teleport to NaN or far off the map puts the ped or vehicle where the
+-- streamer and collision code fail. The limits are the world's absolute ones,
+-- not SetWorldBounds': a server may teleport a player outside those.
+local RPC_SET_PLAYER_POS, RPC_SET_PLAYER_POS_FIND_Z, RPC_SET_VEHICLE_POS = 12, 13, 159
+local POS_XY_MAX, POS_Z_MIN, POS_Z_MAX = 20000.0, -10000.0, 100000.0
 
-local rpcCounts = {anim = 0, menu = 0, dialog = 0}
+local rpcCounts = {anim = 0, menu = 0, dialog = 0, pos = 0}
 local RPC_KIND = {[RPC_APPLY_ANIM] = "anim", [RPC_APPLY_ACTOR_ANIM] = "anim",
-                  [RPC_INIT_MENU] = "menu", [RPC_SHOW_DIALOG] = "dialog"}
+                  [RPC_INIT_MENU] = "menu", [RPC_SHOW_DIALOG] = "dialog",
+                  [RPC_SET_PLAYER_POS] = "pos", [RPC_SET_PLAYER_POS_FIND_Z] = "pos",
+                  [RPC_SET_VEHICLE_POS] = "pos"}
 
 local function skipBytes(bs, n) if n > 0 then raknetBitStreamIgnoreBits(bs, n * 8) end end
 
@@ -2411,6 +2418,15 @@ local function checkAnimation(bs)
     skipBytes(bs, lib)
     local name = raknetBitStreamReadInt8(bs)
     if name < 1 or name > ANIM_NAME_MAX then return ("an animation name of %d bytes"):format(name) end
+end
+
+-- nil, or what is wrong with the position
+local function checkPosition(bs)
+    local x, y, z = raknetBitStreamReadFloat(bs), raknetBitStreamReadFloat(bs), raknetBitStreamReadFloat(bs)
+    if x ~= x or y ~= y or z ~= z then return "a NaN position" end
+    if math.abs(x) > POS_XY_MAX or math.abs(y) > POS_XY_MAX or z < POS_Z_MIN or z > POS_Z_MAX then
+        return ("a position off the world (%.0f, %.0f, %.0f)"):format(x, y, z)
+    end
 end
 
 -- a 32-byte menu line holding its terminator
@@ -2495,6 +2511,14 @@ local function screenRpc(id, bs)
         local why = checkMenu(bs)
         if why then
             noteRpc("menu", "dropped a server menu with " .. why)
+            return false
+        end
+    elseif id == RPC_SET_PLAYER_POS or id == RPC_SET_PLAYER_POS_FIND_Z or id == RPC_SET_VEHICLE_POS then
+        local vehicle = id == RPC_SET_VEHICLE_POS and raknetBitStreamReadInt16(bs)
+        local why = checkPosition(bs)
+        if why then
+            noteRpc("pos", ("dropped a server teleport of %s to %s"):format(
+                vehicle and ("vehicle " .. vehicle) or "the player", why))
             return false
         end
     elseif id == RPC_SHOW_DIALOG and options.dialoglines ~= false then
@@ -2639,9 +2663,9 @@ function fixesCommand(params)
             say(("entity references: %d of %d reserves of %d made, %d handed to the game"):format(
                 readU32(refPool.made), REF_MAX, REF_PER, readU32(refPool.used)))
         end
-        if rpcCounts.anim + rpcCounts.menu + rpcCounts.dialog > 0 then
-            say(("server data: %d animation(s) and %d menu(s) dropped, %d dialog(s) cut"):format(
-                rpcCounts.anim, rpcCounts.menu, rpcCounts.dialog))
+        if rpcCounts.anim + rpcCounts.menu + rpcCounts.dialog + rpcCounts.pos > 0 then
+            say(("server data: %d animation(s), %d menu(s) and %d teleport(s) dropped, %d dialog(s) cut"):format(
+                rpcCounts.anim, rpcCounts.menu, rpcCounts.pos, rpcCounts.dialog))
         end
         if next(crashFixes) then
             local cf, averted = crashFixCounts(), 0
@@ -2727,7 +2751,7 @@ function main()
     applyGamePatches("late")      -- data the game writes during CGame init
     worked = isSampfuncsLoaded and isSampfuncsLoaded()
     if worked then
-        log(("[fixes] server RPC checks on: animations (86, 173), menus (76), list dialog lines (61, %s)"):format(
+        log(("[fixes] server RPC checks on: animations (86, 173), menus (76), teleports (12, 13, 159), list dialog lines (61, %s)"):format(
             options.dialoglines and "on" or "off: option dialoglines"), "info")
     else
         log("[fixes] server RPC checks are off: they need SAMPFUNCS, which is not loaded", "warn")

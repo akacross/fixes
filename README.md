@@ -20,6 +20,8 @@ Crashes:
   swallowed, the first ten still printed.
 - Server RPCs whose sizes SA-MP trusts, a GameText style past 6 and a texture
   dictionary's struct size (MiTurboFix's fixes).
+- Server teleports (player or vehicle) to a NaN position or far off the
+  world: dropped before SA-MP moves anything.
 - SA-MP's removed-building table overflowing past 1000 entries (samp.dll).
 - A ped's animations being wiped while its tasks still point at them (the
   crash after a reconnect or a skin change mid-fall).
