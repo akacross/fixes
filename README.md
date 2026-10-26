@@ -42,6 +42,10 @@ Game bugs:
 - Exterior occluders hide objects a server maps behind them.
 - Camera moves, shakes and zooms and the weapon spread follow a clock the
   server can set; they read a smooth one instead.
+- The game's fog stops reaching the screen once SA-MP has set the device's
+  fog: it is sent again twice a frame (fogrestore.asi's fix). With
+  fogrestore.asi installed it stands aside, so the ASI can go; ENB and
+  SkyGFX stand it down too.
 
 Speed:
 - SA-MP's text (chat, nametags, labels) is laid out once and replayed, not
