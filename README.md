@@ -22,6 +22,13 @@ Crashes:
   dictionary's struct size (MiTurboFix's fixes).
 - Server teleports (player or vehicle) to a NaN position or far off the
   world: dropped before SA-MP moves anything.
+- A NaN, infinite or off-map position from anywhere (a server, another
+  player's sync, a script) sending you to an endless white loading screen:
+  the game itself puts it back before a ped, car or object is placed, and
+  your own ped and car stay where they were. No SA-MP version or library
+  involved.
+- A null GXT string crashing `CMessages::GetStringLength`
+  (gxt_crash_fix's fix).
 - SA-MP's removed-building table overflowing past 1000 entries (samp.dll).
 - A ped's animations being wiped while its tasks still point at them (the
   crash after a reconnect or a skin change mid-fall).
@@ -48,6 +55,19 @@ Game bugs:
   fog: it is sent again twice a frame (fogrestore.asi's fix). With
   fogrestore.asi installed it stands aside, so the ASI can go; ENB and
   SkyGFX stand it down too.
+- A server's car vanishes after you get out of it, its upgrade parts left
+  behind (a script marking it no longer needed): the car is kept.
+
+Frame rate (each as at 30 fps, the rate the game was tuned for):
+- Off the throttle a car stops dead at high fps and rolls at low: the
+  coasting slow-down is the same every second at any fps (Car Speed FPS Fix).
+- Swimming is slow at high fps: it is as fast at any fps (Swim FPS Fix).
+- Buoyancy as Swim FPS Fix scales it (less lift above 30 fps, boats too).
+
+Car Speed FPS Fix (CLEO), if it is running, is stopped and named in chat,
+since it would be applied twice; Swim FPS Fix.asi and gxt_crash_fix.asi,
+when installed, are left to do their part and named in chat. Delete them to
+use fixes' own.
 
 Speed:
 - SA-MP's text (chat, nametags, labels) is laid out once and replayed, not
@@ -109,6 +129,12 @@ that averted a crash says so.
 | `background` | on | the game keeps running in the background and the pause menu |
 | `fogrestore` | on | the game's fog sent again after SA-MP leaves it stale |
 | `focusmenu` | off | the pause menu opens when the window gets focus back, as in single-player (SA-MP turns this off) |
+| `positionguard` | on | NaN, inf and off-map positions put back in the game itself |
+| `rpcpositions` | on | drop server teleports to NaN or off the world (off: only the position guard) |
+| `keepcars` | on | a car marked no longer needed is kept, not deleted with its parts left behind |
+| `wheelfps` | on | the coasting slow-down off the throttle is the same at any fps |
+| `swimfps` | on | swimming is as fast at any fps |
+| `floatfps` | on | buoyancy scaled as Swim FPS Fix does (boats too) |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |
 | `noflashes`, `nosound`, `novehiclelighting`, `nospecular`, `notargetblip`, `nointeriorreflections`, `nopostfx` | off | each takes that effect away |
 
@@ -120,8 +146,9 @@ Options are saved in `moonloader/config/fixes.json`.
 `lib/fixes/crashfix.dll` with mingw (i686-w64-mingw32). Under Wine,
 `lib/fixes/test/text_cache_dll_test.sh` tests the text cache against the real
 d3dx9_25.dll, and `lib/fixes/test/crashfix_dll_test.sh` runs the crash fixes
-against gta_sa.exe's own code. `luajit lib/fixes/test/fixes_test.lua` tests
-the script.
+against gta_sa.exe's own code, and `position_guard_test.sh` and
+`fps_fixes_test.sh` run the position guard and the frame-rate code.
+`luajit lib/fixes/test/fixes_test.lua` tests the script.
 
 ## Credits
 
@@ -136,6 +163,8 @@ the script.
   [MiTurboFix](https://github.com/povargek/MiTurboFix) (public domain).
 - The exception filter follows the anticrashers by **Export** and
   **DarkP1xel**.
+- The coasting fix follows Car Speed FPS Fix by **Junior_Djjr**; the swim and
+  buoyancy fixes follow Swim FPS Fix.asi; the GXT fix follows gxt_crash_fix.
 
 ## License
 

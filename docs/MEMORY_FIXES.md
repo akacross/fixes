@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-26):** `fixes.lua` 0.17.0. It applies the 128 `gamePatches`
+**Status (2026-10-26):** `fixes.lua` 0.18.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -44,7 +44,13 @@ sent again twice a frame, after SA-MP leaves it stale (35, option
 `fogrestore`, on by default). Since 0.16.0 the RPC checks (27) also drop
 server teleports to NaN or off the world. Since 0.17.0 the pause menu can
 open again when the window gets focus back (36, option `focusmenu`, off by
-default). It is published as a
+default). Since 0.18.0 opcode 01C3 keeps the car it is given (37, option
+`keepcars`, on by default) and a position guard puts back NaN, inf and
+off-map positions in gta_sa.exe itself (38, option `positionguard`, on by
+default). Since 0.18.0 `CMessages::GetStringLength` returns 0 for a null
+string instead of crashing (39), and the coasting slow-down, swimming and
+buoyancy scale with the frame rate (40, options `wheelfps`, `swimfps`,
+`floatfps`, on by default) in place of entry 8. It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -411,33 +417,12 @@ because the upper three of that dword are already zero.
 
 ---
 
-## 8. Wheel friction constant
+## 8. Wheel friction constant (gone since 0.18.0)
 
-```
-0xC2B9CC   66 66 66 3F -> 75 B6 B3 3E   (0.9f -> 0.351001f)
-```
-
-Not code. 0xC2B9C8 is `gHandlingDataMgr`, and +0x4 is `fWheelFriction`, set to
-`0.9f` by `cHandlingDataMgr::Initialise` (the store is visible at 0x5BFAAE
-inside `CGame::InitialiseCoreDataAfterRW`, 0x5BFA90). The patch overwrites it
-with `0.351001`.
-
-Only `CVehicle::ProcessWheel` (0x6D6C00) reads it, and only on the coasting path
-(no throttle, no brake) where it sets the rolling-resistance brake force:
-
-```cpp
-if (IsBike())        brake = fWheelFriction * 0.6f / (mass + 200.0f);
-else if (IsSubPlane()) brake = 0.0f;
-else                 brake = fWheelFriction / mass;
-```
-
-Lowering it to ~39% of stock means vehicles coast noticeably further when you
-let off the gas.
-
-Because this is a plain data write and not a code patch, it has to happen after
-`cHandlingDataMgr::Initialise` has run. It is the only `phase = "late"`
-descriptor, applied after the `isSampAvailable()` wait; every other entry patches
-code and goes in immediately.
+Until 0.17.0 this wrote `0.351001` over `gHandlingDataMgr.fWheelFriction`
+(0xC2B9CC, `0.9f`), which coasts as the stock 0.9 does at about 77 fps and at
+no other frame rate. 0.18.0 drops it for `wheelfps` (40), which scales the
+game's own value by the timestep where it is read.
 
 ---
 
@@ -1638,8 +1623,14 @@ its satchel hook (0x738F3A) and its bigger values at 0x550FBA (5000) and
 and stand down. SA-MP's satchel hook is a `jmp [ptr]` (FF 25), so `hookOwner`
 reads indirect jumps and calls too. Other mods' (the first in-game run,
 2026-10-25): SilentPatch writes the same non-exclusive mouse at 0x7469A0
-(`xor al,al` for MTA's `mov al,0`), and ProperShaders.asi sets the value at
-0x8A5A84 (22 instead of the file's 12); both stand down, named.
+(`xor al,al` for MTA's `mov al,0`) and stands down, named. 0x8A5A84 is
+`CStreaming::desiredNumVehiclesLoaded`: the exe file holds 12, but the
+game's own init sets 22 (0x5B8E6E) and stream.ini's `vehicles` key may set
+another (0x5BCD9C), all before MoonLoader starts. So since 0.18.0 its stock is
+22 (`fileFrom` keeps the file's 12 for the exe check) and any other value
+stands down as set on purpose. Until 0.17.0 the 22 was put down to
+ProperShaders.asi, which only maps one of its setting ids to the address; with
+it unloaded the site was refused as not stock.
 
 Not ported: the main.scm and loading-screen skips (they run before any
 script), 0xBAB318 (crashes.asi's vsync byte, a display change; 0x53E94C,
@@ -1860,3 +1851,177 @@ kept.
 **Tests.** `fixes_test.lua`: off by default leaves SA-MP's NOPs, on writes
 the call, off puts the NOPs back, and a call SA-MP left in place survives on
 and off. The real gta_sa.exe holds the call at 0x748063.
+
+## 37. MARK_CAR_AS_NO_LONGER_NEEDED deletes a server's car (01C3)
+
+```
+0x47D775  E8 F6 8E 00 00  ->  90 90 90 90 90   (01C3's call to CTheScripts::CleanUpThisVehicle)
+```
+
+Opcode 01C3 is case 17 of `CRunningScript::ProcessCommands400To499`
+(`movzx ecx, [ecx+0x47DFE0]` / `jmp [ecx*4+0x47DF58]`, entry 0x47D75A). It
+collects the car handle, calls `CTheScripts::CleanUpThisVehicle` (0x486670),
+which unlocks the car and makes it a random vehicle, then drops it from the
+script's mission cleanup. The population code deletes random cars, so a
+server's car vanishes after you get out of it, and the upgrade parts SA-MP
+keeps for it are left behind. With the call NOPed the car stays the server's;
+the opcode still reads its parameter and returns as before (the `push eax`
+before the call and the `add esp,4` after it balance). Option `keepcars`, on
+by default; a call redirected by another mod is left to it.
+
+"Unload Shenanigans.lua" (a loose MoonLoader script) did this by writing
+`90 90 90 90` over the jump table entry, so any 01C3 jumped to 0x90909090.
+What runs 01C3 on the car is not known: neither samp.dll nor the scripts in
+this install contain the opcode.
+
+**Tests.** `fixes_test.lua`: on by default NOPs the call, off puts it back,
+on again, and a redirected call is left alone. The real gta_sa.exe holds the
+call at 0x47D775.
+
+## 38. NaN, inf and off-map positions (the position guard)
+
+```
+0x544A30  64 A1 00 00 00 00  ->  E9 <entry A> 90   (CPhysical::Add: mov eax, fs:[0])
+0x542560  83 EC 2C 55 8B E9  ->  E9 <entry B> 90   (CPhysical::RemoveAndAdd: sub esp,2Ch / push ebp / mov ebp,ecx)
+```
+
+**The bug.** A position that is NaN, infinite or far off the map (a server
+command that passes `nan` or 2147483647 through to SetPlayerPos, a player's
+sync, a script) puts the ped where the streamer and the world's sector maths
+fail: `CWorld::GetSectorX` is `floor(x / 50 + 60)` to an int, so NaN becomes
+INT_MIN and the sector loops index outside the arrays, the camera follows
+NaN and the screen washes white, and the loading screen never ends. There is
+no way back once it happens.
+
+**Where.** The check sits in the game, not SA-MP: whatever wrote the
+position, samp.dll R1-R5 and DL, open.mp, an RPC or a sync packet, Arizona's
+SEF login or a script, every ped, car and object that moves passes one of
+these. SA-MP's teleports take the entity out with `CWorld::Remove`, write the
+matrix and put it back with `CWorld::Add`, which calls the virtual
+`CPhysical::Add`; a moving entity is re-sectored by `CPhysical::RemoveAndAdd`
+each frame it moves. `CPlaceable::SetPosn` and the `Teleport` overrides were
+not usable: samp.dll calls neither, and `SetPosn` is inlined at most sites.
+
+**The check** (ecx = the entity, every register and the flags kept): the
+position is `m_matrix->pos` (+0x30) or, with no matrix, `m_placement` (+4).
+|x| and |y| at most 20000, z from -10000 to 100000, each by the float's bits
+(`and 7FFFFFFFh / cmp / ja`: one unsigned compare also catches NaN and inf).
+Each good position the check sees on the player's ped (`[0xB7CD98]`,
+`CWorld::Players[0].m_pPed`) or its vehicle (`m_pVehicle`, +0x58C) is kept
+in a slot, so a bad one on either puts the last good one back: the teleport
+does not happen, as with the RPC check. Anything else takes the RenderWare
+frame's (`m_pRwObject` +0x18, its frame +4, the frame's position +0x40, the
+last one drawn) if that one is good, else 0, 0, 0. SA-MP updates the frame
+in the same teleport, which is why the player, before the slots, landed at
+0, 0, 0. The move and turn speeds (+0x44-0x5B) are zeroed. A good position
+with a NaN or inf speed has the speeds zeroed. Both are counted; the log
+says when either count rises. The block: the two counters, the ped's slot
+(+8: entity, x, y, z), the vehicle's (+0x18), then the code at +0x30.
+
+The server RPC check (27) still drops a NaN or off-world teleport before
+SA-MP moves anything, so the player stays where they were; the guard catches
+every other way in. Option `rpcpositions` (on by default) is that RPC check:
+`/fixes rpcpositions off` lets such a teleport through, to test the guard.
+
+**Tests.** `position_guard_test.sh` runs the routine on fake entities under
+Wine (35): good positions and the limits kept, NaN, inf, x 25000, z -20000
+and z 2147483647 put back from the frame, a bad frame or none gives 0, 0, 0,
+no matrix reads `m_placement`, NaN and inf speeds zeroed (a huge finite one
+kept); the player's ped stays where it was when its frame is bad too, takes
+the latest good position after a legal teleport, its vehicle likewise,
+anything else falls back to the frame or 0, 0, 0; every register and the
+flags kept. `fixes_test.lua`: the entries call
+the routine, replay their site and jump back; both sites hooked, off puts
+them back and on reuses the block, a reload takes an earlier run's hooks and
+finds its counters, another hook stands it down, an unknown site is refused;
+the two sites are the real gta_sa.exe's bytes.
+
+## 39. A null GXT string (CMessages::GetStringLength)
+
+```
+0x69DB50  8B 4C 24 04 8A 11 33 C0 84 D2 74 0D 8D 64 24 00 8A 51 01 40 41 84 D2 75 F7 C3
+      ->  8B 4C 24 04 33 C0 85 C9 74 09 80 3C 01 00 74 03 40 EB F7 C3 90 90 90 90 90 90
+```
+
+`CMessages::GetStringLength(str)` (cdecl, a strlen for GXT text) reads
+`[ecx]` at 0x69DB54 before anything checks it, so a null string (a missing
+GXT key, a server's bad text) crashes there. The function is rewritten in
+place: `mov ecx,[esp+4] / xor eax,eax / test ecx,ecx / jz ret / cmp byte
+[ecx+eax],0 / je ret / inc eax / jmp` - the same length, 0 for null. No hook,
+no block. gxt_crash_fix.asi does this with a MinHook trampoline at 0x69DB54
+that returns without setting eax, so its caller gets whatever eax held; with
+it installed (a jmp at 0x69DB54) this stands down and names it.
+
+**Tests.** `fixes_test.lua`: the stock bytes become the rewrite, a second run
+finds it, gxt_crash_fix's hook is left alone and named.
+
+## 40. Frame rate: coasting, swimming, buoyancy
+
+The game applies these once per physics step without the timestep, tuned at
+30 fps (a timestep of 1.6667; 50 fps is 1.0). Each site becomes a `call` (one
+a `jmp`) to a stub in one shared block (four constants, then the stubs), each
+scaling by `timestep / 1.6667`, so 30 fps is stock. A stub starts with a
+game-address instruction, which is how a reload knows its own hooks.
+
+```
+wheelfps   0x6D6E69 0x6D6EA8 0x6D767F 0x6D76AB 0x6D76CD   fld [fWheelFriction] -> call wheel / nop
+swimfps    0x68A4FC (18 bytes)                             -> jmp swim, back to 0x68A50E
+           0x68A42B  fmul [0x858EF4] (-0.1)                -> call dive / nop
+floatfps   0x6C27AE  fmul [ms_fTimeStep]                   -> call float / nop
+```
+
+**wheelfps.** With neither throttle nor brake, `CVehicle::ProcessWheel`
+(0x6D6C00) and `ProcessBikeWheel` (0x6D73B0) take
+`brake = fWheelFriction / mass` (times 0.6, over mass + 200, for bikes) and
+clamp the wheel's forward force to it; `ApplyMoveForce(speed * mass *
+direction)` then applies it with no timestep. So the same slow-down comes
+every step: at 60 fps twice as much a second as at 30, at 144 nearly five
+times, and a car let off the throttle stops dead at high fps and rolls at
+low. The stub returns `fWheelFriction * timestep * 0.6`, read at the use, so a
+value handling.cfg or another mod sets is scaled too. Junior_Djjr's Car Speed
+FPS Fix (CLEO) wrote `0.9 * timestep / 1.6667` over the global every script
+frame instead: a frame late, and it replaced any other value.
+
+**swimfps.** `CTaskSimpleSwim::ProcessSwimmingResistance` (0x68A1D0) blends
+the ped's move speed toward a target with `1 - pow(0.9, timestep)`, which is
+frame-rate independent, but the target is the swim animation's movement for
+this frame, so at high fps each frame's share is smaller and you swim slowly.
+The swim stub multiplies the target's x, y and z by `1.6667 / timestep`,
+keeping the x87 stack as the game leaves it (`z * blend * k` over the pow).
+The vertical branch at 0x68A422 (the target z from the animation) ends in
+`fmul [-0.1]`; the dive stub multiplies that by `timestep / 1.6667`, so the
+swim stub's k cancels there and that branch stays stock. Swim FPS Fix.asi's
+two hooks; it wrote the -0.1 into a float of its own each frame, the stub
+computes it at the use.
+
+**floatfps.** `cBuoyancy::CalcBuoyancyForce` (0x6C2750) is already
+`immersion * buoyancy * timestep`. Swim FPS Fix.asi replaces that timestep
+with `t * (t / 1.5 + 1)`, t = timestep / 1.6667: stock at 30 fps, less lift
+above it (at 60 fps 0.667 instead of 0.833), which keeps a faster swimmer at
+the surface. It is empirical and touches everything that floats, boats and
+cars in water too, so it is its own option.
+
+**Other copies.** The Car Speed FPS Fix script would make wheelfps scale
+twice (it rewrites the global wheelfps scales). While wheelfps is ours, at
+startup and once a second, CTheScripts' active list (0xA8B42C; next +0, base
+IP +10h, IP +14h; CLEO puts its scripts there too) is walked for a script
+whose code starts `8D 0A 01 73 72 5B 00` (0A8D reading the handling manager
+operand 0x5B7273) and writes memory (0A8C). Its IP is pointed at an `93 0A`
+at the end of the block, so CLEO's own 0A93 handler ends it and frees it
+on its next run, fWheelFriction goes back to the game's 0.9, and chat names
+the .cs file in `cleo\` holding those bytes. With wheelfps off the script is
+left alone. Swim FPS Fix.asi and gxt_crash_fix.asi, when a fix stood down
+for them, are named in chat once SA-MP is up.
+
+**Tests.** `fps_fixes_test.sh` runs the stubs under Wine with real x87 maths
+(16): the wheel brake at 30, 60 and 144 fps and over another value, the dive
+and float stubs at 30 and 60, the swim stub's three products, the pow left
+under them, nothing else on the stack and esp back, and 30 fps stock.
+`fixes_test.lua`: each site calls or jumps to its stub, the options share
+one block, off restores only that option's sites, a reload takes its own
+hooks, another hook stands the option down; the 8 sites are the real
+gta_sa.exe's bytes. A script with Car Speed FPS Fix's head and an 0A8C write
+in a fake script list is ended (its IP at the 0A93, another script untouched),
+fWheelFriction is 0.9 again, chat names its file in a cleo folder, the next
+tick does nothing, and with wheelfps off it keeps running; Swim FPS Fix.asi
+is named once for its two options, an unknown hook not at all.

@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.17.0")
+script_version("0.18.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -516,15 +516,6 @@ local gamePatches = {
         name = "D3D9 trilinear mip filter",
         va = 0x884984, from = hexBytes("02 00 00 00"), to = zeros(4)
     },
-    {   -- gHandlingDataMgr.fWheelFriction (0xC2B9C8 + 4), 0.9 -> 0.351001. Read
-        -- only by CVehicle::ProcessWheel on the coasting path where it sets
-        -- rolling resistance, so vehicles coast further off the throttle.
-        -- `from` is the value cHandlingDataMgr::Initialise wrote, so this is the
-        -- ONE entry that runs late (after CGame::InitialiseCoreDataAfterRW)
-        name = "gHandlingDataMgr.fWheelFriction",
-        phase = "late",
-        va = 0xC2B9CC, from = hexBytes("66 66 66 3F"), to = hexBytes("75 B6 B3 3E")
-    },
     {   -- exactly the max(1.0f, CTimer::ms_fTimeStep) sequence used as an
         -- angle-delta divisor; falls through into the `fld ms_fTimeStep` at
         -- 0x524FF2, so the chase camera stops lagging above 50 fps
@@ -715,7 +706,7 @@ end
 -- what is there) and 0x6E1D4F (entry 1). docs/MEMORY_FIXES.md 31. Option
 -- "mtapatches".
 local MTA_PATCHES = {     -- va, name, stock, theirs
-    {0x8A5A84, "value_8A5A84_127", "0C 00 00 00", "7F 00 00 00"},
+    {0x8A5A84, "value_8A5A84_127", "16 00 00 00", "7F 00 00 00"},
     {0x550F82, "value_550F82_8000", "00 7D 00 00", "40 1F 00 00"},
     {0x742685, "jmp_742685", "0F 84", "90 E9"},
     {0x7399B0, "disableRemoveAllProjectiles", "53", "C3"},
@@ -797,14 +788,20 @@ local SAMP_WRITES = {          -- what samp.dll R5 writes at a site of these
 local MTA_OWNERS = {           -- another mod's bytes at a site of these
     [0x7469A0] = {bytes = hexBytes("30 C0 90 90"), by = "SilentPatch (xor al,al: the same non-exclusive mouse)"},
 }
-local MTA_VALUE_OWNERS = {     -- data another mod sets, whatever the value
-    [0x8A5A84] = "ProperShaders.asi",
+-- Data the game sets during init, before any script: its stock value is that,
+-- not the exe file's. Any other value was set on purpose and stands down.
+--   0x8A5A84  CStreaming::desiredNumVehiclesLoaded: the file holds 12, init
+--             sets 22 (0x5B8E6E), stream.ini's `vehicles` key another
+local MTA_RUNTIME_STOCK = {
+    [0x8A5A84] = {file = hexBytes("0C 00 00 00"), by = "stream.ini's vehicles or another mod (it set this value)"},
 }
 
 for _, m in ipairs(MTA_PATCHES) do
     local va, from = m[1], hexBytes(m[3])
+    local runtime = MTA_RUNTIME_STOCK[va]
     gamePatches[#gamePatches + 1] = {name = "MTA " .. m[2], va = va, from = from, to = hexBytes(m[4]),
         phase = "late", option = "mtapatches", group = "MTA's multiplayer patches",
+        fileFrom = runtime and runtime.file,     -- what gta_sa.exe holds before init
         standDown = function(found)
             if bytesEqual(found, from) then return nil end           -- stock: several start with the call they NOP
             local owner = hookOwner(va, found)
@@ -812,13 +809,21 @@ for _, m in ipairs(MTA_PATCHES) do
             if SAMP_WRITES[va] and bytesEqual(found, SAMP_WRITES[va]) then return "samp.dll (it writes this site itself)" end
             local mod = MTA_OWNERS[va]
             if mod and bytesEqual(found, mod.bytes) then return mod.by end
-            local valueOwner = MTA_VALUE_OWNERS[va]
-            if valueOwner and not bytesEqual(found, hexBytes(m[4])) then
-                local ok, handle = pcall(getModuleHandle, valueOwner)
-                if ok and handle and handle ~= 0 then return valueOwner .. " (it sets this value)" end
-            end
+            if runtime and not bytesEqual(found, hexBytes(m[4])) then return runtime.by end
         end}
 end
+
+-- CMessages::GetStringLength (0x69DB50), a GXT string's strlen, reads the
+-- string before checking it: a null one (a missing GXT key, a server's
+-- bad text) crashes at 0x69DB54. It is rewritten in place as a strlen that
+-- returns 0 for null (gxt_crash_fix's fix; its hook left the length unset).
+-- gxt_crash_fix.asi's hook at 0x69DB54 stands this down.
+gamePatches[#gamePatches + 1] = {name = "CMessages::GetStringLength null string", va = 0x69DB50,
+    from = hexBytes("8B 4C 24 04 8A 11 33 C0 84 D2 74 0D 8D 64 24 00 8A 51 01 40 41 84 D2 75 F7 C3"),
+    to = hexBytes("8B 4C 24 04 33 C0 85 C9 74 09 80 3C 01 00 74 03 40 EB F7 C3 90 90 90 90 90 90"),
+    standDown = function(found)
+        if found[5] == 0xE9 then return hookOwner(0x69DB54, {unpack(found, 5, 9)}) end
+    end}
 
 -- GTA's own 14 ms frame delay (0x53E920, a busy-wait before CTimer::Update):
 -- `cmp eax, 0Eh` -> `cmp eax, 0`, so its `jb` never spins (MTA's "remove 14ms
@@ -861,6 +866,20 @@ gamePatches[#gamePatches + 1] = {name = "pause menu on focus (WM_SETFOCUS)", va 
     phase = "late", option = "focusmenu", revertOnlyOurs = true,
     fromSamp = true}                         -- `from` is SA-MP's; the exe holds `to`
 
+-- MARK_CAR_AS_NO_LONGER_NEEDED (opcode 01C3, case 0x47D75A): its call to
+-- CTheScripts::CleanUpThisVehicle (0x486670) makes the car a random vehicle,
+-- which the population code then deletes: a server's car vanishes when you get
+-- out, its upgrade parts left behind. NOPing the call keeps the car; the
+-- opcode still reads its parameter and returns (the push and `add esp,4`
+-- around the call balance).
+gamePatches[#gamePatches + 1] = {name = "01C3 keeps the car (CleanUpThisVehicle call)", va = 0x47D775,
+    from = hexBytes("E8 F6 8E 00 00"), to = hexBytes("90 90 90 90 90"), option = "keepcars",
+    standDown = function(found)                -- a call there redirected
+        if found[1] == 0xE8 and not bytesEqual(found, hexBytes("E8 F6 8E 00 00")) then
+            return hookOwner(0x47D775, found)
+        end
+    end}
+
 --------------------------------------------------------------------------------
 -- Optional patches
 --------------------------------------------------------------------------------
@@ -877,6 +896,26 @@ local OPTIONS = {
             return stopFrameCap() and 1 or 0, 0
         end},
     mtapatches = {default = true, label = "MTA's multiplayer patches (73 sites, as crashes.asi applies them with SA-MP)"},
+    wheelfps = {default = true, label = "the coasting slow-down off the throttle is the same at any fps (cars stop dead at high fps)",
+        apply = function(on)
+            if on then return fixFrameRate("wheelfps"), 0 end
+            return stopFrameRate("wheelfps"), 0
+        end},
+    swimfps = {default = true, label = "swimming is as fast at any fps (slow at high fps)",
+        apply = function(on)
+            if on then return fixFrameRate("swimfps"), 0 end
+            return stopFrameRate("swimfps"), 0
+        end},
+    floatfps = {default = true, label = "buoyancy scaled as Swim FPS Fix does: less lift above 30 fps, boats included",
+        apply = function(on)
+            if on then return fixFrameRate("floatfps"), 0 end
+            return stopFrameRate("floatfps"), 0
+        end},
+    positionguard = {default = true, label = "NaN, inf and off-map positions put back before a ped, car or object is placed",
+        apply = function(on)
+            if on then return fixPositionGuard() and 1 or 0, 0 end
+            return stopPositionGuard() and 1 or 0, 0
+        end},
     fogrestore = {default = true, label = "the game's fog sent again twice a frame, after SA-MP leaves it stale (as fogrestore.asi)",
         apply = function(on)
             if on then return fixFogRestore() and 1 or 0, 0 end
@@ -901,11 +940,14 @@ local OPTIONS = {
     nopostfx = {default = false, label = "no post effects"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
+    keepcars = {default = true, label = "a car marked no longer needed (opcode 01C3) is kept, not deleted with its parts left behind"},
     focusmenu = {default = false, label = "the pause menu opens when the window gets focus back (SA-MP turns this off)"},
     floatclock = {default = true,
         label = "camera moves, shakes and zooms and the weapon spread keep a smooth clock the server cannot set"},
     -- not a byte patch: read by onReceiveRpc
     dialoglines = {default = true, label = "cut list dialog lines (tablist cells) past 128 characters",
+        apply = function() return 1, 0 end},
+    rpcpositions = {default = true, label = "drop server teleports (RPCs 12, 13, 159) to NaN or off the world",
         apply = function() return 1, 0 end},
     -- not a byte patch: switched through fixTextCache / stopTextCache
     textcache = {default = true, label = "replay SA-MP's text layouts instead of laying them out every frame",
@@ -1793,6 +1835,390 @@ function stopFogRestore()
 end
 
 --------------------------------------------------------------------------------
+-- Entity positions (gta_sa.exe)
+--------------------------------------------------------------------------------
+-- A position that is NaN, infinite or far off the map (a server's teleport, a
+-- player's sync, a script) sends the streamer and the world's sector maths out
+-- of range: a loading screen that never ends, the screen washed white. Every
+-- moved ped, car and object passes CPhysical::Add (0x544A30, what CWorld::Add
+-- calls after a teleport) or CPhysical::RemoveAndAdd (0x542560, each frame it
+-- moves), so both start with a check: x and y within 20000, z from -10000 to
+-- 100000, by the float's bits (one unsigned compare also catches NaN and inf).
+-- A bad position on the player's ped or its vehicle takes the last good one
+-- the check saw for it, so a bad teleport does not happen; on anything else
+-- it takes the RenderWare frame's (the last one drawn), else 0, 0, 0. The
+-- speeds are zeroed; NaN or inf speeds alone are zeroed too. Each is counted. SA-MP's version, other mods and the RPC path do not matter.
+-- Option "positionguard".
+local PG = {
+    XY_MAX = 0x469C4000,           -- 20000.0
+    Z_MAX  = 0x47C35000,           -- 100000.0
+    Z_MIN  = 0x461C4000,           -- 10000.0, for -10000
+    SITES = {
+        {va = 0x544A30, from = hexBytes("64 A1 00 00 00 00")},  -- CPhysical::Add: mov eax, fs:[0]
+        {va = 0x542560, from = hexBytes("83 EC 2C 55 8B E9")},  -- RemoveAndAdd: sub esp,2Ch / push ebp / mov ebp,ecx
+    },
+    BLOCK_SIZE = 0x200,            -- counters and two position slots, then the code at ROUTINE
+    ROUTINE = 0x30,
+    PLAYER = 0xB7CD98,             -- CWorld::Players[0].m_pPed
+    block = nil,                   -- our code, kept for the next time the option goes on
+    seen = {0, 0},
+}
+local posGuard                     -- {entries = {va, va}} once ours, {owner = text} if another's
+
+-- The routine (ecx = the entity; every register and the flags kept), then an
+-- entry per site: call it, the site's bytes, jmp back. The block: positions put
+-- back, speeds zeroed, then two slots {entity, x, y, z} holding the last good
+-- position seen for the player's ped ([player]) and its vehicle (+58Ch).
+function PG.code(block, player)
+    player = player or PG.PLAYER
+    local code, labels, fixups = {}, {}, {}
+    local function emit(hex, dword)
+        for _, b in ipairs(hexBytes(hex)) do code[#code + 1] = b end
+        if dword then for _, b in ipairs(u32bytes(dword % 0x100000000)) do code[#code + 1] = b end end
+    end
+    local function label(name) labels[name] = #code end
+    local function jump(hex, name, wide)       -- a jcc/jmp/call opcode, then its displacement
+        assert(not wide or hex == "E8" or hex == "E9" or hex:match("^0F 8"), "PG.code: a short opcode with a wide jump")
+        emit(hex)
+        fixups[#fixups + 1] = {at = #code, name = name, wide = wide}
+        for _ = 1, wide and 4 or 1 do code[#code + 1] = 0 end
+    end
+    local POSITIONS, SPEEDS = block, block + 4
+    local PED, PED_POS, CAR, CAR_POS = block + 8, block + 0x0C, block + 0x18, block + 0x1C
+    for _ = 1, PG.ROUTINE do code[#code + 1] = 0 end
+    emit("9C 60 8B F1")                    -- pushfd / pushad / mov esi, ecx
+    emit("8B 7E 14 85 FF")                 -- mov edi, [esi+14h] (m_matrix) / test edi, edi
+    jump("74", "placement")
+    emit("83 C7 30")                       -- add edi, 30h: the matrix's position
+    jump("EB", "check")
+    label("placement")
+    emit("8D 7E 04")                       -- lea edi, [esi+4]: m_placement's
+    label("check")
+    emit("8B D7")                          -- mov edx, edi
+    jump("E8", "valid", true)
+    emit("85 C0")
+    jump("0F 85", "bad", true)
+    -- good: the player's ped or vehicle keeps it as the last good one
+    emit("A1", player)                     -- mov eax, [player]
+    emit("85 C0")
+    jump("0F 84", "speeds", true)
+    emit("3B F0")                          -- cmp esi, eax
+    jump("75", "car")
+    emit("89 35", PED)                     -- mov [ped], esi
+    emit("BA", PED_POS)                    -- mov edx, ped's x, y, z
+    jump("EB", "keep")
+    label("car")
+    emit("3B B0 8C 05 00 00")              -- cmp esi, [eax+58Ch] (m_pVehicle)
+    jump("0F 85", "speeds", true)
+    emit("89 35", CAR)                     -- mov [car], esi
+    emit("BA", CAR_POS)                    -- mov edx, car's x, y, z
+    label("keep")
+    emit("8B 07 89 02 8B 47 04 89 42 04 8B 47 08 89 42 08")   -- x, y, z into the slot
+    jump("E9", "speeds", true)
+    label("bad")
+    emit("FF 05", POSITIONS)               -- inc dword [positions]
+    emit("BA", PED_POS)
+    emit("3B 35", PED)                     -- cmp esi, [ped]: put its last good one back
+    jump("74", "copy")
+    emit("BA", CAR_POS)
+    emit("3B 35", CAR)
+    jump("74", "copy")
+    emit("8B 46 18 85 C0")                 -- mov eax, [esi+18h] (m_pRwObject) / test eax, eax
+    jump("74", "zero")
+    emit("8B 40 04 85 C0")                 -- mov eax, [eax+4] (its frame) / test eax, eax
+    jump("74", "zero")
+    emit("8D 50 40")                       -- lea edx, [eax+40h]: the frame's position
+    jump("E8", "valid", true)
+    emit("85 C0")
+    jump("75", "zero")
+    label("copy")
+    emit("8B 02 89 07 8B 42 04 89 47 04 8B 42 08 89 47 08")   -- x, y, z from edx
+    jump("EB", "stop")
+    label("zero")
+    emit("31 C0 89 07 89 47 04 89 47 08")  -- 0, 0, 0
+    label("stop")
+    emit("31 C0 89 46 44 89 46 48 89 46 4C 89 46 50 89 46 54 89 46 58")   -- move and turn speed 0
+    jump("EB", "done")
+    label("speeds")
+    emit("B9 06 00 00 00 8D 56 44")        -- mov ecx, 6 / lea edx, [esi+44h]
+    label("next")
+    emit("8B 02 25 00 00 80 7F 3D 00 00 80 7F")   -- the exponent all ones: NaN or inf
+    jump("74", "badspeed")
+    emit("83 C2 04 49")                    -- add edx, 4 / dec ecx
+    jump("75", "next")
+    jump("EB", "done")
+    label("badspeed")
+    emit("FF 05", SPEEDS)                  -- inc dword [speeds]
+    jump("EB", "stop")
+    label("done")
+    emit("61 9D C3")                       -- popad / popfd / ret
+    -- edx -> x, y, z: eax 0 when all three are in range, else 1 (only eax changes)
+    label("valid")
+    emit("8B 02 25 FF FF FF 7F 3D", PG.XY_MAX)
+    jump("77", "invalid")
+    emit("8B 42 04 25 FF FF FF 7F 3D", PG.XY_MAX)
+    jump("77", "invalid")
+    emit("8B 42 08 85 C0")
+    jump("78", "below")
+    emit("3D", PG.Z_MAX)
+    jump("77", "invalid")
+    emit("31 C0 C3")
+    label("below")
+    emit("25 FF FF FF 7F 3D", PG.Z_MIN)
+    jump("77", "invalid")
+    emit("31 C0 C3")
+    label("invalid")
+    emit("B8 01 00 00 00 C3")
+    for _, f in ipairs(fixups) do
+        local rel = labels[f.name] - (f.at + (f.wide and 4 or 1))
+        if f.wide then
+            for i, b in ipairs(u32bytes(rel % 0x100000000)) do code[f.at + i] = b end
+        else
+            assert(rel >= -128 and rel <= 127, "PG.code: short jump out of range")
+            code[f.at + 1] = rel % 0x100
+        end
+    end
+    local routine = block + PG.ROUTINE
+    local entries = {}
+    for i, site in ipairs(PG.SITES) do
+        entries[i] = block + #code
+        emit("E8", routine - (entries[i] + 5))
+        for _, b in ipairs(site.from) do code[#code + 1] = b end
+        emit("E9", site.va + #site.from - (block + #code + 5))
+    end
+    return code, entries
+end
+
+-- (fogEntryAt reads any site hooked this way: jmp to an entry that calls the
+-- routine, then holds the site's own bytes.)
+function fixPositionGuard()
+    if posGuard and posGuard.entries then return true end
+    local earlier = {fogEntryAt(PG.SITES[1]), fogEntryAt(PG.SITES[2])}
+    if earlier[1] and earlier[2] then
+        posGuard = {entries = earlier, block = earlier[1] - earlier[1] % 0x10000}   -- VirtualAlloc's 64K base
+        log(string.format("[fixes] 0x%X, 0x%X position guard: already hooked (an earlier run's)", PG.SITES[1].va,
+            PG.SITES[2].va), "info")
+        return true
+    end
+    for _, site in ipairs(PG.SITES) do                 -- both stock before either is written
+        local found = readBytes(site.va, #site.from)
+        if not bytesEqual(found, site.from) then
+            local owner = found and hookOwner(site.va, found)
+            if owner then
+                posGuard = {owner = owner}
+                log(string.format("[fixes] 0x%X position guard: hooked by %s; standing down", site.va, owner), "info")
+            else
+                log(string.format("[fixes] refusing the position guard: 0x%X is %s, expected %s", site.va,
+                    bytesToHex(found), bytesToHex(site.from)), "warn")
+            end
+            return false
+        end
+    end
+    if not PG.block then
+        local p = ffi.C.VirtualAlloc(nil, PG.BLOCK_SIZE, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+        if p == nil then
+            log("[fixes] refusing the position guard: VirtualAlloc failed")
+            return false
+        end
+        PG.block = tonumber(ffi.cast("uintptr_t", p))
+    end
+    local code, entries = PG.code(PG.block)
+    poke(PG.block, code)
+    for i, site in ipairs(PG.SITES) do
+        local jmp = {0xE9, unpack(u32bytes((entries[i] - (site.va + 5)) % 0x100000000))}
+        for _ = 6, #site.from do jmp[#jmp + 1] = 0x90 end
+        writeCode(site.va, jmp)
+    end
+    if fogEntryAt(PG.SITES[1]) ~= entries[1] or fogEntryAt(PG.SITES[2]) ~= entries[2] then
+        for _, site in ipairs(PG.SITES) do writeCode(site.va, site.from) end
+        log("[fixes] refusing the position guard: a hook did not stick; both sites put back", "warn")
+        return false
+    end
+    posGuard = {entries = entries, block = PG.block}
+    log(string.format("[fixes] 0x%X, 0x%X position guard: NaN, inf and off-map positions put back before a ped, " ..
+        "car or object is placed (code at 0x%X)", PG.SITES[1].va, PG.SITES[2].va, PG.block), "info")
+    return true
+end
+
+-- Off: each site that jumps to an entry of ours gets its bytes back.
+function stopPositionGuard()
+    local changed = false
+    for _, site in ipairs(PG.SITES) do
+        if fogEntryAt(site) then
+            writeCode(site.va, site.from)
+            changed = true
+        end
+    end
+    if posGuard and posGuard.entries then posGuard = nil end
+    return changed
+end
+
+-- A line when the guard has put more back; from the main loop.
+function PG.tick()
+    if not (posGuard and posGuard.block) then return end
+    local positions, speeds = readU32(posGuard.block), readU32(posGuard.block + 4)
+    if positions == PG.seen[1] and speeds == PG.seen[2] then return end
+    PG.seen = {positions, speeds}
+    log(string.format("[fixes] position guard: %d bad position(s) put back, %d bad speed(s) zeroed so far",
+        positions, speeds), "warn")
+end
+
+--------------------------------------------------------------------------------
+-- Frame-rate fixes (gta_sa.exe)
+--------------------------------------------------------------------------------
+-- Physics the game applies once per step without the timestep, tuned at 30
+-- fps (a 1.6667 timestep). Each site becomes a call (or a jmp) to a stub in
+-- one shared block that scales by timestep / 1.6667, so 30 fps is stock.
+--   wheelfps  CVehicle::ProcessWheel and ProcessBikeWheel read
+--             gHandlingDataMgr.fWheelFriction (0xC2B9CC) as the coasting
+--             brake: a fixed slow-down per step, so off the throttle a car
+--             stops dead at high fps (Junior_Djjr's Car Speed FPS Fix).
+--   swimfps   CTaskSimpleSwim::ProcessSwimmingResistance blends toward a
+--             target built from the animation's per-frame movement: slow
+--             swimming at high fps. The target is scaled by 1.6667 /
+--             timestep; its other (vertical) branch keeps stock by scaling
+--             its -0.1 the other way (Swim FPS Fix.asi).
+--   floatfps  cBuoyancy::CalcBuoyancyForce's timestep becomes t * (t / 1.5
+--             + 1), t = timestep / 1.6667: less lift above 30 fps, which
+--             keeps a swimmer at the surface. Everything that floats, boats
+--             too (Swim FPS Fix.asi).
+-- A stub starts with a game-address instruction, which is how a reload knows
+-- its own hooks. Options "wheelfps", "swimfps", "floatfps".
+local FPS = {
+    TIMESTEP = 0xB7CB5C,           -- CTimer::ms_fTimeStep
+    SITES = {
+        {va = 0x6D6E69, option = "wheelfps", stub = "wheel", from = hexBytes("D9 05 CC B9 C2 00")},
+        {va = 0x6D6EA8, option = "wheelfps", stub = "wheel", from = hexBytes("D9 05 CC B9 C2 00")},
+        {va = 0x6D767F, option = "wheelfps", stub = "wheel", from = hexBytes("D9 05 CC B9 C2 00")},
+        {va = 0x6D76AB, option = "wheelfps", stub = "wheel", from = hexBytes("D9 05 CC B9 C2 00")},
+        {va = 0x6D76CD, option = "wheelfps", stub = "wheel", from = hexBytes("D9 05 CC B9 C2 00")},
+        -- fstp [esp+1Ch] / fld [esp+14h] / fmul st,st1 / fstp [esp+20h] / fmul [esp+18h]: jmp, not call
+        {va = 0x68A4FC, option = "swimfps", stub = "swim", jmp = true,
+         from = hexBytes("D9 5C 24 1C D9 44 24 14 D8 C9 D9 5C 24 20 D8 4C 24 18")},
+        {va = 0x68A42B, option = "swimfps", stub = "dive", from = hexBytes("D8 0D F4 8E 85 00")},   -- fmul [-0.1]
+        {va = 0x6C27AE, option = "floatfps", stub = "float", from = hexBytes("D8 0D 5C CB B7 00")},  -- fmul [timestep]
+    },
+    block = nil,
+    stubs = nil,                   -- name -> va, once the block is written
+    owner = {},                    -- option -> another mod's name, when it stood down
+}
+
+-- The block: four constants, then each stub. -> bytes, {name = va}. `game`
+-- moves the game globals the stubs read (the tests' harness).
+function FPS.code(block, game)
+    game = game or {timestep = FPS.TIMESTEP, friction = 0xC2B9CC, minus = 0x858EF4, back = 0x68A50E}
+    local code, at = {}, {}
+    local function emit(hex, dword)
+        for _, b in ipairs(hexBytes(hex)) do code[#code + 1] = b end
+        if dword then for _, b in ipairs(u32bytes(dword % 0x100000000)) do code[#code + 1] = b end end
+    end
+    local K30, INV30, K15, ONE = block, block + 4, block + 8, block + 12
+    emit("55 55 D5 3F 9A 99 19 3F 00 00 C0 3F 00 00 80 3F")    -- 1.6666666, 0.6, 1.5, 1.0
+    at.wheel = block + #code
+    emit("D9 05", game.friction)           -- fld [fWheelFriction]
+    emit("D8 0D", game.timestep)           -- fmul [timestep]
+    emit("D8 0D", INV30)                   -- fmul [0.6]
+    emit("C3")
+    at.swim = block + #code
+    emit("D9 05", game.timestep)           -- fld [timestep]
+    emit("D8 3D", K30)                     -- fdivr [1.6667]: k = 1.6667 / timestep; x*blend, blend, pow under it
+    emit("DC C9 D9 C9")                    -- fmul st(1), st / fxch: x*blend*k on top, k under it
+    emit("D9 5C 24 1C")                    -- fstp [esp+1Ch]
+    emit("D9 44 24 14 D8 CA D8 C9")        -- fld [esp+14h] / fmul st, st(2) (blend) / fmul st, st(1) (k)
+    emit("D9 5C 24 20")                    -- fstp [esp+20h]
+    emit("DE C9 D8 4C 24 18")              -- fmulp st(1), st: blend*k / fmul [esp+18h]
+    emit("E9", game.back - (block + #code + 5))
+    at.dive = block + #code
+    emit("D8 0D", game.minus)              -- fmul [-0.1]
+    emit("D8 0D", game.timestep)           -- fmul [timestep]
+    emit("D8 0D", INV30)                   -- fmul [0.6]: the swim stub's k cancels it
+    emit("C3")
+    at.float = block + #code
+    emit("D9 05", game.timestep)           -- fld [timestep]
+    emit("D8 0D", INV30)                   -- fmul [0.6]: t
+    emit("D9 C0 D8 35", K15)               -- fld st(0) / fdiv [1.5]
+    emit("D8 05", ONE)                     -- fadd [1.0]
+    emit("DE C9 DE C9 C3")                 -- fmulp: t * (t/1.5 + 1) / fmulp: times the buoyancy / ret
+    at.cleoEnd = block + #code
+    emit("93 0A")                          -- 0A93 end_custom_script, for a CLEO script this ends
+    return code, at
+end
+
+-- The stub head a site of ours calls or jumps to, or nil.
+local function fpsHookTarget(site)
+    local b = readBytes(site.va, 5)
+    if not b or b[1] ~= (site.jmp and 0xE9 or 0xE8) then return nil end
+    local at = (site.va + 5 + bytesU32({b[2], b[3], b[4], b[5]})) % 0x100000000
+    if moduleAt(at) then return nil end
+    local head = readBytes(at, 6)
+    local want = ({wheel = "D9 05 CC B9 C2 00", swim = "D9 05 5C CB B7 00", dive = "D8 0D F4 8E 85 00",
+                   float = "D9 05 5C CB B7 00"})[site.stub]
+    return head and bytesEqual(head, hexBytes(want)) and at or nil
+end
+
+-- -> sites in place (0 when it stood down or refused)
+function fixFrameRate(option)
+    local mine = {}
+    for _, site in ipairs(FPS.SITES) do if site.option == option then mine[#mine + 1] = site end end
+    local todo = {}
+    for _, site in ipairs(mine) do
+        local adopted = fpsHookTarget(site)
+        if adopted and not FPS.block then                -- an earlier run's: VirtualAlloc's 64K base
+            FPS.block = adopted - adopted % 0x10000
+            local _
+            _, FPS.stubs = FPS.code(FPS.block)
+        end
+        if not adopted then
+            local found = readBytes(site.va, #site.from)
+            if not bytesEqual(found, site.from) then
+                local owner = found and hookOwner(site.va, found)
+                FPS.owner[option] = owner
+                if owner then
+                    log(string.format("[fixes] 0x%X %s: hooked by %s; standing down", site.va, option, owner), "info")
+                else
+                    log(string.format("[fixes] refusing %s: 0x%X is %s, expected %s", option, site.va,
+                        bytesToHex(found), bytesToHex(site.from)), "warn")
+                end
+                return 0
+            end
+            todo[#todo + 1] = site
+        end
+    end
+    if #todo == 0 then return #mine end
+    if not FPS.block then
+        local p = ffi.C.VirtualAlloc(nil, 0x100, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+        if p == nil then
+            log("[fixes] refusing " .. option .. ": VirtualAlloc failed")
+            return 0
+        end
+        FPS.block = tonumber(ffi.cast("uintptr_t", p))
+        local code
+        code, FPS.stubs = FPS.code(FPS.block)
+        poke(FPS.block, code)
+    end
+    for _, site in ipairs(todo) do
+        local to = FPS.stubs[site.stub]
+        local bytes = {site.jmp and 0xE9 or 0xE8, unpack(u32bytes((to - (site.va + 5)) % 0x100000000))}
+        for _ = 6, #site.from do bytes[#bytes + 1] = 0x90 end
+        writeCode(site.va, bytes)
+    end
+    log(string.format("[fixes] %s: %d site(s) scale by the timestep (code at 0x%X)", option, #mine, FPS.block), "info")
+    return #mine
+end
+
+-- Off: each site of ours gets its bytes back. -> sites changed
+function stopFrameRate(option)
+    local changed = 0
+    for _, site in ipairs(FPS.SITES) do
+        if site.option == option and fpsHookTarget(site) then
+            writeCode(site.va, site.from)
+            changed = changed + 1
+        end
+    end
+    return changed
+end
+
+--------------------------------------------------------------------------------
 -- Animation wipes (gta_sa.exe)
 --------------------------------------------------------------------------------
 -- RpAnimBlendClumpRemoveAllAssociations (0x4D6C00) deletes every animation on a
@@ -2525,7 +2951,8 @@ local function screenRpc(id, bs)
             noteRpc("menu", "dropped a server menu with " .. why)
             return false
         end
-    elseif id == RPC_SET_PLAYER_POS or id == RPC_SET_PLAYER_POS_FIND_Z or id == RPC_SET_VEHICLE_POS then
+    elseif (id == RPC_SET_PLAYER_POS or id == RPC_SET_PLAYER_POS_FIND_Z or id == RPC_SET_VEHICLE_POS)
+            and options.rpcpositions ~= false then
         local vehicle = id == RPC_SET_VEHICLE_POS and raknetBitStreamReadInt16(bs)
         local why = checkPosition(bs)
         if why then
@@ -2563,6 +2990,83 @@ local otherFixes = {}
 
 local function noteFix(name, worked, owner)
     otherFixes[#otherFixes + 1] = {name, worked and "in place" or owner and ("left to " .. owner) or "not in place"}
+end
+
+-- Another copy of a fix fixes carries. Junior_Djjr's Car Speed FPS Fix is a
+-- CLEO script that rewrites fWheelFriction every frame, which wheelfps would
+-- then scale a second time: found in CTheScripts' active list (0xA8B42C;
+-- next +0, base IP +10h, IP +14h) by its first instruction (0A8D, the
+-- handling manager operand 0x5B7273) and a 0A8C write, its IP pointed at an
+-- 0A93 so CLEO ends and frees it, and fWheelFriction put back to 0.9. Only
+-- while wheelfps is ours. The ASIs a fix stood down for are named in chat.
+FPS.CLEO_HEAD = hexBytes("8D 0A 01 73 72 5B 00")
+FPS.DUPLICATES = {["swim fps fix.asi"] = "swimfps", ["gxt_crash_fix.asi"] = "the GXT string fix"}
+FPS.told = {}
+
+-- The .cs file in cleo\ holding the script, or nil.
+function FPS.cleoFile()
+    if type(findFirstFile) ~= "function" then return nil end
+    local dir = getGameDirectory() .. "\\cleo\\"
+    local handle, name = findFirstFile(dir .. "*.cs")
+    local found
+    while handle and name and not found do
+        local f = io.open(dir .. name, "rb")
+        local head = f and f:read(7)
+        if f then f:close() end
+        if head == string.char(unpack(FPS.CLEO_HEAD)) then found = name end
+        name = findNextFile(handle)
+    end
+    if handle then findClose(handle) end
+    return found
+end
+
+-- Ends the Car Speed FPS Fix script if it runs. -> true when it ended one
+function FPS.endCleoScript()
+    if not (FPS.stubs and FPS.stubs.cleoEnd) then return false end
+    local wheel = FPS.SITES[1]
+    if not fpsHookTarget(wheel) then return false end
+    local script, ended, guard = readU32(0xA8B42C), false, 0
+    while script ~= 0 and guard < 1000 do
+        guard = guard + 1
+        local base = readU32(script + 0x10)
+        if base ~= 0 and bytesEqual(readBytes(base, 7), FPS.CLEO_HEAD) then
+            local body, writes = readBytes(base, 96), false
+            for i = 8, 95 do if body[i] == 0x8C and body[i + 1] == 0x0A then writes = true end end
+            if writes and readU32(script + 0x14) ~= FPS.stubs.cleoEnd then
+                writeCode(script + 0x14, u32bytes(FPS.stubs.cleoEnd))
+                writeCode(0xC2B9CC, hexBytes("66 66 66 3F"))   -- fWheelFriction 0.9, as the game sets it
+                ended = true
+            end
+        end
+        script = readU32(script)
+    end
+    if ended then
+        local file = FPS.cleoFile()
+        log(string.format("[fixes] wheelfps: ended Car Speed FPS Fix (CLEO%s), which rewrites fWheelFriction every " ..
+            "frame; fWheelFriction back to 0.9", file and ", cleo\\" .. file or ""), "warn")
+        say(string.format("Car Speed FPS Fix (CLEO) was running and is stopped: fixes does the same (/fixes wheelfps). " ..
+            "Delete {6BB6E8}cleo\\%s{FFFFFF}.", file or "its .cs file"))
+    end
+    return ended
+end
+
+-- Once SA-MP is up: each ASI a fix stood down for, named in chat once.
+function FPS.reportDuplicates()
+    local owners = {}
+    for option, owner in pairs(FPS.owner) do owners[#owners + 1] = {owner, option} end
+    for _, p in ipairs(gamePatches) do
+        if p.state == "conflict" and p.va == 0x69DB50 then owners[#owners + 1] = {p.why, "the GXT string fix"} end
+    end
+    for _, o in ipairs(owners) do
+        local module = tostring(o[1]):match("^([^%(]-)%s*$") or ""
+        local what = FPS.DUPLICATES[module:lower()]
+        if what and not FPS.told[module:lower()] then
+            FPS.told[module:lower()] = true
+            log(string.format("[fixes] %s is left to %s; fixes carries the same fix", what, module), "warn")
+            say(string.format("%s does what fixes already does (%s), so fixes left it to it. Delete it to use fixes'.",
+                module, what))
+        end
+    end
 end
 
 -- A gta_sa.exe patch's state, as /fixes patches shows it.
@@ -2734,6 +3238,22 @@ function main()
         stopFogRestore()
         otherFixes[#otherFixes + 1] = {"fog restore", "off (option fogrestore)"}
     end
+    for _, key in ipairs({"wheelfps", "swimfps", "floatfps"}) do
+        if options[key] then
+            local n = fixFrameRate(key)
+            noteFix(key, n > 0, FPS.owner[key])
+        else
+            stopFrameRate(key)
+            otherFixes[#otherFixes + 1] = {key, "off (option " .. key .. ")"}
+        end
+    end
+    if options.positionguard then
+        worked = fixPositionGuard()
+        noteFix("position guard", worked, posGuard and posGuard.owner)
+    else
+        stopPositionGuard()
+        otherFixes[#otherFixes + 1] = {"position guard", "off (option positionguard)"}
+    end
 
     -- Past here we need the game and SA-MP actually initialised.
     while not isSampAvailable() do wait(0) end
@@ -2763,7 +3283,8 @@ function main()
     applyGamePatches("late")      -- data the game writes during CGame init
     worked = isSampfuncsLoaded and isSampfuncsLoaded()
     if worked then
-        log(("[fixes] server RPC checks on: animations (86, 173), menus (76), teleports (12, 13, 159), list dialog lines (61, %s)"):format(
+        log(("[fixes] server RPC checks on: animations (86, 173), menus (76), teleports (12, 13, 159, %s), list dialog lines (61, %s)"):format(
+            options.rpcpositions and "on" or "off: option rpcpositions",
             options.dialoglines and "on" or "off: option dialoglines"), "info")
     else
         log("[fixes] server RPC checks are off: they need SAMPFUNCS, which is not loaded", "warn")
@@ -2778,6 +3299,8 @@ function main()
     if sigscanOk then pcall(sigscan.flush) end   -- remember the offsets for next launch
 
     noteFix("animation blocks pinned", pinAnimBlocks())   -- needs the streamer and CAnimManager up
+    FPS.endCleoScript()
+    FPS.reportDuplicates()
     reportStartup()
 
     local nextFilterCheck = 0
@@ -2785,6 +3308,6 @@ function main()
         wait(0)
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
-        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); crashFixTick(now) end
+        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.endCleoScript(); crashFixTick(now) end
     end
 end

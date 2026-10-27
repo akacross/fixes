@@ -159,7 +159,7 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing == 4 and all:find('background on, crashfix on, dialoglines on, floatclock on, focusmenu off, fogrestore on', 1, true)
+    ok(#listing == 5 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, crashfix on, dialoglines on, floatclock on, floatfps on, focusmenu off', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
     env.fixesCommand('frameclone')
@@ -558,6 +558,36 @@ ok(same(get(BM_VA, 32), hex(BM_PATCHED)) and same(get(TXD_SITES[2], 5), {0x6A, 0
 
 print('\n== a hook at a site: stand down, naming it, nothing written')
 stockMiTurbo()
+
+--------------------------------------------------------------------------------
+-- 0.18.0: CMessages::GetStringLength returns 0 for a null string
+--------------------------------------------------------------------------------
+local GXT_VA = 0x69DB50
+local GXT_STOCK = '8B4C24048A1133C084D2740D8D6424008A51014041 84D275F7C3'
+local GXT_PATCHED = '8B4C240433C085C9740980 3C0100740340EBF7C3' .. ('90'):rep(6)
+local function stockGxt() put(GXT_VA, unpack(hex(GXT_STOCK))) end
+
+print('\n== GXT strings: a null one has length 0, not a crash at 0x69DB54')
+stockGxt()
+env.applyGamePatches('early')
+ok(same(get(GXT_VA, 26), hex(GXT_PATCHED)), 'test ecx / jz ret / cmp byte [ecx+eax],0 / je ret / inc eax / jmp')
+ok(GXT_VA + 10 + 9 == GXT_VA + 19 and get(GXT_VA + 19, 1)[1] == 0xC3, 'the null jz and the end je land on the ret')
+env.applyGamePatches('early')
+ok(same(get(GXT_VA, 26), hex(GXT_PATCHED)), 'a second run finds it in place')
+
+print('\n== GXT strings: gxt_crash_fix.asi\'s hook at 0x69DB54 is left to it')
+stockGxt()
+put(GXT_VA + 4, 0xE9); putU32(GXT_VA + 5, 0x13377000 - (GXT_VA + 9))
+do
+    local before = get(GXT_VA, 26)
+    local from = #printed
+    env.applyGamePatches('early')
+    ok(same(get(GXT_VA, 26), before), 'nothing written')
+    local line
+    for i = from + 1, #printed do if printed[i]:find('GetStringLength', 1, true) then line = printed[i] end end
+    ok(line and line:find('owned by code at 0x13377000', 1, true), 'named: ' .. tostring(line))
+end
+stockGxt()
 put(BM_VA, 0xE9, 0x00, 0x00, 0x10, 0x00)
 put(TXD_SITES[1], 0xE8, 0x00, 0x00, 0x10, 0x00)
 do
@@ -644,7 +674,7 @@ end
 print('\n== each site gets its own log line')
 do
     local from = #printed
-    stockMiTurbo()
+    stockMiTurbo(); stockGxt()
     put(TXD_SITES[2], 0x6A, 0x04, 0x90, 0x90, 0x90)                   -- as if a run before did it
     env.applyGamePatches('early')
     local applied = lineAfter(from, 'AddBigMessage style bound')
@@ -681,7 +711,8 @@ do
     ok(listed('0x69F2D8 CMessages::AddBigMessage style bound: applied'), 'an applied site')
     ok(listed('0x73109B RwTexDictionaryGtaStreamRead1 struct size: already set'), 'an already-set site')
     ok(listed('0x6D6517 CVehicle::SetupRender plate guard: off (option plates)'), 'a site whose option is off')
-    ok(listed('0xC2B9CC gHandlingDataMgr.fWheelFriction: not applied yet'), 'the late site before the late phase')
+    ok(listed('0x69DB50 CMessages::GetStringLength null string: applied'), 'the GXT strlen rewritten: ' ..
+        tostring(listed('0x69DB50')))
     ok(listed('other fixes: not run yet'), 'and says the other fixes have not run before main has')
 end
 
@@ -826,6 +857,9 @@ do
     dropped(13, 25000.0, 0.0, 10.0, 'a find-Z teleport past 20000')
     dropped(12, 0.0, 0.0, -20000.0, 'a teleport under the world')
     dropped(159, 0.0, 0.0, 1e9, 'a vehicle teleport into the sky')
+    env.fixesCommand('rpcpositions off')
+    allPass(12, pos(12, 0 / 0, 0.0, 0.0), 'rpcpositions off: a NaN teleport passes, for the position guard to catch')
+    env.fixesCommand('rpcpositions on')
 end
 
 print('\n== RPCs: /fixes counts the teleports it dropped')
@@ -861,7 +895,7 @@ do
         local checked, wrong = 0, {}
         for _, p in ipairs(upvalue(env.applyGamePatches, 'gamePatches')) do
             local o = fileOffset(p.va, #p.from)
-            local stock = p.fromSamp and p.to or p.from
+            local stock = p.fileFrom or p.fromSamp and p.to or p.from
             if o then
                 checked = checked + 1
                 for i = 1, #stock do
@@ -870,6 +904,22 @@ do
             end
         end
         ok(checked >= 120 and #wrong == 0, ('%d checked against the file, wrong: %s'):format(checked, table.concat(wrong, '; ')))
+        local guardWrong = {}
+        for _, site in ipairs(upvalue(env.fixPositionGuard, 'PG').SITES) do
+            local o = fileOffset(site.va, #site.from)
+            for i = 1, #site.from do
+                if not o or exe:byte(o + i) ~= site.from[i] then guardWrong[#guardWrong + 1] = ('0x%X'):format(site.va); break end
+            end
+        end
+        ok(#guardWrong == 0, 'the position guard\'s two sites are the file\'s bytes: ' .. table.concat(guardWrong, ', '))
+        local fpsWrong = {}
+        for _, site in ipairs(upvalue(env.fixFrameRate, 'FPS').SITES) do
+            local o = fileOffset(site.va, #site.from)
+            for i = 1, #site.from do
+                if not o or exe:byte(o + i) ~= site.from[i] then fpsWrong[#fpsWrong + 1] = ('0x%X'):format(site.va); break end
+            end
+        end
+        ok(#fpsWrong == 0, 'the 8 frame-rate sites are the file\'s bytes: ' .. table.concat(fpsWrong, ', '))
         local function fileHas(va, bytes)
             local o = fileOffset(va, #bytes)
             if not o then return false end
@@ -920,18 +970,20 @@ print('\n== the owners the first in-game run found (2026-10-25): named, not refu
 stockMta()
 put(0x738F3A, 0xFF, 0x25, 0x00, 0x00, 0x50, 0x40); putU32(0x40500000, 0x13372000)   -- SA-MP's jmp [ptr]
 put(0x7469A0, 0x30, 0xC0, 0x90, 0x90)                                               -- SilentPatch's xor al,al
-put(0x8A5A84, 0x16, 0x00, 0x00, 0x00)                                               -- ProperShaders' value
-loadedModules['ProperShaders.asi'] = 0x61000000
+put(0x8A5A84, 0x20, 0x00, 0x00, 0x00)                                               -- a stream.ini vehicles value
 env.applyGamePatches('late')
 ok(mem[0x738F3A] == 0xFF and findPrinted('satchelCrashFix'):find('owned by code at 0x13372000', 1, true),
     'an indirect jmp is a hook too, and its target named: ' .. tostring(findPrinted('satchelCrashFix')))
 ok(same(get(0x7469A0, 4), {0x30, 0xC0, 0x90, 0x90}) and findPrinted('dinputNonExclusiveMouse'):find('owned by SilentPatch', 1, true),
     'SilentPatch\'s same mouse patch: ' .. tostring(findPrinted('dinputNonExclusiveMouse')))
-ok(mem[0x8A5A84] == 0x16 and findPrinted('value_8A5A84_127'):find('owned by ProperShaders.asi (it sets this value)', 1, true),
-    'ProperShaders\' value: ' .. tostring(findPrinted('value_8A5A84_127')))
-loadedModules['ProperShaders.asi'] = nil
+ok(mem[0x8A5A84] == 0x20 and findPrinted('value_8A5A84_127'):find('owned by stream.ini', 1, true),
+    'a value set on purpose stands down: ' .. tostring(findPrinted('value_8A5A84_127')))
+put(0x8A5A84, 0x16, 0x00, 0x00, 0x00)                                               -- what CStreaming init sets
 env.applyGamePatches('late')
-ok(findPrinted('value_8A5A84_127'):find('refusing', 1, true), 'without ProperShaders the changed value is refused')
+ok(same(get(0x8A5A84, 4), {0x7F, 0x00, 0x00, 0x00}), 'the game\'s own 22 is stock: 127 is written')
+env.fixesCommand('mtapatches off')
+ok(same(get(0x8A5A84, 4), {0x16, 0x00, 0x00, 0x00}), 'and off puts 22 back, not the file\'s 12')
+env.fixesCommand('mtapatches on')
 for _, p in ipairs(patchList) do if p.va == 0x74872D then put(p.va, unpack(p.from)) end end
 put(0x74872D, 0xE8); putU32(0x74872E, 0x13373000 - 0x748732)                          -- SilentPatch's call
 env.applyGamePatches('early')
@@ -961,6 +1013,23 @@ do
     env.fixesCommand('focusmenu on')
     env.fixesCommand('focusmenu off')
     ok(same(get(SITE, 5), CALL), 'a call SA-MP left in place is not NOPed by off')
+end
+
+print('\n== keepcars: 01C3 keeps the car, on by default')
+do
+    local SITE, CALL, NOPS = 0x47D775, {0xE8, 0xF6, 0x8E, 0x00, 0x00}, {0x90, 0x90, 0x90, 0x90, 0x90}
+    put(SITE, unpack(CALL))
+    env.applyGamePatches('early')
+    ok(same(get(SITE, 5), NOPS), 'on by default: the CleanUpThisVehicle call is NOPed')
+    env.fixesCommand('keepcars off')
+    ok(same(get(SITE, 5), CALL), 'off: the call is back')
+    env.fixesCommand('keepcars on')
+    ok(same(get(SITE, 5), NOPS), 'on again')
+    env.fixesCommand('keepcars off')
+    put(SITE, 0xE8); putU32(SITE + 1, 0x13374000 - (SITE + 5))     -- another mod's hook on the call
+    local hooked = get(SITE, 5)
+    env.fixesCommand('keepcars on')
+    ok(same(get(SITE, 5), hooked), 'a redirected call is left to its owner')
 end
 
 print('\n== visual switches: crashes.asi\'s defaults, each its own option')
@@ -1358,6 +1427,215 @@ end
 fogSession(); fogStock()
 
 --------------------------------------------------------------------------------
+-- 0.18.0: the position guard (its code runs in position_guard_test.sh)
+--------------------------------------------------------------------------------
+local PG_ADD, PG_RAA = 0x544A30, 0x542560
+local PG_ADD_STOCK, PG_RAA_STOCK = '64A100000000', '83EC2C558BE9'
+local PG = upvalue(env.fixPositionGuard, 'PG')
+local function guardSession()   -- a new session: fixes' state gone, the sites as they are
+    local i = 1
+    while true do
+        local name = debug.getupvalue(env.fixPositionGuard, i)
+        if not name then break end
+        if name == 'posGuard' then debug.setupvalue(env.fixPositionGuard, i, nil) end
+        i = i + 1
+    end
+    PG.block = nil
+end
+local function guardStock() put(PG_ADD, unpack(hex(PG_ADD_STOCK))); put(PG_RAA, unpack(hex(PG_RAA_STOCK))) end
+
+print('\n== position guard: each entry calls the routine, replays its site and goes back')
+do
+    local code, entries = PG.code(0x40000000)
+    local function at(va) return code[va - 0x40000000 + 1] end
+    local function rel(va) return (va + 5 + (at(va + 1) + at(va + 2) * 0x100 + at(va + 3) * 0x10000 + at(va + 4) * 0x1000000))
+        % 0x100000000 end
+    local routine = 0x40000000 + PG.ROUTINE
+    ok(#code < PG.BLOCK_SIZE and at(routine) == 0x9C and at(routine + 1) == 0x60, 'the routine after the slots, inside the block')
+    ok(at(entries[1]) == 0xE8 and rel(entries[1]) == routine and at(entries[2]) == 0xE8 and rel(entries[2]) == routine,
+        'each entry calls it')
+    local a, b = {}, {}
+    for i = 1, 6 do a[i] = at(entries[1] + 4 + i); b[i] = at(entries[2] + 4 + i) end
+    ok(same(a, hex(PG_ADD_STOCK)) and same(b, hex(PG_RAA_STOCK)), 'then its site\'s bytes')
+    ok(at(entries[1] + 11) == 0xE9 and rel(entries[1] + 11) == PG_ADD + 6 and at(entries[2] + 11) == 0xE9
+        and rel(entries[2] + 11) == PG_RAA + 6, 'then jmps back past them')
+end
+
+print('\n== position guard: both sites hooked, logged')
+guardSession(); guardStock()
+allocs = 0
+ok(env.fixPositionGuard() == true and allocs == 1, 'applied, one block')
+local pgEntryA, pgEntryB = jmpTarget(PG_ADD), jmpTarget(PG_RAA)
+ok(pgEntryA and pgEntryB and mem[PG_ADD + 5] == 0x90 and mem[PG_RAA + 5] == 0x90, 'each site jmps to its entry, its 6th byte NOPed')
+ok(printed[#printed]:find('0x544A30, 0x542560 position guard', 1, true), 'said: ' .. tostring(printed[#printed]))
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixPositionGuard() == true and allocs == 1 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)), 'again: nothing changes')
+end
+
+print('\n== position guard: /fixes positionguard off puts both back; on reuses the block')
+env.fixesCommand('positionguard off')
+ok(same(get(PG_ADD, 6), hex(PG_ADD_STOCK)) and same(get(PG_RAA, 6), hex(PG_RAA_STOCK)), 'both stock: ' .. tostring(chat[#chat]))
+env.fixesCommand('positionguard on')
+ok(jmpTarget(PG_ADD) == pgEntryA and jmpTarget(PG_RAA) == pgEntryB and allocs == 1, 'hooked again, nothing allocated')
+
+print('\n== position guard: a reload finds the hooks an earlier run left')
+guardSession()
+ok(env.fixPositionGuard() == true and allocs == 1 and jmpTarget(PG_ADD) == pgEntryA, 'taken as ours, nothing allocated')
+ok(printed[#printed]:find('an earlier run', 1, true), 'said so: ' .. tostring(printed[#printed]))
+ok(upvalue(env.fixPositionGuard, 'posGuard').block == pgEntryA - pgEntryA % 0x10000, 'its counters found at the block\'s base')
+ok(env.stopPositionGuard() == true and same(get(PG_ADD, 6), hex(PG_ADD_STOCK)) and same(get(PG_RAA, 6), hex(PG_RAA_STOCK)),
+    'and an earlier run\'s hooks come out when the option is off')
+
+print('\n== position guard: another hook at either site: stand down, nothing written')
+for _, site in ipairs({PG_ADD, PG_RAA}) do
+    guardSession(); guardStock()
+    put(site, 0xE9); putU32(site + 1, 0x13376000 - (site + 5))
+    allocs = 0
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixPositionGuard() == false and allocs == 0 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)),
+        ('0x%X hooked: not applied, the other site left stock'):format(site))
+    ok(printed[#printed]:find('hooked by code at 0x13376000; standing down', 1, true), 'named: ' .. tostring(printed[#printed]))
+end
+
+print('\n== position guard: a site that is not stock and no hook: refused, nothing written')
+guardSession(); guardStock()
+mem[PG_RAA + 2] = 0x30
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixPositionGuard() == false and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)), 'refused, nothing written')
+    ok(printed[#printed]:find('refusing the position guard: 0x542560 is 83 EC 30', 1, true), 'said why: ' .. tostring(printed[#printed]))
+end
+guardSession(); guardStock()
+
+--------------------------------------------------------------------------------
+-- 0.18.0: frame-rate fixes (their stubs run in fps_fixes_test.sh)
+--------------------------------------------------------------------------------
+local FPS = upvalue(env.fixFrameRate, 'FPS')
+local function fpsStock() for _, site in ipairs(FPS.SITES) do put(site.va, unpack(site.from)) end end
+local function fpsSession() FPS.block, FPS.stubs, FPS.owner = nil, nil, {} end
+local function callTarget(va) return (mem[va] == 0xE8 or mem[va] == 0xE9) and (va + 5 + getU32(va + 1)) % 0x100000000 or nil end
+
+print('\n== wheelfps: the five fWheelFriction loads call the wheel stub')
+fpsSession(); fpsStock()
+allocs = 0
+ok(env.fixFrameRate('wheelfps') == 5 and allocs == 1, 'five sites, one block')
+local wheelStub = FPS.stubs.wheel
+local called = 0
+for _, site in ipairs(FPS.SITES) do
+    if site.option == 'wheelfps' and mem[site.va] == 0xE8 and callTarget(site.va) == wheelStub and mem[site.va + 5] == 0x90 then
+        called = called + 1
+    end
+end
+ok(called == 5, 'each a call to it, its 6th byte NOPed (' .. called .. ')')
+ok(same(get(wheelStub, 6), hex('D905CCB9C200')), 'the stub loads fWheelFriction itself')
+ok(same(get(0x68A4FC, 18), hex('D95C241CD9442414D8C9D95C2420D84C2418')), 'swimfps untouched')
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixFrameRate('wheelfps') == 5 and allocs == 1 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)), 'again: nothing changes')
+end
+
+print('\n== swimfps and floatfps share the block')
+ok(env.fixFrameRate('swimfps') == 2 and env.fixFrameRate('floatfps') == 1 and allocs == 1, 'no second block')
+ok(mem[0x68A4FC] == 0xE9 and callTarget(0x68A4FC) == FPS.stubs.swim and same(get(0x68A501, 13), hex(('90'):rep(13))),
+    'the swim site jmps (18 bytes: the rest NOPed)')
+ok(mem[0x68A42B] == 0xE8 and callTarget(0x68A42B) == FPS.stubs.dive, 'the -0.1 site calls the dive stub')
+ok(mem[0x6C27AE] == 0xE8 and callTarget(0x6C27AE) == FPS.stubs.float, 'the buoyancy site calls the float stub')
+
+print('\n== off puts each option\'s sites back, and only those')
+ok(env.stopFrameRate('swimfps') == 2 and same(get(0x68A4FC, 18), hex('D95C241CD9442414D8C9D95C2420D84C2418'))
+    and same(get(0x68A42B, 6), hex('D80DF48E8500')), 'swimfps stock')
+ok(callTarget(0x6D6E69) == wheelStub and callTarget(0x6C27AE) == FPS.stubs.float, 'the others stay')
+env.fixesCommand('wheelfps off')
+ok(same(get(0x6D6E69, 6), hex('D905CCB9C200')), '/fixes wheelfps off: ' .. tostring(chat[#chat]))
+env.fixesCommand('wheelfps on')
+ok(callTarget(0x6D6E69) == wheelStub and allocs == 1, 'on again: the same stubs')
+
+print('\n== a reload takes an earlier run\'s hooks')
+fpsSession()
+ok(env.fixFrameRate('wheelfps') == 5 and allocs == 1 and callTarget(0x6D6E69) == wheelStub, 'taken as ours, nothing allocated')
+ok(env.stopFrameRate('wheelfps') == 5 and same(get(0x6D76CD, 6), hex('D905CCB9C200')), 'and comes out when off')
+
+print('\n== another mod\'s hook at a site stands the option down')
+fpsSession(); fpsStock()
+put(0x6D767F, 0xE8); putU32(0x6D7680, 0x13378000 - 0x6D7684)
+allocs = 0
+do
+    local before = snapshot(0x00400000, 0x7FFFFFFF)
+    ok(env.fixFrameRate('wheelfps') == 0 and allocs == 0 and unchanged(before, snapshot(0x00400000, 0x7FFFFFFF)),
+        'not applied, nothing written')
+    ok(printed[#printed]:find('hooked by code at 0x13378000; standing down', 1, true) and
+        FPS.owner.wheelfps == 'code at 0x13378000', 'named: ' .. tostring(printed[#printed]))
+end
+fpsSession(); fpsStock()
+
+print('\n== Car Speed FPS Fix (CLEO) is ended when wheelfps is ours, and named')
+do
+    -- what identifies it: 0A8D reading 0x5B7273 first, an 0A8C write later
+    local cs = '\141\10\1\115\114\91\0\4\4\4\0\3\0\0' .. '\1\0\4\0' .. ('\0'):rep(30) ..
+        '\140\10\3\0\0\4\4\3\4\0\4\0' .. '\2\0\1\235\255\255\255' .. '\147\10'
+    local CS_BASE, SCRIPT_A, SCRIPT_B, OTHER = 0x07000000, 0x07100000, 0x07100100, 0x07200000
+    for i = 1, #cs do mem[CS_BASE + i - 1] = cs:byte(i) end
+    put(OTHER, 0x01, 0x00, 0x04, 0x00)                                -- another script: wait 0
+    local function script(at, nextScript, base, ip)
+        putU32(at, nextScript); putU32(at + 0x10, base); putU32(at + 0x14, ip)
+    end
+    script(SCRIPT_A, SCRIPT_B, OTHER, OTHER)
+    script(SCRIPT_B, 0, CS_BASE, CS_BASE + 0x15)                      -- after its wait 0
+    putU32(0xA8B42C, SCRIPT_A)
+    put(0xC2B9CC, 0xC5, 0x20, 0x70, 0x3E)                             -- what it wrote last (0.2345)
+    fpsSession(); fpsStock()
+    ok(env.fixFrameRate('wheelfps') == 5, 'wheelfps ours')
+    -- its file in a cleo folder of a game directory
+    local dir = os.tmpname(); os.remove(dir); os.execute('mkdir -p "' .. dir .. '/cleo"')
+    local out = assert(io.open(dir .. '/cleo/Car Speed FPS Fix (Junior_Djjr).cs', 'wb')); out:write(cs); out:close()
+    local other = assert(io.open(dir .. '/cleo/other.cs', 'wb')); other:write('\1\0\4\0'); other:close()
+    env.getGameDirectory = function() return dir end
+    local listing
+    env.findFirstFile = function(mask)
+        listing = {'other.cs', 'Car Speed FPS Fix (Junior_Djjr).cs'}
+        return 1, table.remove(listing, 1)
+    end
+    env.findNextFile = function() return table.remove(listing, 1) end
+    env.findClose = function() end
+    local realOpen = io.open
+    env.io = setmetatable({open = function(path, mode) return realOpen((path:gsub('\\', '/')), mode) end}, {__index = io})
+    local fromChat = #chat
+    ok(env.FPS == nil and upvalue(env.fixFrameRate, 'FPS').endCleoScript() == true, 'ended one')
+    ok(getU32(SCRIPT_B + 0x14) == FPS.stubs.cleoEnd and same(get(FPS.stubs.cleoEnd, 2), {0x93, 0x0A}),
+        'its IP at an 0A93: CLEO ends and frees it')
+    ok(getU32(SCRIPT_A + 0x14) == OTHER, 'another script untouched')
+    ok(same(get(0xC2B9CC, 4), hex('6666663F')), 'fWheelFriction back to 0.9')
+    ok(chat[#chat] and chat[#chat]:find('Car Speed FPS Fix (CLEO) was running and is stopped', 1, true)
+        and chat[#chat]:find('cleo\\Car Speed FPS Fix (Junior_Djjr).cs', 1, true), 'told, naming the file: ' .. tostring(chat[#chat]))
+    ok(FPS.endCleoScript() == false and #chat == fromChat + 1, 'once: the next tick finds nothing to do')
+    -- wheelfps off: the script is its own business
+    script(SCRIPT_B, 0, CS_BASE, CS_BASE + 0x15)
+    env.stopFrameRate('wheelfps')
+    ok(FPS.endCleoScript() == false and getU32(SCRIPT_B + 0x14) == CS_BASE + 0x15, 'wheelfps off: left running')
+    env.getGameDirectory, env.findFirstFile, env.findNextFile, env.findClose, env.io = nil, nil, nil, nil, nil
+    os.execute('rm -rf "' .. dir .. '"')
+    putU32(0xA8B42C, 0)
+end
+
+print('\n== an ASI a fix stood down for is named in chat once')
+do
+    fpsSession(); fpsStock()
+    FPS.owner.swimfps, FPS.owner.floatfps = 'Swim FPS Fix.asi', 'Swim FPS Fix.asi'
+    FPS.told = {}
+    local fromChat = #chat
+    FPS.reportDuplicates()
+    local said = 0
+    for i = fromChat + 1, #chat do if chat[i]:find('Swim FPS Fix.asi does what fixes already does', 1, true) then said = said + 1 end end
+    ok(said == 1, 'Swim FPS Fix.asi: one line for both options (' .. said .. ')')
+    FPS.owner.wheelfps = 'code at 0x13378000'
+    FPS.reportDuplicates()
+    ok(#chat == fromChat + 1, 'an unknown hook is not a duplicate, and nothing twice')
+    fpsSession()
+end
+fpsSession(); fpsStock()
+
+--------------------------------------------------------------------------------
 -- 0.9.0: entity references
 --------------------------------------------------------------------------------
 -- The head load in CEntity::RegisterReference, and the block's code as
@@ -1512,10 +1790,11 @@ do
     env2.fixesCommand('patches')
     local listedOthers = 0
     for _, name in ipairs({'animation wipes', 'entity references', 'removed buildings', 'text cache',
-            'server RPC checks', 'F1 help dialog off', 'smoking animation', 'animation blocks pinned', 'fog restore'}) do
+            'server RPC checks', 'F1 help dialog off', 'smoking animation', 'animation blocks pinned', 'fog restore',
+            'position guard'}) do
         for i = fromChat + 1, #chat do if chat[i]:find(name .. ': ', 1, true) then listedOthers = listedOthers + 1; break end end
     end
-    ok(listedOthers == 9, ('/fixes patches lists all 9 other fixes with their state (%d)'):format(listedOthers))
+    ok(listedOthers == 10, ('/fixes patches lists all 10 other fixes with their state (%d)'):format(listedOthers))
     stockVis()
 end
 
@@ -1525,7 +1804,10 @@ end
 -- --filter-bytes <file>: the exception filter's tail for exception_filter_test.c,
 -- built for SA-MP R5 at its preferred base (the harness moves the counter).
 -- --fog-bytes <file>: the fog routine, which runs anywhere, for
--- crashfix_dll_test.c.
+-- crashfix_dll_test.c. --guard-bytes <file>: the position guard's block (its
+-- counters, slots, routine and entries) built at 0x20000000 with the player
+-- pointer at 0x20000F00, for position_guard_test.c. --fps-bytes <file>: the
+-- frame-rate stubs built at 0x20000000, for fps_fixes_test.c.
 for i = 1, #arg do
     if arg[i] == '--filter-bytes' and arg[i + 1] then
         local build = upvalue(env.fixExceptionFilter, 'exceptionFilterCode')
@@ -1554,6 +1836,27 @@ for i = 1, #arg do
         for j = 1, entries[1] do f:write(string.char(code[j])) end
         f:close()
         print(('\nwrote the fog routine (%d bytes) to %s'):format(entries[1], arg[i + 1]))
+    end
+end
+for i = 1, #arg do
+    if arg[i] == '--guard-bytes' and arg[i + 1] then
+        local PG = upvalue(env.fixPositionGuard, 'PG')
+        local code = PG.code(0x20000000, 0x20000F00)   -- the player pointer inside the block
+        local f = assert(io.open(arg[i + 1], 'wb'))
+        for _, b in ipairs(code) do f:write(string.char(b)) end
+        f:close()
+        print(('\nwrote the position guard (%d bytes) to %s'):format(#code, arg[i + 1]))
+    end
+end
+for i = 1, #arg do
+    if arg[i] == '--fps-bytes' and arg[i + 1] then
+        local FPS = upvalue(env.fixFrameRate, 'FPS')
+        local code = FPS.code(0x20000000,           -- the game globals at +F00h, the jmp back to +F80h
+            {timestep = 0x20000F00, friction = 0x20000F04, minus = 0x20000F08, back = 0x20000F80})
+        local f = assert(io.open(arg[i + 1], 'wb'))
+        for _, b in ipairs(code) do f:write(string.char(b)) end
+        f:close()
+        print(('\nwrote the frame-rate stubs (%d bytes) to %s'):format(#code, arg[i + 1]))
     end
 end
 for i = 1, #arg do
