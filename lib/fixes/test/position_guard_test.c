@@ -67,7 +67,7 @@ static void call(Entity *e)
         "movl %%esp, _regsIn+28\n\t"
         "pushl _regsIn+32\n\t"
         "popfl\n\t"
-        "movl $0x20000030, %%eax\n\t"
+        "movl $0x20000040, %%eax\n\t"
         "pushl %%eax\n\t"
         "movl _regsIn, %%eax\n\t"
         "call *(%%esp)\n\t"
@@ -121,12 +121,15 @@ int main(int argc, char **argv)
     ok(regsKept(), "every register and the flags kept");
 
     printf("== the limits themselves pass\n");
-    set3(&m, 0x30, 20000.0f, -20000.0f, 100000.0f);
+    set3(&m, 0x30, 20000.0f, -20000.0f, 1000000.0f);
     call(&e);
-    ok(is3(&m, 0x30, 20000.0f, -20000.0f, 100000.0f) && counter(0) == 0, "x, y 20000 and z 100000 kept");
-    set3(&m, 0x30, 0.0f, 0.0f, -10000.0f);
+    ok(is3(&m, 0x30, 20000.0f, -20000.0f, 1000000.0f) && counter(0) == 0, "x, y 20000 and z 1000000 kept");
+    set3(&m, 0x30, 0.0f, 0.0f, -1000000.0f);
     call(&e);
-    ok(is3(&m, 0x30, 0.0f, 0.0f, -10000.0f) && counter(0) == 0, "z -10000 kept");
+    ok(is3(&m, 0x30, 0.0f, 0.0f, -1000000.0f) && counter(0) == 0, "z -1000000 kept");
+    set3(&m, 0x30, -2080.44f, 296.46f, -10000.04f);
+    call(&e);
+    ok(is3(&m, 0x30, -2080.44f, 296.46f, -10000.04f) && counter(0) == 0, "an object a server keeps at z -10000.04 kept (Unity Roleplay)");
     set3(&m, 0x30, 0.0f, 0.0f, -0.0f);
     call(&e);
     ok(counter(0) == 0, "z -0 kept");
@@ -142,14 +145,21 @@ int main(int argc, char **argv)
     ok(speedsZero(&e), "speeds zeroed");
     ok(counter(0) == 1, "counted once");
     ok(regsKept(), "registers kept");
+    {
+        volatile uint32_t *sample = (volatile uint32_t *)(BASE + 0x28);
+        float sx, sy, sz;
+        memcpy(&sx, (void *)&sample[1], 4); memcpy(&sy, (void *)&sample[2], 4); memcpy(&sz, (void *)&sample[3], 4);
+        ok(sample[0] == (uint32_t)(uintptr_t)&e && isnan(sx) && isnan(sy) && isnan(sz),
+           "the sample: this entity and the bad x, y, z, before they were put back");
+    }
 
-    printf("== inf, past 20000 and below -10000 are put back too\n");
+    printf("== inf, past 20000 and below -1000000 are put back too\n");
     set3(&m, 0x30, 0.0f, inf, 0.0f); call(&e);
     ok(is3(&m, 0x30, 100.0f, 200.0f, 10.0f), "inf y");
     set3(&m, 0x30, 25000.0f, 0.0f, 0.0f); call(&e);
     ok(is3(&m, 0x30, 100.0f, 200.0f, 10.0f), "x 25000");
-    set3(&m, 0x30, 0.0f, 0.0f, -20000.0f); call(&e);
-    ok(is3(&m, 0x30, 100.0f, 200.0f, 10.0f), "z -20000");
+    set3(&m, 0x30, 0.0f, 0.0f, -2000000.0f); call(&e);
+    ok(is3(&m, 0x30, 100.0f, 200.0f, 10.0f), "z -2000000");
     set3(&m, 0x30, 0.0f, 0.0f, 2147483647.0f); call(&e);
     ok(is3(&m, 0x30, 100.0f, 200.0f, 10.0f), "z 2147483647");
     ok(counter(0) == 5, "each counted");

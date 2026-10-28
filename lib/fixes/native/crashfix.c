@@ -315,10 +315,12 @@ void cf_wrap_rail_distance(float *distance, const float *length)
     *distance = d;
 }
 
+/* x and y as MTA's; z wider than MTA's -5000..100000, since only x and y
+ * enter the sector walk and servers keep objects and players at z -10000 */
 static int valid_position(const float *v)
 {
     return v[0] >= -16000.0f && v[0] <= 16000.0f && v[1] >= -16000.0f && v[1] <= 16000.0f
-        && v[2] >= -5000.0f && v[2] <= 100000.0f;                     /* false for NaN */
+        && v[2] >= -1000000.0f && v[2] <= 1000000.0f;                 /* false for NaN */
 }
 
 /* MTA's: an end out of the world moves next to the other one */

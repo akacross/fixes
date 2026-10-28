@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.18.0")
+script_version("0.19.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -1842,8 +1842,9 @@ end
 -- of range: a loading screen that never ends, the screen washed white. Every
 -- moved ped, car and object passes CPhysical::Add (0x544A30, what CWorld::Add
 -- calls after a teleport) or CPhysical::RemoveAndAdd (0x542560, each frame it
--- moves), so both start with a check: x and y within 20000, z from -10000 to
--- 100000, by the float's bits (one unsigned compare also catches NaN and inf).
+-- moves), so both start with a check: x and y within 20000, z within 1000000
+-- (servers keep objects at z -10000 or high in the sky), by the
+-- float's bits (one unsigned compare also catches NaN and inf).
 -- A bad position on the player's ped or its vehicle takes the last good one
 -- the check saw for it, so a bad teleport does not happen; on anything else
 -- it takes the RenderWare frame's (the last one drawn), else 0, 0, 0. The
@@ -1851,14 +1852,15 @@ end
 -- Option "positionguard".
 local PG = {
     XY_MAX = 0x469C4000,           -- 20000.0
-    Z_MAX  = 0x47C35000,           -- 100000.0
-    Z_MIN  = 0x461C4000,           -- 10000.0, for -10000
+    Z_MAX  = 0x49742400,           -- 1000000.0
+    Z_MIN  = 0x49742400,           -- 1000000.0, for -1000000
     SITES = {
         {va = 0x544A30, from = hexBytes("64 A1 00 00 00 00")},  -- CPhysical::Add: mov eax, fs:[0]
         {va = 0x542560, from = hexBytes("83 EC 2C 55 8B E9")},  -- RemoveAndAdd: sub esp,2Ch / push ebp / mov ebp,ecx
     },
-    BLOCK_SIZE = 0x200,            -- counters and two position slots, then the code at ROUTINE
-    ROUTINE = 0x30,
+    BLOCK_SIZE = 0x200,            -- counters, two position slots, the last bad one, then the code at ROUTINE
+    ROUTINE = 0x40,
+    SAMPLE = 0x28,                 -- the last bad position: {entity, x, y, z}
     PLAYER = 0xB7CD98,             -- CWorld::Players[0].m_pPed
     block = nil,                   -- our code, kept for the next time the option goes on
     seen = {0, 0},
@@ -1867,8 +1869,9 @@ local posGuard                     -- {entries = {va, va}} once ours, {owner = t
 
 -- The routine (ecx = the entity; every register and the flags kept), then an
 -- entry per site: call it, the site's bytes, jmp back. The block: positions put
--- back, speeds zeroed, then two slots {entity, x, y, z} holding the last good
--- position seen for the player's ped ([player]) and its vehicle (+58Ch).
+-- back, speeds zeroed, two slots {entity, x, y, z} holding the last good
+-- position seen for the player's ped ([player]) and its vehicle (+58Ch), and
+-- the last bad position found {entity, x, y, z}, for the log.
 function PG.code(block, player)
     player = player or PG.PLAYER
     local code, labels, fixups = {}, {}, {}
@@ -1885,6 +1888,7 @@ function PG.code(block, player)
     end
     local POSITIONS, SPEEDS = block, block + 4
     local PED, PED_POS, CAR, CAR_POS = block + 8, block + 0x0C, block + 0x18, block + 0x1C
+    local BAD, BAD_POS = block + PG.SAMPLE, block + PG.SAMPLE + 4
     for _ = 1, PG.ROUTINE do code[#code + 1] = 0 end
     emit("9C 60 8B F1")                    -- pushfd / pushad / mov esi, ecx
     emit("8B 7E 14 85 FF")                 -- mov edi, [esi+14h] (m_matrix) / test edi, edi
@@ -1917,6 +1921,10 @@ function PG.code(block, player)
     jump("E9", "speeds", true)
     label("bad")
     emit("FF 05", POSITIONS)               -- inc dword [positions]
+    emit("89 35", BAD)                     -- mov [bad], esi: the sample, for the log
+    emit("8B 07 A3", BAD_POS)              -- mov eax, [edi] / mov [x], eax
+    emit("8B 47 04 A3", BAD_POS + 4)
+    emit("8B 47 08 A3", BAD_POS + 8)
     emit("BA", PED_POS)
     emit("3B 35", PED)                     -- cmp esi, [ped]: put its last good one back
     jump("74", "copy")
@@ -2053,14 +2061,41 @@ function stopPositionGuard()
     return changed
 end
 
--- A line when the guard has put more back; from the main loop.
+-- A float from its 32 bits (NaN and inf included).
+function PG.f32(bits)
+    local sign = bits >= 0x80000000 and -1 or 1
+    local exp, frac = math.floor(bits / 0x800000) % 0x100, bits % 0x800000
+    if exp == 0xFF then return frac == 0 and sign * math.huge or 0 / 0 end
+    if exp == 0 then return sign * frac * 2 ^ -149 end
+    return sign * (1 + frac / 0x800000) * 2 ^ (exp - 127)
+end
+
+-- A line when the guard has put more back, with the last bad position it
+-- found; from the main loop, at most every 10 s while it keeps rising.
 function PG.tick()
     if not (posGuard and posGuard.block) then return end
     local positions, speeds = readU32(posGuard.block), readU32(posGuard.block + 4)
     if positions == PG.seen[1] and speeds == PG.seen[2] then return end
-    PG.seen = {positions, speeds}
-    log(string.format("[fixes] position guard: %d bad position(s) put back, %d bad speed(s) zeroed so far",
-        positions, speeds), "warn")
+    local now = os.clock()
+    if PG.nextLog and now < PG.nextLog then return end
+    PG.nextLog = now + 10
+    local rate = PG.lastAt and (positions - PG.seen[1]) / math.max(now - PG.lastAt, 0.001) or 0
+    PG.seen, PG.lastAt = {positions, speeds}, now
+    local sample = ""
+    local entity = readU32(posGuard.block + PG.SAMPLE)
+    if entity ~= 0 then
+        local x, y, z = PG.f32(readU32(posGuard.block + PG.SAMPLE + 4)), PG.f32(readU32(posGuard.block + PG.SAMPLE + 8)),
+            PG.f32(readU32(posGuard.block + PG.SAMPLE + 12))
+        local ok, kind, model = pcall(function()
+            return ({[2] = "car", [3] = "ped", [4] = "object"})[readBytes(entity + 0x36, 1)[1] % 8] or "entity",
+                readBytes(entity + 0x22, 1)[1] + readBytes(entity + 0x23, 1)[1] * 256
+        end)
+        local mine = entity == readU32(0xB7CD98) and " (yours)" or ""
+        sample = ok and string.format("; last: %s%s model %d at 0x%X, %s, %s, %s", kind, mine, model, entity,
+            tostring(x), tostring(y), tostring(z)) or string.format("; last: 0x%X", entity)
+    end
+    log(string.format("[fixes] position guard: %d bad position(s) put back (%.0f a second), %d bad speed(s) zeroed%s",
+        positions, rate, speeds, sample), "warn")
 end
 
 --------------------------------------------------------------------------------
@@ -2144,6 +2179,18 @@ function FPS.code(block, game)
     return code, at
 end
 
+-- The shared block, written once. -> true
+function FPS.ensureBlock()
+    if FPS.block then return true end
+    local p = ffi.C.VirtualAlloc(nil, 0x100, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if p == nil then return false end
+    FPS.block = tonumber(ffi.cast("uintptr_t", p))
+    local code
+    code, FPS.stubs = FPS.code(FPS.block)
+    poke(FPS.block, code)
+    return true
+end
+
 -- The stub head a site of ours calls or jumps to, or nil.
 local function fpsHookTarget(site)
     local b = readBytes(site.va, 5)
@@ -2185,16 +2232,9 @@ function fixFrameRate(option)
         end
     end
     if #todo == 0 then return #mine end
-    if not FPS.block then
-        local p = ffi.C.VirtualAlloc(nil, 0x100, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
-        if p == nil then
-            log("[fixes] refusing " .. option .. ": VirtualAlloc failed")
-            return 0
-        end
-        FPS.block = tonumber(ffi.cast("uintptr_t", p))
-        local code
-        code, FPS.stubs = FPS.code(FPS.block)
-        poke(FPS.block, code)
+    if not FPS.ensureBlock() then
+        log("[fixes] refusing " .. option .. ": VirtualAlloc failed")
+        return 0
     end
     for _, site in ipairs(todo) do
         local to = FPS.stubs[site.stub]
@@ -2836,9 +2876,10 @@ local DIALOG_LIST = {[2] = true, [4] = true, [5] = true}
 local RPC_LOGGED = 5                                -- lines logged per kind; the rest are counted
 -- A teleport to NaN or far off the map puts the ped or vehicle where the
 -- streamer and collision code fail. The limits are the world's absolute ones,
--- not SetWorldBounds': a server may teleport a player outside those.
+-- not SetWorldBounds': a server may teleport a player outside those, or to
+-- objects it keeps at z -10000.
 local RPC_SET_PLAYER_POS, RPC_SET_PLAYER_POS_FIND_Z, RPC_SET_VEHICLE_POS = 12, 13, 159
-local POS_XY_MAX, POS_Z_MIN, POS_Z_MAX = 20000.0, -10000.0, 100000.0
+local POS_XY_MAX, POS_Z_MIN, POS_Z_MAX = 20000.0, -1000000.0, 1000000.0
 
 local rpcCounts = {anim = 0, menu = 0, dialog = 0, pos = 0}
 local RPC_KIND = {[RPC_APPLY_ANIM] = "anim", [RPC_APPLY_ACTOR_ANIM] = "anim",
@@ -2994,14 +3035,18 @@ end
 
 -- Another copy of a fix fixes carries. Junior_Djjr's Car Speed FPS Fix is a
 -- CLEO script that rewrites fWheelFriction every frame, which wheelfps would
--- then scale a second time: found in CTheScripts' active list (0xA8B42C;
--- next +0, base IP +10h, IP +14h) by its first instruction (0A8D, the
--- handling manager operand 0x5B7273) and a 0A8C write, its IP pointed at an
--- 0A93 so CLEO ends and frees it, and fWheelFriction put back to 0.9. Only
--- while wheelfps is ours. The ASIs a fix stood down for are named in chat.
+-- then scale a second time. It is found in CTheScripts' active list
+-- (0xA8B42C; next +0, base IP +10h, IP +14h) by its first instruction (0A8D,
+-- the handling manager operand 0x5B7273) and a 0A8C write. Nothing is done
+-- to it unasked: wheelfps stands down and chat asks. /fixes cleo stop points
+-- its IP at an 0A93, so CLEO ends and frees it, puts fWheelFriction back to
+-- 0.9 and turns wheelfps on; keep turns wheelfps off; remove, once confirmed,
+-- also renames its file to .cs.disabled (nothing is deleted).
 FPS.CLEO_HEAD = hexBytes("8D 0A 01 73 72 5B 00")
 FPS.DUPLICATES = {["swim fps fix.asi"] = "swimfps", ["gxt_crash_fix.asi"] = "the GXT string fix"}
 FPS.told = {}
+FPS.cleoState = nil                -- nil, "held" (asked), "stopped", "kept"
+FPS.removeUntil = 0                -- os.clock() a /fixes cleo remove yes is accepted until
 
 -- The .cs file in cleo\ holding the script, or nil.
 function FPS.cleoFile()
@@ -3020,34 +3065,100 @@ function FPS.cleoFile()
     return found
 end
 
--- Ends the Car Speed FPS Fix script if it runs. -> true when it ended one
-function FPS.endCleoScript()
-    if not (FPS.stubs and FPS.stubs.cleoEnd) then return false end
-    local wheel = FPS.SITES[1]
-    if not fpsHookTarget(wheel) then return false end
-    local script, ended, guard = readU32(0xA8B42C), false, 0
+-- The running Car Speed FPS Fix scripts (not those already pointed at an 0A93).
+function FPS.cleoScripts()
+    local found, script, guard = {}, readU32(0xA8B42C), 0
+    local ending = FPS.stubs and FPS.stubs.cleoEnd
     while script ~= 0 and guard < 1000 do
         guard = guard + 1
         local base = readU32(script + 0x10)
-        if base ~= 0 and bytesEqual(readBytes(base, 7), FPS.CLEO_HEAD) then
-            local body, writes = readBytes(base, 96), false
-            for i = 8, 95 do if body[i] == 0x8C and body[i + 1] == 0x0A then writes = true end end
-            if writes and readU32(script + 0x14) ~= FPS.stubs.cleoEnd then
-                writeCode(script + 0x14, u32bytes(FPS.stubs.cleoEnd))
-                writeCode(0xC2B9CC, hexBytes("66 66 66 3F"))   -- fWheelFriction 0.9, as the game sets it
-                ended = true
+        if base ~= 0 and bytesEqual(readBytes(base, 7), FPS.CLEO_HEAD) and readU32(script + 0x14) ~= ending then
+            local body = readBytes(base, 96)
+            for i = 8, 95 do
+                if body[i] == 0x8C and body[i + 1] == 0x0A then found[#found + 1] = script; break end
             end
         end
         script = readU32(script)
     end
-    if ended then
+    return found
+end
+
+-- From startup and the main loop: hold wheelfps and ask while the script runs.
+function FPS.cleoTick()
+    if not options.wheelfps or FPS.cleoState == "kept" then return end
+    local running = #FPS.cleoScripts() > 0
+    if running and FPS.cleoState ~= "held" then
+        if fpsHookTarget(FPS.SITES[1]) then stopFrameRate("wheelfps") end
+        FPS.cleoState, FPS.owner.wheelfps = "held", "Car Speed FPS Fix (CLEO)"
         local file = FPS.cleoFile()
-        log(string.format("[fixes] wheelfps: ended Car Speed FPS Fix (CLEO%s), which rewrites fWheelFriction every " ..
-            "frame; fWheelFriction back to 0.9", file and ", cleo\\" .. file or ""), "warn")
-        say(string.format("Car Speed FPS Fix (CLEO) was running and is stopped: fixes does the same (/fixes wheelfps). " ..
-            "Delete {6BB6E8}cleo\\%s{FFFFFF}.", file or "its .cs file"))
+        log(string.format("[fixes] wheelfps: Car Speed FPS Fix (CLEO%s) runs; wheelfps left to it until asked",
+            file and ", cleo\\" .. file or ""), "warn")
+        say("Car Speed FPS Fix (CLEO) is running. It does what fixes' wheelfps does, so fixes left it alone.")
+        say("{6BB6E8}/fixes cleo stop{FFFFFF} stops it and uses fixes' (this session), {6BB6E8}/fixes cleo keep" ..
+            "{FFFFFF} keeps it, {6BB6E8}/fixes cleo remove{FFFFFF} also disables its file.")
+    elseif not running and FPS.cleoState == "held" then
+        FPS.cleoState, FPS.owner.wheelfps = nil, nil
+        fixFrameRate("wheelfps")
+        say("Car Speed FPS Fix (CLEO) is no longer running; fixes' wheelfps is on.")
     end
-    return ended
+end
+
+-- Ends every running copy and turns wheelfps on. -> how many it ended
+function FPS.cleoStop()
+    local scripts = FPS.cleoScripts()
+    if #scripts == 0 or not FPS.ensureBlock() then return 0 end
+    for _, script in ipairs(scripts) do writeCode(script + 0x14, u32bytes(FPS.stubs.cleoEnd)) end
+    writeCode(0xC2B9CC, hexBytes("66 66 66 3F"))             -- fWheelFriction 0.9, as the game sets it
+    FPS.cleoState, FPS.owner.wheelfps = "stopped", nil
+    if options.wheelfps then fixFrameRate("wheelfps") else setOption("wheelfps", true) end
+    log(string.format("[fixes] wheelfps: ended Car Speed FPS Fix (CLEO), asked to; fWheelFriction back to 0.9"), "warn")
+    return #scripts
+end
+
+-- /fixes cleo [stop | keep | remove [yes]]
+function FPS.cleoCommand(params)
+    local what, yes = tostring(params or ""):lower():match("^%s*cleo%s*(%S*)%s*(%S*)")
+    local running = #FPS.cleoScripts() > 0
+    local file = FPS.cleoFile()
+    if what == "stop" then
+        if FPS.cleoStop() > 0 then
+            say("Car Speed FPS Fix (CLEO) stopped for this session; fixes' wheelfps is on. It runs again next launch" ..
+                (file and (" from {6BB6E8}cleo\\" .. file .. "{FFFFFF}") or "") .. ".")
+        else
+            say("Car Speed FPS Fix (CLEO) is not running.")
+        end
+    elseif what == "keep" then
+        FPS.cleoState, FPS.owner.wheelfps = "kept", nil
+        setOption("wheelfps", false)
+        say("Car Speed FPS Fix (CLEO) kept; fixes' wheelfps is off (saved). {6BB6E8}/fixes wheelfps on{FFFFFF} switches back.")
+    elseif what == "remove" then
+        if not file then
+            say("No Car Speed FPS Fix .cs file in cleo\\." .. (running and " It runs, so /fixes cleo stop stops it." or ""))
+        elseif yes ~= "yes" then
+            FPS.removeUntil = os.clock() + 30
+            say(("This stops Car Speed FPS Fix and renames {6BB6E8}cleo\\%s{FFFFFF} to %s.disabled, so CLEO no longer " ..
+                "loads it. Nothing is deleted: rename it back to use it again."):format(file, file))
+            say("Type {6BB6E8}/fixes cleo remove yes{FFFFFF} within 30 seconds to do it.")
+        elseif os.clock() > FPS.removeUntil then
+            say("Type {6BB6E8}/fixes cleo remove{FFFFFF} first, then /fixes cleo remove yes within 30 seconds.")
+        else
+            FPS.removeUntil = 0
+            FPS.cleoStop()
+            local dir = getGameDirectory() .. "\\cleo\\"
+            local ok, why = os.rename(dir .. file, dir .. file .. ".disabled")
+            if ok then
+                log("[fixes] wheelfps: renamed cleo\\" .. file .. " to " .. file .. ".disabled, asked to", "warn")
+                say(("Renamed {6BB6E8}cleo\\%s{FFFFFF} to %s.disabled; fixes' wheelfps is on."):format(file, file))
+            else
+                say(("Could not rename cleo\\%s (%s); it is stopped for this session."):format(file, tostring(why)))
+            end
+        end
+    else
+        say(running and "Car Speed FPS Fix (CLEO) is running; fixes' wheelfps is left to it." or
+            "Car Speed FPS Fix (CLEO) is not running.")
+        say("{6BB6E8}/fixes cleo stop{FFFFFF} stops it (this session) and uses fixes', {6BB6E8}/fixes cleo keep" ..
+            "{FFFFFF} keeps it and turns wheelfps off, {6BB6E8}/fixes cleo remove{FFFFFF} also disables its file (asks first).")
+    end
 end
 
 -- Once SA-MP is up: each ASI a fix stood down for, named in chat once.
@@ -3063,7 +3174,7 @@ function FPS.reportDuplicates()
         if what and not FPS.told[module:lower()] then
             FPS.told[module:lower()] = true
             log(string.format("[fixes] %s is left to %s; fixes carries the same fix", what, module), "warn")
-            say(string.format("%s does what fixes already does (%s), so fixes left it to it. Delete it to use fixes'.",
+            say(string.format("%s does what fixes already does (%s), so fixes left it to it. Remove it if you want fixes' own.",
                 module, what))
         end
     end
@@ -3115,6 +3226,7 @@ end
 --- /fixes <option> on|off - switch one.
 function fixesCommand(params)
     local key, value = tostring(params or ""):lower():match("^%s*(%S*)%s*(%S*)")
+    if key == "cleo" then FPS.cleoCommand(params) return end
     if key == "patches" then
         say(patchSummary())
         local groups, order = {}, {}       -- a group is one line: its sites' states, counted
@@ -3299,7 +3411,7 @@ function main()
     if sigscanOk then pcall(sigscan.flush) end   -- remember the offsets for next launch
 
     noteFix("animation blocks pinned", pinAnimBlocks())   -- needs the streamer and CAnimManager up
-    FPS.endCleoScript()
+    FPS.cleoTick()
     FPS.reportDuplicates()
     reportStartup()
 
@@ -3308,6 +3420,6 @@ function main()
         wait(0)
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
-        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.endCleoScript(); crashFixTick(now) end
+        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now) end
     end
 end

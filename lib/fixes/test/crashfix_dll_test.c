@@ -404,9 +404,14 @@ __declspec(dllexport) int __cdecl run(void)
         cf_limit_line(a, b, &cf_n_los);
         ok(b[0] == 10 && b[2] == 30.01f && averted("los") == 1, "a NaN end: next to the start");
         a[1] = 1e9f;
-        b[2] = -9000;
+        b[2] = -2000000;
         cf_limit_line(a, b, &cf_n_los);
         ok(a[2] == 100.0f && b[2] == 100.01f, "both out: a short line at the origin");
+        float c[3] = {-2080.44f, 296.46f, -10000.04f}, d2[3] = {-2079.0f, 300.0f, -9990.0f};
+        LONG before = cf_n_los;
+        cf_limit_line(c, d2, &cf_n_los);
+        ok(c[2] == -10000.04f && d2[2] == -9990.0f && cf_n_los == before,
+           "a line at z -10000 (Unity Roleplay's objects) stays, nothing counted");
     }
 
     printf("== fixes.lua's fog routine through RwD3D9SetRenderState\n");

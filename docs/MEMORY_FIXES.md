@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-26):** `fixes.lua` 0.18.0. It applies the 128 `gamePatches`
+**Status (2026-10-27):** `fixes.lua` 0.19.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -50,7 +50,8 @@ off-map positions in gta_sa.exe itself (38, option `positionguard`, on by
 default). Since 0.18.0 `CMessages::GetStringLength` returns 0 for a null
 string instead of crashing (39), and the coasting slow-down, swimming and
 buoyancy scale with the frame rate (40, options `wheelfps`, `swimfps`,
-`floatfps`, on by default) in place of entry 8. It is published as a
+`floatfps`, on by default) in place of entry 8. Since 0.19.0 a running Car
+Speed FPS Fix script is only asked about (`/fixes cleo`). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -1327,7 +1328,7 @@ seven ids are read; the read offset is put back afterwards.
 | ApplyActorAnimation | 173 | the same | dropped |
 | InitMenu | 76 | menu id < 128, column flag 0 or 1, every 32-byte line (title, headers, rows) holds its terminator, at most 12 rows per column | dropped |
 | ShowDialog | 61 | list styles (2, 4, 5): lines at most 128 characters; tablists (4, 5) per cell | cut, the rest passes |
-| SetPlayerPos, SetPlayerPosFindZ | 12, 13 | x, y, z are numbers; \|x\|, \|y\| at most 20000, z from -10000 to 100000 | dropped |
+| SetPlayerPos, SetPlayerPosFindZ | 12, 13 | x, y, z are numbers; \|x\|, \|y\| at most 20000, \|z\| at most 1000000 | dropped |
 | SetVehiclePos | 159 | the same, after the vehicle id | dropped |
 
 **Why.** SA-MP hands the animation names to its script-command builder,
@@ -1741,7 +1742,7 @@ that thunk.
 | txdnext, txdconvert | 0x408F6E, 0x40C8CE | a texture dictionary freed while its request is queued |
 | contact | 0x6080B2 | a ped's contact entity destroyed under it |
 | pathnodes | 0x156F966 | path nodes that failed to allocate |
-| los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end) |
+| los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end): \|x\|, \|y\| over 16000 as MTA's, \|z\| over 1000000 (MTA's -5000 tripped at a server's z -10000; only x and y enter the sector walk) |
 
 **SA-MP moves the model infos.** SA-MP R5 copies
 `CModelInfo::ms_modelInfoPtrs` (0xA9B0C8) to its own 65535-entry array and
@@ -1904,7 +1905,7 @@ not usable: samp.dll calls neither, and `SetPosn` is inlined at most sites.
 
 **The check** (ecx = the entity, every register and the flags kept): the
 position is `m_matrix->pos` (+0x30) or, with no matrix, `m_placement` (+4).
-|x| and |y| at most 20000, z from -10000 to 100000, each by the float's bits
+|x| and |y| at most 20000, |z| at most 1000000, each by the float's bits
 (`and 7FFFFFFFh / cmp / ja`: one unsigned compare also catches NaN and inf).
 Each good position the check sees on the player's ped (`[0xB7CD98]`,
 `CWorld::Players[0].m_pPed`) or its vehicle (`m_pVehicle`, +0x58C) is kept
@@ -1917,6 +1918,15 @@ in the same teleport, which is why the player, before the slots, landed at
 with a NaN or inf speed has the speeds zeroed. Both are counted; the log
 says when either count rises. The block: the two counters, the ped's slot
 (+8: entity, x, y, z), the vehicle's (+0x18), then the code at +0x30.
+
+z was limited to -10000..100000 until 0.19.0. Unity Roleplay keeps objects at
+z -10000.03 and below (models 3053, 3054 at -2080, 296); each frame one moved
+the guard found it bad, its frame bad too, and sent it to 0, 0, 0: about 1100
+a second. Height does not enter the sector maths (only x and y do), so z is
+now only bounded at 1000000, which still stops a z of 2147483647. The log
+line, at most every 10 s while the count rises, gives the rate and the last
+bad position: the entity's kind and model, whether it is the player's, and
+x, y, z (the block's +28h; the code at +40h).
 
 The server RPC check (27) still drops a NaN or off-world teleport before
 SA-MP moves anything, so the player stays where they were; the guard catches
@@ -2002,16 +2012,25 @@ the surface. It is empirical and touches everything that floats, boats and
 cars in water too, so it is its own option.
 
 **Other copies.** The Car Speed FPS Fix script would make wheelfps scale
-twice (it rewrites the global wheelfps scales). While wheelfps is ours, at
-startup and once a second, CTheScripts' active list (0xA8B42C; next +0, base
-IP +10h, IP +14h; CLEO puts its scripts there too) is walked for a script
-whose code starts `8D 0A 01 73 72 5B 00` (0A8D reading the handling manager
-operand 0x5B7273) and writes memory (0A8C). Its IP is pointed at an `93 0A`
-at the end of the block, so CLEO's own 0A93 handler ends it and frees it
-on its next run, fWheelFriction goes back to the game's 0.9, and chat names
-the .cs file in `cleo\` holding those bytes. With wheelfps off the script is
-left alone. Swim FPS Fix.asi and gxt_crash_fix.asi, when a fix stood down
-for them, are named in chat once SA-MP is up.
+twice (it rewrites the global wheelfps scales). At startup and once a second
+CTheScripts' active list (0xA8B42C; next +0, base IP +10h, IP +14h; CLEO puts
+its scripts there too) is walked for a script whose code starts `8D 0A 01 73
+72 5B 00` (0A8D reading the handling manager operand 0x5B7273) and writes
+memory (0A8C). Nothing is done to it, or to its file, unasked: wheelfps
+stands down and chat asks once.
+
+- `/fixes cleo stop` points its IP at an `93 0A` at the end of the block, so
+  CLEO's own 0A93 handler ends and frees it on its next run, puts
+  fWheelFriction back to the game's 0.9 and turns wheelfps on. This session
+  only: CLEO loads it again next launch.
+- `/fixes cleo keep` keeps it and turns wheelfps off (saved).
+- `/fixes cleo remove` says what it would do; only `/fixes cleo remove yes`
+  within 30 seconds stops it and renames its file in `cleo\` to
+  `.cs.disabled`, so CLEO no longer loads it. Nothing is deleted.
+
+If the script stops running on its own while asked about, wheelfps goes back
+on. Swim FPS Fix.asi and gxt_crash_fix.asi, when a fix stood down for them,
+are named in chat once SA-MP is up; nothing is done to them.
 
 **Tests.** `fps_fixes_test.sh` runs the stubs under Wine with real x87 maths
 (16): the wheel brake at 30, 60 and 144 fps and over another value, the dive
@@ -2021,7 +2040,10 @@ under them, nothing else on the stack and esp back, and 30 fps stock.
 one block, off restores only that option's sites, a reload takes its own
 hooks, another hook stands the option down; the 8 sites are the real
 gta_sa.exe's bytes. A script with Car Speed FPS Fix's head and an 0A8C write
-in a fake script list is ended (its IP at the 0A93, another script untouched),
-fWheelFriction is 0.9 again, chat names its file in a cleo folder, the next
-tick does nothing, and with wheelfps off it keeps running; Swim FPS Fix.asi
-is named once for its two options, an unknown hook not at all.
+in a fake script list, its file in a cleo folder: found, it and its value are
+left alone, wheelfps stands down and chat asks, once. Stop ends it (its IP at
+the 0A93, another script untouched), puts 0.9 back and turns wheelfps on, the
+file still there. Keep turns wheelfps off, saved, and asks no more. Remove
+refuses `yes` before it has explained, and after 30 seconds; confirmed, it
+renames the file to .cs.disabled with its bytes intact. Swim FPS Fix.asi is
+named once for its two options, an unknown hook not at all.

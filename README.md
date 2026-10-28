@@ -26,7 +26,9 @@ Crashes:
   player's sync, a script) sending you to an endless white loading screen:
   the game itself puts it back before a ped, car or object is placed, and
   your own ped and car stay where they were. No SA-MP version or library
-  involved.
+  involved. Only x and y are held to the map (20000); height may go to
+  1000000, so objects a server keeps underground or in the sky are left
+  alone.
 - A null GXT string crashing `CMessages::GetStringLength`
   (gxt_crash_fix's fix).
 - SA-MP's removed-building table overflowing past 1000 entries (samp.dll).
@@ -64,10 +66,11 @@ Frame rate (each as at 30 fps, the rate the game was tuned for):
 - Swimming is slow at high fps: it is as fast at any fps (Swim FPS Fix).
 - Buoyancy as Swim FPS Fix scales it (less lift above 30 fps, boats too).
 
-Car Speed FPS Fix (CLEO), if it is running, is stopped and named in chat,
-since it would be applied twice; Swim FPS Fix.asi and gxt_crash_fix.asi,
-when installed, are left to do their part and named in chat. Delete them to
-use fixes' own.
+If Car Speed FPS Fix (CLEO) is running, fixes leaves it and its file alone,
+turns its own coasting fix off so nothing is applied twice, and asks in chat
+(`/fixes cleo`, below). Swim FPS Fix.asi and gxt_crash_fix.asi, when
+installed, are left to do their part and named in chat; remove them if you
+want fixes' own.
 
 Speed:
 - SA-MP's text (chat, nametags, labels) is laid out once and replayed, not
@@ -111,6 +114,10 @@ that averted a crash says so.
 - `/fixes patches` counts the patches and hooks: applied, owned by another
   mod, refused, off.
 - `/fixes <option> on|off` switches an option at once.
+- `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
+  session and uses fixes' own, `keep` keeps it and turns `wheelfps` off,
+  `remove` explains first, and only `/fixes cleo remove yes` within 30
+  seconds renames its file to `.cs.disabled` (nothing is deleted).
 
 | option | default | what it does |
 |---|---|---|

@@ -847,7 +847,8 @@ do
     allPass(12, pos(12, 1544.0, -1675.0, 13.5), 'a player teleport in Los Santos')
     allPass(13, pos(13, -2000.0, 150.0, 0.0), 'a find-Z teleport')
     allPass(159, pos(159, 2500.0, 2500.0, 10.0), 'a vehicle teleport')
-    allPass(12, pos(12, 19999.0, -19999.0, 99999.0), 'a teleport just inside the absolute limits')
+    allPass(12, pos(12, 19999.0, -19999.0, 999999.0), 'a teleport just inside the absolute limits')
+    allPass(12, pos(12, -2080.44, 296.46, -10000.04), 'to objects a server keeps at z -10000 (Unity Roleplay)')
     local function dropped(id, x, y, z, what)
         local r, untouched, back = screen(id, pos(id, x, y, z))
         ok(r == false and untouched and back, what .. ': dropped, read offset back at the start')
@@ -855,7 +856,7 @@ do
     dropped(12, 0 / 0, 0.0, 0.0, 'a NaN player teleport')
     dropped(159, 100.0, 0 / 0, 5.0, 'a NaN vehicle teleport')
     dropped(13, 25000.0, 0.0, 10.0, 'a find-Z teleport past 20000')
-    dropped(12, 0.0, 0.0, -20000.0, 'a teleport under the world')
+    dropped(12, 0.0, 0.0, -2000000.0, 'a teleport far under the world')
     dropped(159, 0.0, 0.0, 1e9, 'a vehicle teleport into the sky')
     env.fixesCommand('rpcpositions off')
     allPass(12, pos(12, 0 / 0, 0.0, 0.0), 'rpcpositions off: a NaN teleport passes, for the position guard to catch')
@@ -1508,6 +1509,41 @@ do
 end
 guardSession(); guardStock()
 
+print('\n== position guard: the log names the last bad position, at most every 10 s')
+do
+    ok(PG.f32(0x469C4000) == 20000 and PG.f32(0xC61C4000) == -10000 and PG.f32(0x7F800000) == math.huge, 'f32: 20000, -10000, inf')
+    local nan = PG.f32(0x7FC00000)
+    ok(nan ~= nan and PG.f32(0) == 0, 'f32: NaN, 0')
+    local BLOCK, CAR = 0x06000000, 0x06100000
+    local i = 1
+    while true do
+        local name = debug.getupvalue(env.fixPositionGuard, i)
+        if not name then break end
+        if name == 'posGuard' then debug.setupvalue(env.fixPositionGuard, i, {block = BLOCK}) end
+        i = i + 1
+    end
+    putU32(BLOCK, 1180); putU32(BLOCK + 4, 0)
+    putU32(BLOCK + PG.SAMPLE, CAR)
+    putU32(BLOCK + PG.SAMPLE + 4, 0x46C35000); putU32(BLOCK + PG.SAMPLE + 8, 0x44FA0000); putU32(BLOCK + PG.SAMPLE + 12, 0x41200000)
+    put(CAR + 0x22, 0x90, 0x01); put(CAR + 0x36, 0x02)          -- model 400, a car
+    putU32(0xB7CD98, 0)
+    PG.seen, PG.nextLog, PG.lastAt = {0, 0}, nil, nil
+    local from = #printed
+    PG.tick()
+    local line = printed[#printed]
+    ok(#printed == from + 1 and line:find('1180 bad position(s) put back', 1, true)
+        and line:find('last: car model 400 at 0x6100000, 25000, 2000, 10', 1, true), 'said: ' .. tostring(line))
+    putU32(BLOCK, 2360)
+    PG.tick()
+    ok(#printed == from + 1, 'not again within 10 s')
+    PG.nextLog = os.clock() - 1
+    putU32(BLOCK + PG.SAMPLE + 4, 0x7FC00000)
+    PG.tick()
+    ok(#printed == from + 2 and printed[#printed]:find('2360', 1, true) and printed[#printed]:find('nan', 1, true),
+        'after 10 s, with a NaN shown as such: ' .. tostring(printed[#printed]))
+    guardSession()
+end
+
 --------------------------------------------------------------------------------
 -- 0.18.0: frame-rate fixes (their stubs run in fps_fixes_test.sh)
 --------------------------------------------------------------------------------
@@ -1569,7 +1605,7 @@ do
 end
 fpsSession(); fpsStock()
 
-print('\n== Car Speed FPS Fix (CLEO) is ended when wheelfps is ours, and named')
+print('\n== Car Speed FPS Fix (CLEO): nothing done unasked; stop, keep and a confirmed remove')
 do
     -- what identifies it: 0A8D reading 0x5B7273 first, an 0A8C write later
     local cs = '\141\10\1\115\114\91\0\4\4\4\0\3\0\0' .. '\1\0\4\0' .. ('\0'):rep(30) ..
@@ -1580,42 +1616,102 @@ do
     local function script(at, nextScript, base, ip)
         putU32(at, nextScript); putU32(at + 0x10, base); putU32(at + 0x14, ip)
     end
-    script(SCRIPT_A, SCRIPT_B, OTHER, OTHER)
-    script(SCRIPT_B, 0, CS_BASE, CS_BASE + 0x15)                      -- after its wait 0
-    putU32(0xA8B42C, SCRIPT_A)
-    put(0xC2B9CC, 0xC5, 0x20, 0x70, 0x3E)                             -- what it wrote last (0.2345)
-    fpsSession(); fpsStock()
-    ok(env.fixFrameRate('wheelfps') == 5, 'wheelfps ours')
-    -- its file in a cleo folder of a game directory
+    local function running()
+        script(SCRIPT_A, SCRIPT_B, OTHER, OTHER)
+        script(SCRIPT_B, 0, CS_BASE, CS_BASE + 0x15)                  -- after its wait 0
+        putU32(0xA8B42C, SCRIPT_A)
+        put(0xC2B9CC, 0xC5, 0x20, 0x70, 0x3E)                         -- what it wrote last (0.2345)
+    end
     local dir = os.tmpname(); os.remove(dir); os.execute('mkdir -p "' .. dir .. '/cleo"')
-    local out = assert(io.open(dir .. '/cleo/Car Speed FPS Fix (Junior_Djjr).cs', 'wb')); out:write(cs); out:close()
+    local NAME = 'Car Speed FPS Fix (Junior_Djjr).cs'
+    local function writeFile() local out = assert(io.open(dir .. '/cleo/' .. NAME, 'wb')); out:write(cs); out:close() end
+    writeFile()
     local other = assert(io.open(dir .. '/cleo/other.cs', 'wb')); other:write('\1\0\4\0'); other:close()
     env.getGameDirectory = function() return dir end
     local listing
-    env.findFirstFile = function(mask)
-        listing = {'other.cs', 'Car Speed FPS Fix (Junior_Djjr).cs'}
+    env.findFirstFile = function()
+        listing = {}
+        for _, n in ipairs({'other.cs', NAME}) do
+            local f = io.open(dir .. '/cleo/' .. n, 'rb'); if f then f:close(); listing[#listing + 1] = n end
+        end
         return 1, table.remove(listing, 1)
     end
     env.findNextFile = function() return table.remove(listing, 1) end
     env.findClose = function() end
-    local realOpen = io.open
-    env.io = setmetatable({open = function(path, mode) return realOpen((path:gsub('\\', '/')), mode) end}, {__index = io})
-    local fromChat = #chat
-    ok(env.FPS == nil and upvalue(env.fixFrameRate, 'FPS').endCleoScript() == true, 'ended one')
+    local function unix(path) return (path:gsub('\\', '/')) end
+    local envIo = rawget(env, 'io')                                   -- the options file's fake, if any
+    env.io = setmetatable({open = function(path, mode)
+        if path:find('cleo', 1, true) then return io.open(unix(path), mode) end
+        return (envIo or io).open(path, mode)
+    end}, {__index = envIo or io})
+    env.os = setmetatable({rename = function(a, b) return os.rename(unix(a), unix(b)) end}, {__index = os})
+    local function said(text, from) for i = from + 1, #chat do if chat[i]:find(text, 1, true) then return chat[i] end end end
+    local opts = upvalue(env.fixesCommand, 'options')
+
+    fpsSession(); fpsStock(); running()
+    opts.wheelfps = true
+    ok(env.fixFrameRate('wheelfps') == 5, 'wheelfps ours')
+    local from = #chat
+    FPS.cleoTick()
+    ok(getU32(SCRIPT_B + 0x14) == CS_BASE + 0x15 and same(get(0xC2B9CC, 4), {0xC5, 0x20, 0x70, 0x3E}),
+        'found: the script and its value untouched')
+    ok(same(get(0x6D6E69, 6), hex('D905CCB9C200')) and FPS.owner.wheelfps == 'Car Speed FPS Fix (CLEO)',
+        'wheelfps stood down, so nothing is scaled twice')
+    ok(said('Car Speed FPS Fix (CLEO) is running', from) and said('/fixes cleo stop', from), 'asked in chat')
+    local asked = #chat
+    FPS.cleoTick()
+    ok(#chat == asked, 'asked once')
+
+    print('\n== /fixes cleo stop: ended for this session, wheelfps on')
+    env.fixesCommand('cleo stop')
     ok(getU32(SCRIPT_B + 0x14) == FPS.stubs.cleoEnd and same(get(FPS.stubs.cleoEnd, 2), {0x93, 0x0A}),
         'its IP at an 0A93: CLEO ends and frees it')
     ok(getU32(SCRIPT_A + 0x14) == OTHER, 'another script untouched')
-    ok(same(get(0xC2B9CC, 4), hex('6666663F')), 'fWheelFriction back to 0.9')
-    ok(chat[#chat] and chat[#chat]:find('Car Speed FPS Fix (CLEO) was running and is stopped', 1, true)
-        and chat[#chat]:find('cleo\\Car Speed FPS Fix (Junior_Djjr).cs', 1, true), 'told, naming the file: ' .. tostring(chat[#chat]))
-    ok(FPS.endCleoScript() == false and #chat == fromChat + 1, 'once: the next tick finds nothing to do')
-    -- wheelfps off: the script is its own business
-    script(SCRIPT_B, 0, CS_BASE, CS_BASE + 0x15)
-    env.stopFrameRate('wheelfps')
-    ok(FPS.endCleoScript() == false and getU32(SCRIPT_B + 0x14) == CS_BASE + 0x15, 'wheelfps off: left running')
-    env.getGameDirectory, env.findFirstFile, env.findNextFile, env.findClose, env.io = nil, nil, nil, nil, nil
+    ok(same(get(0xC2B9CC, 4), hex('6666663F')) and callTarget(0x6D6E69) == FPS.stubs.wheel, 'fWheelFriction 0.9, wheelfps on')
+    ok(chat[#chat]:find('stopped for this session', 1, true) and chat[#chat]:find(NAME, 1, true), 'said: ' .. chat[#chat])
+    local f = io.open(dir .. '/cleo/' .. NAME, 'rb')
+    ok(f ~= nil, 'its file is still there'); if f then f:close() end
+
+    print('\n== /fixes cleo keep: kept, wheelfps off and saved')
+    fpsSession(); fpsStock(); running(); FPS.cleoState = nil
+    opts.wheelfps = true; env.fixFrameRate('wheelfps'); FPS.cleoTick()
+    local encode, savedAll = env.encodeJson, nil
+    env.encodeJson = function(t) savedAll = t; return encode(t) end
+    env.fixesCommand('cleo keep')
+    env.encodeJson = encode
+    ok(opts.wheelfps == false and savedAll and savedAll.wheelfps == false, 'wheelfps off, saved')
+    ok(getU32(SCRIPT_B + 0x14) == CS_BASE + 0x15, 'the script keeps running')
+    from = #chat
+    FPS.cleoTick()
+    ok(#chat == from, 'and is not asked about again')
+
+    print('\n== /fixes cleo remove: explained first, done only with yes in time, renamed not deleted')
+    FPS.cleoState = nil; env.fixesCommand('wheelfps on'); running(); FPS.cleoTick()
+    from = #chat
+    env.fixesCommand('cleo remove yes')
+    ok(said('first, then /fixes cleo remove yes', from) and getU32(SCRIPT_B + 0x14) == CS_BASE + 0x15,
+        'yes before asking: refused, nothing done')
+    env.fixesCommand('cleo remove')
+    ok(said('Nothing is deleted', from) and said('within 30 seconds', from), 'explained, with the 30 seconds')
+    local f2 = io.open(dir .. '/cleo/' .. NAME, 'rb')
+    ok(f2 ~= nil, 'nothing done yet'); if f2 then f2:close() end
+    FPS.removeUntil = os.clock() - 1
+    env.fixesCommand('cleo remove yes')
+    ok(said('first, then /fixes cleo remove yes', #chat - 1), 'too late: refused')
+    env.fixesCommand('cleo remove')
+    env.fixesCommand('cleo remove yes')
+    local gone, kept = io.open(dir .. '/cleo/' .. NAME, 'rb'), io.open(dir .. '/cleo/' .. NAME .. '.disabled', 'rb')
+    ok(gone == nil and kept ~= nil, 'renamed to .cs.disabled, the bytes kept'); if kept then ok(kept:read('*a') == cs, 'unchanged'); kept:close() end
+    ok(getU32(SCRIPT_B + 0x14) == FPS.stubs.cleoEnd and opts.wheelfps, 'and stopped, wheelfps on')
+    ok(chat[#chat]:find('.disabled', 1, true), 'said: ' .. chat[#chat])
+    from = #chat
+    env.fixesCommand('cleo remove')
+    ok(said('No Car Speed FPS Fix .cs file', from), 'nothing left to remove')
+
+    env.getGameDirectory, env.findFirstFile, env.findNextFile, env.findClose, env.os = nil, nil, nil, nil, nil
+    env.io = envIo
     os.execute('rm -rf "' .. dir .. '"')
-    putU32(0xA8B42C, 0)
+    putU32(0xA8B42C, 0); FPS.cleoState = nil
 end
 
 print('\n== an ASI a fix stood down for is named in chat once')
