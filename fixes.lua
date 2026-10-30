@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.19.0")
+script_version("0.22.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -901,16 +901,41 @@ local OPTIONS = {
             if on then return fixFrameRate("wheelfps"), 0 end
             return stopFrameRate("wheelfps"), 0
         end},
-    swimfps = {default = true, label = "swimming is as fast at any fps (slow at high fps)",
+    swimfps = {default = true,
+        label = "swimming as at 30 fps: its speed, the dive and holding at the surface (slow at high fps)",
         apply = function(on)
-            if on then return fixFrameRate("swimfps"), 0 end
-            return stopFrameRate("swimfps"), 0
+            local c = on and fixFrameRate("swimfps") or stopFrameRate("swimfps")
+            return c + fixCrashes("game"), 0
         end},
     floatfps = {default = true, label = "buoyancy scaled as Swim FPS Fix does: less lift above 30 fps, boats included",
         apply = function(on)
             if on then return fixFrameRate("floatfps"), 0 end
             return stopFrameRate("floatfps"), 0
         end},
+    -- MTA's frame-rate fixes, in crashfix.dll
+    turnfps = {default = true, label = "a spinning car or object slows its spin as fast at any fps (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    vehiclefps = {default = true,
+        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante)",
+        apply = function() return fixCrashes("game"), 0 end},
+    effectsfps = {default = true,
+        label = "particles, rain, splashes and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    pushfps = {default = true, label = "walking into a parked car pushes it as at 30 fps, not away (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    sirenfps = {default = true, label = "a horn tap under 150 ms switches the siren at any fps (FramerateVigilante)",
+        apply = function() return fixCrashes("game"), 0 end},
+    drift = {default = false, label = "a line every 30 s in logs\\drift.log: fps, frame times and what could grow (/fixes drift report)",
+        apply = function(on)
+            if on then return startDrift() and 1 or 0, 0 end
+            return stopDrift() and 1 or 0, 0
+        end},
+    chutefps = {default = true, label = "the parachute turns, rolls and speeds up as at 30 fps (it spun at high fps)",
+        apply = function() chuteTick(); return 0, 0 end},
+    freezecar = {default = true, label = "a server freezing you while you drive holds your car too, instead of letting it roll on",
+        apply = function() freezeCarTick(); return 0, 0 end},
     positionguard = {default = true, label = "NaN, inf and off-map positions put back before a ped, car or object is placed",
         apply = function(on)
             if on then return fixPositionGuard() and 1 or 0, 0 end
@@ -929,6 +954,11 @@ local OPTIONS = {
         apply = function() return fixCrashes("game"), 0 end},
     volshadows = {default = false, label = "volumetric vehicle shadows (off: cheap blob shadows, as crashes.asi)",
         apply = function(on) return setCrashFixShadows(on) and 1 or 0, 0 end},
+    glasslist = {default = true,
+        label = "a car's glass and other see-through parts drawn in order past the game's 20 a car (San Andreas Online)",
+        apply = function() return fixCrashes("game"), 0 end},
+    pedmatrix = {default = true, label = "a ped whose bone matrices went bad is not drawn stretched across the screen (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
     noheathaze = {default = true, label = "no heat haze"},
     noclouds = {default = true, label = "no clouds (a few frames)"},
     noflashes = {default = false, label = "no flash effects"},
@@ -1078,6 +1108,7 @@ function setOption(key, on)
         local c, r = OPTIONS[key].apply(options[key])
         changed, refused = changed + c, refused + r
     end
+    if driftNote and key ~= "drift" then driftNote(("/fixes %s %s"):format(key, on and "on" or "off")) end
     saveOptions()
     return changed, refused
 end
@@ -2111,8 +2142,9 @@ end
 --   swimfps   CTaskSimpleSwim::ProcessSwimmingResistance blends toward a
 --             target built from the animation's per-frame movement: slow
 --             swimming at high fps. The target is scaled by 1.6667 /
---             timestep; its other (vertical) branch keeps stock by scaling
---             its -0.1 the other way (Swim FPS Fix.asi).
+--             timestep; its dive speed (-0.1) and the underwater state's
+--             buoyancy (+0.01) keep stock by scaling the other way (Swim FPS
+--             Fix.asi, MTA #3344).
 --   floatfps  cBuoyancy::CalcBuoyancyForce's timestep becomes t * (t / 1.5
 --             + 1), t = timestep / 1.6667: less lift above 30 fps, which
 --             keeps a swimmer at the surface. Everything that floats, boats
@@ -2131,6 +2163,7 @@ local FPS = {
         {va = 0x68A4FC, option = "swimfps", stub = "swim", jmp = true,
          from = hexBytes("D9 5C 24 1C D9 44 24 14 D8 C9 D9 5C 24 20 D8 4C 24 18")},
         {va = 0x68A42B, option = "swimfps", stub = "dive", from = hexBytes("D8 0D F4 8E 85 00")},   -- fmul [-0.1]
+        {va = 0x68A4CA, option = "swimfps", stub = "lift", from = hexBytes("D8 05 CC 08 87 00")},   -- fadd [0.01]
         {va = 0x6C27AE, option = "floatfps", stub = "float", from = hexBytes("D8 0D 5C CB B7 00")},  -- fmul [timestep]
     },
     block = nil,
@@ -2141,7 +2174,7 @@ local FPS = {
 -- The block: four constants, then each stub. -> bytes, {name = va}. `game`
 -- moves the game globals the stubs read (the tests' harness).
 function FPS.code(block, game)
-    game = game or {timestep = FPS.TIMESTEP, friction = 0xC2B9CC, minus = 0x858EF4, back = 0x68A50E}
+    game = game or {timestep = FPS.TIMESTEP, friction = 0xC2B9CC, minus = 0x858EF4, back = 0x68A50E, lift = 0x8708CC}
     local code, at = {}, {}
     local function emit(hex, dword)
         for _, b in ipairs(hexBytes(hex)) do code[#code + 1] = b end
@@ -2176,6 +2209,11 @@ function FPS.code(block, game)
     emit("DE C9 DE C9 C3")                 -- fmulp: t * (t/1.5 + 1) / fmulp: times the buoyancy / ret
     at.cleoEnd = block + #code
     emit("93 0A")                          -- 0A93 end_custom_script, for a CLEO script this ends
+    at.lift = block + #code                -- the underwater state's buoyancy, which the swim stub's k scales too
+    emit("D9 05", game.lift)               -- fld [0.01]
+    emit("D8 0D", game.timestep)           -- fmul [timestep]
+    emit("D8 0D", INV30)                   -- fmul [0.6]: the swim stub's k cancels it (MTA #3344)
+    emit("DE C1 C3")                       -- faddp st(1), st / ret
     return code, at
 end
 
@@ -2199,7 +2237,7 @@ local function fpsHookTarget(site)
     if moduleAt(at) then return nil end
     local head = readBytes(at, 6)
     local want = ({wheel = "D9 05 CC B9 C2 00", swim = "D9 05 5C CB B7 00", dive = "D8 0D F4 8E 85 00",
-                   float = "D9 05 5C CB B7 00"})[site.stub]
+                   float = "D9 05 5C CB B7 00", lift = "D9 05 CC 08 87 00"})[site.stub]
     return head and bytesEqual(head, hexBytes(want)) and at or nil
 end
 
@@ -2212,8 +2250,9 @@ function fixFrameRate(option)
         local adopted = fpsHookTarget(site)
         if adopted and not FPS.block then                -- an earlier run's: VirtualAlloc's 64K base
             FPS.block = adopted - adopted % 0x10000
-            local _
-            _, FPS.stubs = FPS.code(FPS.block)
+            local code
+            code, FPS.stubs = FPS.code(FPS.block)
+            poke(FPS.block, code)                        -- the same stubs, and any added since
         end
         if not adopted then
             local found = readBytes(site.va, #site.from)
@@ -2646,7 +2685,11 @@ end
 -- installed by number, so one another mod already hooks (crashes.asi while it
 -- is installed) stands down alone, and every one logs a line. Option
 -- "crashfix"; the hooks in CRASHFIX_OPTION only with their own option too.
--- docs/MEMORY_FIXES.md 30, 34.
+-- MTA's and FramerateVigilante's frame-rate fixes live in the same DLL
+-- (framerate.c, vigilante.c), each hook under the option the DLL names for it,
+-- and so do MTA's ped matrix checks (pedmatrix.c, option pedmatrix) and San
+-- Andreas Online's vehicle glass list (glasslist.c, option glasslist).
+-- docs/MEMORY_FIXES.md 30, 34, 41, 42, 43.
 pcall(ffi.cdef, [[
     int CrashFix_Count(void);
     const char* CrashFix_Key(int i);
@@ -2658,12 +2701,13 @@ pcall(ffi.cdef, [[
     int CrashFix_Uninstall(int i);
     int CrashFix_Installed(int i);
     uint32_t CrashFix_Averted(int i);
+    const char* CrashFix_Option(int i);
 ]])
 local CRASHFIX_DLL = getWorkingDirectory() .. "\\lib\\fixes\\crashfix.dll"
 local CRASHFIX_SAMP = string.char(0x74, 0x12, 0x8B, 0x50, 0x10, 0x8B, 0x02)   -- je / mov edx,[eax+10h] / mov eax,[edx]
 
 local crashFixLib
-local crashFixes = {}              -- key -> {name, va, state, why, seen}, in DLL order
+local crashFixes = {}              -- key -> {name, option, va, state, why, seen}, in DLL order
 
 local function loadCrashFix()
     if crashFixLib then return crashFixLib end
@@ -2678,11 +2722,26 @@ end
 -- Off unless their option is on: 19 breaks SkyGFX; MTA no longer installs 12 and 17.
 local CRASHFIX_OPTION = {misc19 = "frameclone", misc12 = "oldcrashfixes", misc17 = "oldcrashfixes"}
 
-local function crashFixWanted(key)
+local function crashFixWanted(key, option)
+    if option ~= "crashfix" then return options[option] == true end
     if options.crashfix == false then return false end
     if CRASHFIX_OPTION[key] then return options[CRASHFIX_OPTION[key]] == true end
     return true
 end
+
+-- The option the DLL names for hook i ("crashfix" from a DLL without them)
+local function crashFixOption(lib, i)
+    local ok, p = pcall(function() return lib.CrashFix_Option(i) end)
+    return ok and p ~= nil and ffi.string(p) or "crashfix"
+end
+
+-- What a hook is by its option: "crash", "glass", "ped" or "frame" (the frame-rate fixes)
+local crashFixKind
+do
+    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped"}
+    function crashFixKind(option) return kinds[option] or "frame" end
+end
+local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix"}
 
 -- part: "game" (gta_sa.exe, from the start) or "samp" (samp.dll's helper,
 -- once SA-MP is up). -> hooks installed or removed now.
@@ -2697,23 +2756,24 @@ function fixCrashes(part)
     for i = 0, lib.CrashFix_Count() - 1 do
         local key = ffi.string(lib.CrashFix_Key(i))
         if (key == "samp") == (part == "samp") then
-            local entry = crashFixes[key] or {name = ffi.string(lib.CrashFix_Name(i)), seen = 0}
+            local entry = crashFixes[key] or {name = ffi.string(lib.CrashFix_Name(i)), option = crashFixOption(lib, i), seen = 0}
             crashFixes[key] = entry
+            local noun = CRASHFIX_NOUN[crashFixKind(entry.option)]
             if part == "samp" and lib.CrashFix_Installed(i) == 0 then
                 local base = getModuleHandle("samp.dll")
                 local site = base and base ~= 0 and findInSections(moduleSections(base), true, CRASHFIX_SAMP)
                 if site then lib.CrashFix_SetSampSite(site) end
             end
             entry.va = tonumber(lib.CrashFix_Address(i))
-            if not crashFixWanted(key) then
+            if not crashFixWanted(key, entry.option) then
                 if lib.CrashFix_Installed(i) == 1 and lib.CrashFix_Uninstall(i) == 1 then
                     changed = changed + 1
-                    log(string.format("[fixes] crash fix %s (%s): removed", key, entry.name), "info")
+                    log(string.format("[fixes] %s %s (%s): removed", noun, key, entry.name), "info")
                 end
                 entry.state, entry.why = "off", nil
             elseif entry.va == 0 then
                 entry.state, entry.why = "refused", "its pattern is not in samp.dll"
-                log(string.format("[fixes] refusing crash fix %s (%s): %s", key, entry.name, entry.why), "info")
+                log(string.format("[fixes] refusing %s %s (%s): %s", noun, key, entry.name, entry.why), "info")
             else
                 local found = ffi.new("uint32_t[1]")
                 local r = lib.CrashFix_Install(i, found)
@@ -2721,18 +2781,18 @@ function fixCrashes(part)
                 if r == 1 then
                     changed = changed + 1
                     entry.state, entry.why = "ok", nil
-                    log(string.format("[fixes] 0x%X crash fix %s (%s): hooked", entry.va, key, entry.name), "info")
+                    log(string.format("[fixes] 0x%X %s %s (%s): hooked", entry.va, noun, key, entry.name), "info")
                 elseif r == 2 then
                     entry.state, entry.why = "already", nil
-                    log(string.format("[fixes] 0x%X crash fix %s (%s): already hooked", entry.va, key, entry.name), "info")
+                    log(string.format("[fixes] 0x%X %s %s (%s): already hooked", entry.va, noun, key, entry.name), "info")
                 elseif r == 3 then
                     entry.state, entry.why = "conflict", moduleAt(at) or string.format("code at 0x%X", at)
-                    log(string.format("[fixes] 0x%X crash fix %s (%s) is owned by %s; standing down",
-                        entry.va, key, entry.name, entry.why), "info")
+                    log(string.format("[fixes] 0x%X %s %s (%s) is owned by %s; standing down",
+                        entry.va, noun, key, entry.name, entry.why), "info")
                 else
                     entry.state = "refused"
                     entry.why = r == 0 and ("found " .. bytesToHex(u32bytes(at)) .. " ...") or "unreadable"
-                    log(string.format("[fixes] refusing 0x%X crash fix %s (%s): %s", entry.va, key, entry.name, entry.why),
+                    log(string.format("[fixes] refusing 0x%X %s %s (%s): %s", entry.va, noun, key, entry.name, entry.why),
                         "warn")
                 end
             end
@@ -2747,11 +2807,13 @@ function setCrashFixShadows(on)
     return true
 end
 
--- -> in place, owned elsewhere, refused, off
-local function crashFixCounts()
+-- -> in place, owned elsewhere, refused, off; the hooks of `kind` ("crash"
+-- if nil, "frame", "glass", "ped")
+local function crashFixCounts(kind)
     local n = {ok = 0, owned = 0, refused = 0, off = 0}
     for _, e in pairs(crashFixes) do
-        if e.state == "ok" or e.state == "already" then n.ok = n.ok + 1
+        if crashFixKind(e.option) ~= (kind or "crash") then
+        elseif e.state == "ok" or e.state == "already" then n.ok = n.ok + 1
         elseif e.state == "conflict" then n.owned = n.owned + 1
         elseif e.state == "off" then n.off = n.off + 1
         elseif e.state then n.refused = n.refused + 1 end
@@ -2759,18 +2821,28 @@ local function crashFixCounts()
     return n
 end
 
--- The hooks' state as one of otherFixes' ("in place", "left to X", "off ...",
--- "not in place").
-function crashFixState()
-    if not crashFixLib then return options.crashfix == false and "off (option crashfix)" or "not in place" end
-    local n, owners, seen = crashFixCounts(), {}, {}
+-- The state of the hooks of `kind` (as crashFixCounts) as one of
+-- otherFixes' ("in place", "left to X", "off ...", "not in place")
+local CRASHFIX_OFF = {crash = "off (option crashfix)", glass = "off (option glasslist)", ped = "off (option pedmatrix)",
+    frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps)"}
+function crashFixState(kind)
+    kind = kind or "crash"
+    local off = CRASHFIX_OFF[kind]
+    if not crashFixLib then
+        local wanted = kind == "crash" and options.crashfix ~= false or kind == "glass" and options.glasslist
+            or kind == "ped" and options.pedmatrix
+        return wanted and "not in place" or off
+    end
+    local n, owners, seen = crashFixCounts(kind), {}, {}
     for _, e in pairs(crashFixes) do
-        if e.state == "conflict" and not seen[e.why] then seen[e.why] = true; owners[#owners + 1] = e.why end
+        if crashFixKind(e.option) == kind and e.state == "conflict" and not seen[e.why] then
+            seen[e.why] = true; owners[#owners + 1] = e.why
+        end
     end
     table.sort(owners)
     if n.refused > 0 then return "not in place" end
     if n.owned > 0 then return "left to " .. table.concat(owners, ", ") .. (" (%d of %d hooks)"):format(n.owned, n.ok + n.owned) end
-    if n.ok == 0 then return "off (option crashfix)" end
+    if n.ok == 0 then return off end
     return "in place"
 end
 
@@ -2786,8 +2858,16 @@ local function crashFixTick(now)
         local n = tonumber(crashFixLib.CrashFix_Averted(i))
         if e and n ~= e.seen and (not e.said or now - e.said >= CRASHFIX_QUIET) then
             e.seen, e.said = n, now
-            log(string.format("[fixes] crash fix %s (%s) averted a crash (%d so far)",
-                ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "warn")
+            if crashFixKind(e.option) == "glass" then
+                log(string.format("[fixes] glass list %s (%s) grew for a car with more see-through parts (%d so far)",
+                    ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
+            elseif crashFixKind(e.option) == "ped" then
+                log(string.format("[fixes] ped fix %s (%s) caught a ped's broken bones (%d so far)",
+                    ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
+            else
+                log(string.format("[fixes] crash fix %s (%s) averted a crash (%d so far)",
+                    ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "warn")
+            end
         end
     end
 end
@@ -2885,7 +2965,7 @@ local rpcCounts = {anim = 0, menu = 0, dialog = 0, pos = 0}
 local RPC_KIND = {[RPC_APPLY_ANIM] = "anim", [RPC_APPLY_ACTOR_ANIM] = "anim",
                   [RPC_INIT_MENU] = "menu", [RPC_SHOW_DIALOG] = "dialog",
                   [RPC_SET_PLAYER_POS] = "pos", [RPC_SET_PLAYER_POS_FIND_Z] = "pos",
-                  [RPC_SET_VEHICLE_POS] = "pos"}
+                  [RPC_SET_VEHICLE_POS] = "pos", [15] = "freeze"}     -- 15: TogglePlayerControllable
 
 local function skipBytes(bs, n) if n > 0 then raknetBitStreamIgnoreBits(bs, n * 8) end end
 
@@ -3001,6 +3081,8 @@ local function screenRpc(id, bs)
                 vehicle and ("vehicle " .. vehicle) or "the player", why))
             return false
         end
+    elseif id == 15 then
+        freezeCarRpc(raknetBitStreamReadInt8(bs) ~= 0)
     elseif id == RPC_SHOW_DIALOG and options.dialoglines ~= false then
         local cut, longest = cutDialogLines(bs)
         if cut then
@@ -3023,6 +3105,185 @@ end
 local function say(text)
     sampAddChatMessage("{9ACD32}[fixes]{FFFFFF} " .. text, -1)
 end
+
+-- The parachute at any fps (option "chutefps"). It is a mission script,
+-- PLCHUTE (player_parachute.scm in script.img; the game loads a build 216
+-- bytes longer than the PC file), that steers, smooths and blends once a frame
+-- with values tuned at 30 fps: at 144 fps it turned almost 5 times as fast and
+-- rolled and sped up faster. Its 11 such constants are found in its loaded
+-- code by their whole instructions (seven `x /= 20.0`, `/= 5.0`, `/= 15.0`,
+-- two `*= 0.01`; nothing is touched unless all are there) and rewritten every
+-- frame from the timestep: a turn rate scaled by timestep / 1.6667, a blend of
+-- a toward a target each frame as 1 - (1 - a)^(timestep / 1.6667). Off, the
+-- stock values go back.
+;(function()
+    -- {opcode (0x17 /=, 0x13 *=), the float's bytes, its value, "turn" or "blend", how many}
+    local KINDS = {
+        {0x17, {0x00, 0x00, 0xA0, 0x41}, 20.0, "blend", 7},    -- roll, pitch, sink rate: 1/20 a frame
+        {0x17, {0x00, 0x00, 0xA0, 0x40}, 5.0, "turn", 1},      -- falling: heading -= roll / 5
+        {0x17, {0x00, 0x00, 0x70, 0x41}, 15.0, "turn", 1},     -- open: heading -= roll / 15
+        {0x13, {0x0A, 0xD7, 0x23, 0x3C}, 0.01, "blend", 2},    -- falling: the speed, 1% a frame
+    }
+    local HEAD = {0xA4, 0x03, 0x09, 0x50, 0x4C, 0x43, 0x48, 0x55, 0x54, 0x45}   -- script_name 'PLCHUTE'
+    local SIZE = 0x1800
+    local found                 -- {base = va, sites = {{at = va of the float, kind}}} for the code last seen
+    local told, listed
+
+    -- `op 00 03 <local> 00 06 <float>`: the kinds' sites in the code at base, or nil and why
+    local function scan(base)
+        if not readable(base, SIZE) then return nil, ("PLCHUTE's code at 0x%X cannot be read"):format(base) end
+        local b = readBytes(base, SIZE)
+        if not bytesEqual({unpack(b, 1, #HEAD)}, HEAD) then
+            return nil, ("PLCHUTE's code at 0x%X starts %s"):format(base, bytesToHex({unpack(b, 1, 12)}))
+        end
+        local sites, counts = {}, {}
+        for i = 1, SIZE - 9 do
+            if b[i + 1] == 0 and b[i + 2] == 3 and b[i + 4] == 0 and b[i + 5] == 6 then
+                for k, kind in ipairs(KINDS) do
+                    local f = kind[2]
+                    if b[i] == kind[1] and b[i + 6] == f[1] and b[i + 7] == f[2] and b[i + 8] == f[3] and b[i + 9] == f[4] then
+                        sites[#sites + 1] = {at = base + i + 5, kind = kind}
+                        counts[k] = (counts[k] or 0) + 1
+                    end
+                end
+            end
+        end
+        for k, kind in ipairs(KINDS) do
+            if counts[k] ~= kind[5] then
+                return nil, ("PLCHUTE's code at 0x%X has %d `%s %g` where the script has %d"):format(
+                    base, counts[k] or 0, kind[1] == 0x17 and "/=" or "*=", kind[3], kind[5])
+            end
+        end
+        return {base = base, sites = sites}
+    end
+
+    -- The running PLCHUTE's sites, or nil and why
+    local function code()
+        local script, guard = readU32(0xA8B42C), 0                  -- CTheScripts::pActiveScripts
+        while script ~= 0 and guard < 1000 and readable(script, 0x18) do
+            guard = guard + 1
+            if string.char(unpack(readBytes(script + 8, 7) or {})):lower() == "plchute" then
+                local base = readU32(script + 0x10)
+                if found and found.base == base then return found end
+                local sites, why = scan(base)
+                found = sites
+                return sites, why
+            end
+            script = readU32(script)
+        end
+        return nil, "no PLCHUTE running"
+    end
+
+    -- Once, holding the parachute with no PLCHUTE to fix: why, and what is running
+    local function list(why)
+        listed = true
+        local names, script, guard = {}, readU32(0xA8B42C), 0
+        while script ~= 0 and guard < 200 and readable(script, 0x18) do
+            guard = guard + 1
+            local text = string.char(unpack(readBytes(script + 8, 8) or {})):gsub("%z.*", "")
+            names[#names + 1] = ("%s@0x%X"):format(text, readU32(script + 0x10))
+            script = readU32(script)
+        end
+        log(("[fixes] chutefps: holding the parachute but not fixing it: %s; running: %s"):format(why, table.concat(names, ", ")),
+            "warn")
+    end
+
+    local function value(kind, k)
+        if kind[4] == "turn" then return kind[3] / k end
+        local a = kind[1] == 0x13 and kind[3] or 1 / kind[3]
+        local per = 1 - (1 - a) ^ k
+        return kind[1] == 0x13 and per or 1 / per
+    end
+
+    -- From the main loop, every frame
+    function chuteTick()
+        local code_, why = code()
+        if not code_ then
+            if not listed and options.chutefps then
+                local ok, weapon = pcall(getCurrentCharWeapon, PLAYER_PED)
+                if ok and weapon == 46 then list(why) end
+            end
+            return
+        end
+        local k
+        if options.chutefps then
+            local t = ffi.cast("float*", 0xB7CB5C)[0]                -- CTimer::ms_fTimeStep
+            if not (t > 0.0001) then return end
+            k = math.min(t / (50 / 30), 4)
+        end
+        for _, site in ipairs(code_.sites) do
+            ffi.cast("float*", site.at)[0] = k and value(site.kind, k) or site.kind[3]
+        end
+        if k and not told then
+            told = true
+            log(("[fixes] chutefps: the parachute steers as at 30 fps (code at 0x%X, %d constants)"):format(
+                code_.base, #code_.sites), "info")
+        end
+    end
+end)()
+
+-- A server freezing the player (TogglePlayerControllable, RPC 15) only locks
+-- the controls, so a car being driven rolls on. While the player is frozen
+-- and drives, the car is held too: CPhysical's bDontApplySpeed set (+40h bit
+-- 13, as FREEZE_CAR_POSITION) and its speeds zeroed every frame. It goes
+-- when the server lets go, the controls come back (a respawn) or the player
+-- is no longer its driver; the bit is cleared only if fixes set it. Option
+-- "freezecar". In a function of its own: the chunk has no locals to spare.
+;(function()
+    local FLAGS, DONT_APPLY_SPEED = 0x40, 0x2000
+    local frozen, held = false, nil            -- held: {car = handle, was = the bit before}
+
+    local function zero(ptr)
+        local p = ffi.cast("uint32_t*", ptr + 0x44)   -- move speed +44h, turn speed +50h
+        for i = 0, 5 do p[i] = 0 end
+    end
+
+    local function release()
+        if not held then return end
+        local car, was = held.car, held.was
+        held = nil
+        pcall(function()
+            if not doesVehicleExist(car) then return end
+            local ptr = getCarPointer(car)
+            local flags = ffi.cast("uint32_t*", ptr + FLAGS)
+            if not was then flags[0] = bit.band(flags[0], bit.bnot(DONT_APPLY_SPEED)) end
+            zero(ptr)
+        end)
+        log("[fixes] freezecar: the car goes with the player again", "info")
+    end
+
+    -- The car the player drives, or nil
+    local function driven()
+        local ok, car = pcall(function()
+            if not isCharInAnyCar(PLAYER_PED) then return nil end
+            local car = storeCarCharIsInNoSave(PLAYER_PED)
+            return getDriverOfCar(car) == PLAYER_PED and car or nil
+        end)
+        return ok and car or nil
+    end
+
+    function freezeCarRpc(moveable)
+        frozen = not moveable
+        if not frozen then release() end
+    end
+
+    -- From the main loop, every frame
+    function freezeCarTick()
+        if not frozen and not held then return end
+        if frozen and type(isPlayerControlOn) == "function" and isPlayerControlOn(PLAYER_HANDLE) then frozen = false end
+        local car = frozen and options.freezecar and driven() or nil
+        if held and held.car ~= car then release() end
+        if not car then return end
+        local ptr = getCarPointer(car)
+        if not held then
+            local flags = ffi.cast("uint32_t*", ptr + FLAGS)
+            held = {car = car, was = bit.band(flags[0], DONT_APPLY_SPEED) ~= 0}
+            flags[0] = bit.bor(flags[0], DONT_APPLY_SPEED)
+            log("[fixes] freezecar: frozen by the server while driving; the car is held too", "info")
+        end
+        zero(ptr)
+    end
+end)()
 
 -- The fixes that are not gamePatches entries, in the order main runs them:
 -- {name, state}, state "in place", "left to <mod>", "off (option <key>)" or
@@ -3224,9 +3485,248 @@ end
 
 --- /fixes - the options and their state; /fixes patches - every patch;
 --- /fixes <option> on|off - switch one.
+--------------------------------------------------------------------------------
+-- Drift (/fixes drift): what grows while the frame rate falls
+--------------------------------------------------------------------------------
+-- Every 30 s a line in logs\drift.log: the frame rate and frame times since the
+-- last line, and each count that could grow over a session - the text cache,
+-- the game's pools, streaming memory, visible entities, effect systems, SA-MP's
+-- 3D labels and textdraws, the process's memory and handles. /fixes drift
+-- report compares the newest line with the session's first. Option "drift",
+-- off by default; on, it runs from each start.
+pcall(ffi.cdef, [[ int fx_qpc(int64_t* count) __asm__("QueryPerformanceCounter"); ]])
+pcall(ffi.cdef, [[ int fx_qpf(int64_t* frequency) __asm__("QueryPerformanceFrequency"); ]])
+pcall(ffi.cdef, [[
+    typedef struct { uint32_t cb, faults; size_t peakWorkingSet, workingSet, quota[4], pagefile, peakPagefile, private; } FxProcessMemory;
+    typedef struct { uint32_t length, load; uint64_t totalPhys, availPhys, totalPage, availPage, totalVirtual, availVirtual, availExtended; } FxMemoryStatus;
+    void* fx_process(void) __asm__("GetCurrentProcess");
+    int fx_memory(void* process, FxProcessMemory* counters, uint32_t size) __asm__("K32GetProcessMemoryInfo");
+    int fx_handles(void* process, uint32_t* count) __asm__("GetProcessHandleCount");
+    uint32_t fx_gui(void* process, uint32_t which) __asm__("GetGuiResources");
+    int fx_memory_status(FxMemoryStatus* status) __asm__("GlobalMemoryStatusEx");
+]])
+
+local DRIFT = {
+    EVERY = 30,                    -- seconds between lines
+    SLOW = 20,                     -- a frame over this many ms is a hitch
+    PAUSE = 1000,                  -- a gap over this many ms (loading, minimized) is a pause, not a frame
+    LOG = getWorkingDirectory() .. "\\logs\\drift.log",
+    -- CPools: storage +0, slot flags +4 (0x80 free), size +8
+    POOLS = {{"peds", 0xB74490}, {"vehicles", 0xB74494}, {"objects", 0xB7449C}, {"buildings", 0xB74498},
+             {"dummies", 0xB744A0}, {"colmodels", 0xB744A4}, {"tasks", 0xB744A8}, {"events", 0xB744AC},
+             {"intelligence", 0xB744C0}, {"ptrsingle", 0xB74484}, {"ptrdouble", 0xB74488},
+             {"entryinfo", 0xB7448C}, {"txds", 0xC8800C}},
+    on = false, times = {}, n = 0,
+}
+
+-- -> milliseconds, from QueryPerformanceCounter
+function DRIFT.clock()
+    if not DRIFT.perTick then
+        local f = ffi.new("int64_t[1]")
+        ffi.C.fx_qpf(f)
+        DRIFT.perTick, DRIFT.tick = 1000 / tonumber(f[0]), ffi.new("int64_t[1]")
+    end
+    ffi.C.fx_qpc(DRIFT.tick)
+    return tonumber(DRIFT.tick[0]) * DRIFT.perTick
+end
+
+function DRIFT.write(line)
+    local f = io.open(DRIFT.LOG, "a")
+    if f then f:write(line, "\n"); f:close() end
+end
+
+-- -> slots used, slots, of the CPool whose pointer is at `at`
+function DRIFT.pool(at)
+    local ok, used, size = pcall(function()
+        local pool = readU32(at)
+        if pool == 0 then return nil end
+        local size, flags = readU32(pool + 8), readU32(pool + 4)
+        if size == 0 or size > 4000000 or flags == 0 then return nil end
+        local p, used = ffi.cast("uint8_t*", flags), 0
+        for i = 0, size - 1 do if p[i] < 0x80 then used = used + 1 end end
+        return used, size
+    end)
+    if ok then return used, size end
+end
+
+-- How many ids below `n` the SA-MP function `name` says exist, or nil
+function DRIFT.sampCount(name, n)
+    local fn = rawget(_G, name) or getfenv(1)[name]
+    if type(fn) ~= "function" then return nil end
+    local ok, count = pcall(function()
+        local c = 0
+        for id = 0, n - 1 do if fn(id) then c = c + 1 end end
+        return c
+    end)
+    return ok and count or nil
+end
+
+-- The counts, as {key = number}; one that can't be read is left out
+function DRIFT.counts()
+    local c = {}
+    local okStats, st = pcall(textCacheStats)
+    if okStats and st then
+        c.textcache, c.tchits, c.tcnew = tonumber(st.entries), tonumber(st.hits), tonumber(st.recorded)
+        c.tcmismatch, c.tcoff = tonumber(st.mismatches), tonumber(st.disabled)
+    end
+    for _, p in ipairs(DRIFT.POOLS) do c[p[1]], c[p[1] .. "_size"] = DRIFT.pool(p[2]) end
+    pcall(function()
+        c.streamMB = readU32(0x8E4CB4) / 1048576               -- CStreaming::ms_memoryUsed
+        c.visible = readU32(0xB76844)                          -- CRenderer::ms_nNoOfVisibleEntities
+        c.lods = readU32(0xB76840)
+        c.fx = readU32(0xA9AE80 + 0x14)                        -- g_fxMan's m_FxSystems count
+    end)
+    c.labels = DRIFT.sampCount("sampIs3dTextDefined", 2048)
+    c.textdraws = DRIFT.sampCount("sampTextdrawIsExists", 2304)
+    if refPool and refPool.used then pcall(function() c.refs = readU32(refPool.used) end) end
+    pcall(function()
+        local me, m = ffi.C.fx_process(), ffi.new("FxProcessMemory")
+        m.cb = ffi.sizeof(m)
+        if ffi.C.fx_memory(me, m, m.cb) ~= 0 then
+            -- Wine leaves PrivateUsage 0; the commit charge is the same count
+            local private = tonumber(m.private) > 0 and m.private or m.pagefile
+            c.workingMB, c.privateMB = tonumber(m.workingSet) / 1048576, tonumber(private) / 1048576
+        end
+        local h = ffi.new("uint32_t[1]")
+        if ffi.C.fx_handles(me, h) ~= 0 and h[0] > 0 then c.handles = tonumber(h[0]) end
+        local gdi, user = tonumber(ffi.C.fx_gui(me, 0)), tonumber(ffi.C.fx_gui(me, 1))
+        if gdi + user > 0 then c.gdi, c.user = gdi, user end     -- 0 and 0: Wine's stub
+        local s = ffi.new("FxMemoryStatus")
+        s.length = ffi.sizeof(s)
+        if ffi.C.fx_memory_status(s) ~= 0 then c.addressMB = tonumber(s.totalVirtual - s.availVirtual) / 1048576 end
+    end)
+    c.luaKB = collectgarbage("count")
+    return c
+end
+
+-- The line's order: {key, format}
+DRIFT.FIELDS = {
+    {"textcache", "%d"}, {"tchits/s", "%.0f"}, {"tcnew/s", "%.1f"}, {"tcmismatch", "%d"}, {"tcoff", "%d"},
+    {"peds", "pool"}, {"vehicles", "pool"}, {"objects", "pool"}, {"buildings", "pool"}, {"dummies", "pool"},
+    {"colmodels", "pool"}, {"tasks", "pool"}, {"events", "pool"}, {"intelligence", "pool"}, {"ptrsingle", "pool"},
+    {"ptrdouble", "pool"}, {"entryinfo", "pool"}, {"txds", "pool"},
+    {"streamMB", "%.0f"}, {"visible", "%d"}, {"lods", "%d"}, {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
+    {"refs", "%d"}, {"workingMB", "%.0f"}, {"privateMB", "%.0f"}, {"addressMB", "%.0f"}, {"handles", "%d"},
+    {"gdi", "%d"}, {"user", "%d"}, {"luaKB", "%.0f"},
+}
+
+-- The frames since the last line and the counts now -> a sample
+function DRIFT.sample(now)
+    local n, total, sorted, paused = 0, 0, {}, 0
+    for i = 1, DRIFT.n do
+        local ms = DRIFT.times[i]
+        if ms > DRIFT.PAUSE then paused = paused + ms
+        else n = n + 1; total = total + ms; sorted[n] = ms end
+    end
+    table.sort(sorted)
+    local function at(q) return n > 0 and sorted[math.max(1, math.ceil(n * q))] or 0 end
+    local slow = 0
+    for i = 1, n do if sorted[i] > DRIFT.SLOW then slow = slow + 1 end end
+    local s = DRIFT.counts()
+    s.t = (now - DRIFT.began) / 1000
+    s.fps = total > 0 and n * 1000 / total or 0
+    s.ms, s.p50, s.p95, s.p99, s.worst, s.slow = n > 0 and total / n or 0, at(0.5), at(0.95), at(0.99), at(1), slow
+    s.paused = paused / 1000
+    local prev, span = DRIFT.samples[#DRIFT.samples], (now - DRIFT.since) / 1000
+    if s.tchits then
+        s["tchits/s"] = (s.tchits - (prev and prev.tchits or 0)) / span
+        s["tcnew/s"] = (s.tcnew - (prev and prev.tcnew or 0)) / span
+    end
+    DRIFT.samples[#DRIFT.samples + 1] = s
+    DRIFT.n, DRIFT.since = 0, now
+    local parts = {os.date("%H:%M:%S"), ("+%ds fps=%.0f ms=%.2f p50=%.2f p95=%.2f p99=%.2f worst=%.1f slow=%d%s |"):format(
+        s.t, s.fps, s.ms, s.p50, s.p95, s.p99, s.worst, s.slow, paused > 0 and (" paused=%.1fs"):format(s.paused) or "")}
+    for _, f in ipairs(DRIFT.FIELDS) do
+        local v = s[f[1]]
+        if v and f[2] == "pool" then parts[#parts + 1] = ("%s=%d/%d"):format(f[1], v, s[f[1] .. "_size"])
+        elseif v then parts[#parts + 1] = ("%s=" .. f[2]):format(f[1], v) end
+    end
+    DRIFT.write(table.concat(parts, " "))
+    return s
+end
+
+-- From the main loop, every frame
+function driftFrame()
+    if not DRIFT.on then return end
+    local now = DRIFT.clock()
+    if DRIFT.last then
+        local n = DRIFT.n + 1
+        DRIFT.n, DRIFT.times[n] = n, now - DRIFT.last
+    end
+    DRIFT.last = now
+    if now >= DRIFT.due then
+        DRIFT.sample(now)
+        DRIFT.due = now + DRIFT.EVERY * 1000
+        DRIFT.last = DRIFT.clock()                 -- the sample's own time is not a frame's
+    end
+end
+
+function startDrift()
+    if DRIFT.on then return true end
+    local ok, now = pcall(DRIFT.clock)
+    if not ok then
+        log("[fixes] refusing drift: no QueryPerformanceCounter (" .. tostring(now) .. ")", "warn")
+        return false
+    end
+    DRIFT.on, DRIFT.began, DRIFT.since, DRIFT.due = true, now, now, now + DRIFT.EVERY * 1000
+    DRIFT.last, DRIFT.n, DRIFT.samples = nil, 0, {}
+    DRIFT.write(("== %s fixes drift: a line every %d s"):format(os.date("%Y-%m-%d %H:%M:%S"), DRIFT.EVERY))
+    log(("[fixes] drift: a line every %d s in logs\\drift.log"):format(DRIFT.EVERY), "info")
+    return true
+end
+
+function stopDrift()
+    if not DRIFT.on then return true end
+    DRIFT.on = false
+    DRIFT.write(os.date("%H:%M:%S") .. " stopped")
+    return true
+end
+
+-- A line of its own between the samples (an option switched), with the frame
+-- rate since the last line, so what it changed shows on either side
+function driftNote(text)
+    if not DRIFT.on then return end
+    local n, total = 0, 0
+    for i = 1, DRIFT.n do
+        if DRIFT.times[i] <= DRIFT.PAUSE then n, total = n + 1, total + DRIFT.times[i] end
+    end
+    DRIFT.write(("%s %s (fps since the last line: %.0f)"):format(os.date("%H:%M:%S"), text,
+        total > 0 and n * 1000 / total or 0))
+end
+
+-- -> lines comparing the first sample with the newest
+function driftReport()
+    local a, b = DRIFT.samples and DRIFT.samples[1], DRIFT.samples and DRIFT.samples[#DRIFT.samples]
+    if not DRIFT.on and not b then return {"drift is off: /fixes drift on, then a line every 30 s in logs\\drift.log"} end
+    if not b or a == b then return {("drift: too early, %d line(s) so far (one every %d s)"):format(b and 1 or 0, DRIFT.EVERY)} end
+    local lines = {("drift over %d min: %.0f -> %.0f fps (%.2f -> %.2f ms a frame, p99 %.2f -> %.2f, hitches %d -> %d)"):format(
+        (b.t - a.t) / 60 + 0.5, a.fps, b.fps, a.ms, b.ms, a.p99, b.p99, a.slow, b.slow)}
+    local grew = {}
+    for _, f in ipairs(DRIFT.FIELDS) do
+        local k, x, y = f[1], a[f[1]], b[f[1]]
+        if x and y and y ~= x and not k:find("/s", 1, true) then
+            grew[#grew + 1] = {k = k, x = x, y = y, rel = x ~= 0 and (y - x) / math.abs(x) or (y > x and 1e9 or -1e9)}
+        end
+    end
+    table.sort(grew, function(p, q) return p.rel > q.rel end)
+    local up, down = {}, {}
+    for _, g in ipairs(grew) do
+        local text = ("%s %s -> %s"):format(g.k, ("%.0f"):format(g.x), ("%.0f"):format(g.y))
+        if g.rel > 0 and #up < 8 then up[#up + 1] = text elseif g.rel < 0 then down[#down + 1] = text end
+    end
+    lines[#lines + 1] = "grew most: " .. (#up > 0 and table.concat(up, ", ") or "nothing")
+    if #down > 0 then lines[#lines + 1] = "fell: " .. table.concat(down, ", ", 1, math.min(#down, 6)) end
+    lines[#lines + 1] = "every line: logs\\drift.log; /perf report now and after a restart shows a script that grew"
+    return lines
+end
+
 function fixesCommand(params)
     local key, value = tostring(params or ""):lower():match("^%s*(%S*)%s*(%S*)")
     if key == "cleo" then FPS.cleoCommand(params) return end
+    if key == "drift" and value == "report" then
+        for _, line in ipairs(driftReport()) do say(line) end
+        return
+    end
     if key == "patches" then
         say(patchSummary())
         local groups, order = {}, {}       -- a group is one line: its sites' states, counted
@@ -3251,6 +3751,13 @@ function fixesCommand(params)
         local cf = crashFixCounts()
         say(("crash fixes (%d hooks): %d hooked, %d owned elsewhere, %d refused, %d off"):format(
             cf.ok + cf.owned + cf.refused + cf.off, cf.ok, cf.owned, cf.refused, cf.off))
+        for _, k in ipairs({{"frame", "frame-rate fixes"}, {"ped", "ped fixes"}, {"glass", "glass list"}}) do
+            local fr = crashFixCounts(k[1])
+            if fr.ok + fr.owned + fr.refused + fr.off > 0 then
+                say(("%s (%d sites): %d in place, %d owned elsewhere, %d refused, %d off"):format(
+                    k[2], fr.ok + fr.owned + fr.refused + fr.off, fr.ok, fr.owned, fr.refused, fr.off))
+            end
+        end
         for _, f in ipairs(otherFixes) do say(("%s: %s"):format(f[1], f[2])) end
         if #otherFixes == 0 then say("other fixes: not run yet") end
         return
@@ -3298,7 +3805,10 @@ function fixesCommand(params)
         if next(crashFixes) then
             local cf, averted = crashFixCounts(), 0
             if crashFixLib then
-                for i = 0, crashFixLib.CrashFix_Count() - 1 do averted = averted + tonumber(crashFixLib.CrashFix_Averted(i)) end
+                for i = 0, crashFixLib.CrashFix_Count() - 1 do
+                    local e = crashFixes[ffi.string(crashFixLib.CrashFix_Key(i))]
+                    if e and crashFixKind(e.option) == "crash" then averted = averted + tonumber(crashFixLib.CrashFix_Averted(i)) end
+                end
             end
             say(("crash fixes: %d hooked, %d left to other mods (%s); %d crash(es) averted this session"):format(
                 cf.ok, cf.owned, crashFixState(), averted))
@@ -3384,6 +3894,9 @@ function main()
     end
     fixCrashes("samp")
     otherFixes[#otherFixes + 1] = {"crash fixes", crashFixState()}
+    otherFixes[#otherFixes + 1] = {"frame-rate fixes (MTA, FramerateVigilante)", crashFixState("frame")}
+    otherFixes[#otherFixes + 1] = {"ped fixes (MTA)", crashFixState("ped")}
+    otherFixes[#otherFixes + 1] = {"glass list", crashFixState("glass")}
     if options.textcache then                    -- d3dx9_25.dll, which samp.dll loads
         worked = fixTextCache()
         noteFix("text cache", worked, textCacheState and textCacheState.owner)
@@ -3414,10 +3927,14 @@ function main()
     FPS.cleoTick()
     FPS.reportDuplicates()
     reportStartup()
+    if options.drift then startDrift() end
 
     local nextFilterCheck = 0
     while true do
         wait(0)
+        driftFrame()
+        freezeCarTick()
+        chuteTick()
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
         if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now) end

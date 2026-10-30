@@ -2,7 +2,7 @@
  * fixes.lua's frame-rate stubs (fps.bin, from fixes_test.lua --fps-bytes,
  * built at 0x20000000) run under Wine with real x87 maths. The game globals
  * they read (CTimer::ms_fTimeStep, gHandlingDataMgr.fWheelFriction and the
- * swim code's -0.1) are built at +F00h of the block, and the swim stub's jmp
+ * swim code's -0.1 and +0.01) are built at +F00h of the block, and the swim stub's jmp
  * back into the game goes to a ret at +F80h. Built with SSE maths, so the
  * compiler keeps nothing on the x87 stack the asm resets.
  *
@@ -18,6 +18,7 @@
 #define TIMESTEP (*(volatile float *)0x20000F00)
 #define FRICTION (*(volatile float *)0x20000F04)
 #define MINUS_01 (*(volatile float *)0x20000F08)
+#define LIFT_001 (*(volatile float *)0x20000F0C)
 
 static int passed, failed;
 static void ok(int cond, const char *what)
@@ -58,16 +59,18 @@ int main(void)
     block[0xF80] = 0xC3;                                   /* where the swim stub jmps back to */
     FRICTION = 0.9f;
     MINUS_01 = -0.1f;
+    LIFT_001 = 0.01f;
 
     /* the stubs, found by the game-address instruction each starts with */
-    uint32_t wheel = 0, swim = 0, dive = 0, flt = 0;
+    uint32_t wheel = 0, swim = 0, dive = 0, flt = 0, lift = 0;
     for (uint32_t i = 0x10; i + 6 < n; i++) {
         uint8_t *p = block + i;
         if (!wheel && !memcmp(p, "\xD9\x05\x04\x0F\x00\x20", 6)) wheel = BASE + i;
         else if (!dive && !memcmp(p, "\xD8\x0D\x08\x0F\x00\x20", 6)) dive = BASE + i;
+        else if (!lift && !memcmp(p, "\xD9\x05\x0C\x0F\x00\x20", 6)) lift = BASE + i;
         else if (!memcmp(p, "\xD9\x05\x00\x0F\x00\x20", 6)) { if (!swim) swim = BASE + i; else if (!flt) flt = BASE + i; }
     }
-    ok(wheel && swim && dive && flt, "all four stubs found");
+    ok(wheel && swim && dive && flt && lift, "all five stubs found");
 
     printf("== wheelfps: the coasting brake per step scales with the timestep\n");
     TIMESTEP = 50.0f / 30.0f;
@@ -86,6 +89,12 @@ int main(void)
     ok(close_to(call1(dive, 2.0f, 1), 2.0f * -0.1f * 0.5f), "60 fps: x * -0.1 * 0.5");
     TIMESTEP = 50.0f / 30.0f;
     ok(close_to(call1(dive, 2.0f, 1), -0.2f), "30 fps: stock");
+
+    printf("== lift: the underwater state's +0.01 times timestep / 1.6667, added\n");
+    TIMESTEP = 50.0f / 30.0f;
+    ok(close_to(call1(lift, 0.05f, 1), 0.06f), "30 fps: z + 0.01, stock");
+    TIMESTEP = 50.0f / 60.0f;
+    ok(close_to(call1(lift, 0.05f, 1), 0.055f), "60 fps: z + 0.005, which the swim stub's k doubles back");
 
     printf("== floatfps: the buoyancy timestep becomes t * (t / 1.5 + 1)\n");
     TIMESTEP = 50.0f / 30.0f;

@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-27):** `fixes.lua` 0.19.0. It applies the 128 `gamePatches`
+**Status (2026-10-30):** `fixes.lua` 0.22.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -51,7 +51,17 @@ default). Since 0.18.0 `CMessages::GetStringLength` returns 0 for a null
 string instead of crashing (39), and the coasting slow-down, swimming and
 buoyancy scale with the frame rate (40, options `wheelfps`, `swimfps`,
 `floatfps`, on by default) in place of entry 8. Since 0.19.0 a running Car
-Speed FPS Fix script is only asked about (`/fixes cleo`). It is published as a
+Speed FPS Fix script is only asked about (`/fixes cleo`). Since 0.20.0 MTA's
+frame-rate fixes are in crashfix.dll (41, options `turnfps`, `pedfps`,
+`vehiclefps`, `effectsfps`, `pushfps`, on by default). Since 0.21.0 it
+carries San Andreas Online's two crash fixes and its growing vehicle glass
+list (42, option `glasslist`, on by default). Since 0.22.0 it carries
+FramerateVigilante's frame-rate fixes that MTA's lack and MTA's two ped
+matrix checks (43, options `sirenfps` and `pedmatrix`, on by default; the
+rest under `vehiclefps` and `swimfps`), a car held while the server freezes
+its driver (44, option `freezecar`, on by default), the parachute at any fps
+(45, option `chutefps`, on by default) and `/fixes drift`
+(docs/PERF.md). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -1977,6 +1987,7 @@ game-address instruction, which is how a reload knows its own hooks.
 wheelfps   0x6D6E69 0x6D6EA8 0x6D767F 0x6D76AB 0x6D76CD   fld [fWheelFriction] -> call wheel / nop
 swimfps    0x68A4FC (18 bytes)                             -> jmp swim, back to 0x68A50E
            0x68A42B  fmul [0x858EF4] (-0.1)                -> call dive / nop
+           0x68A4CA  fadd [0x8708CC] (+0.01)               -> call lift / nop
 floatfps   0x6C27AE  fmul [ms_fTimeStep]                   -> call float / nop
 ```
 
@@ -2002,7 +2013,12 @@ The vertical branch at 0x68A422 (the target z from the animation) ends in
 `fmul [-0.1]`; the dive stub multiplies that by `timestep / 1.6667`, so the
 swim stub's k cancels there and that branch stays stock. Swim FPS Fix.asi's
 two hooks; it wrote the -0.1 into a float of its own each frame, the stub
-computes it at the use.
+computes it at the use. Since 0.20.0 the lift stub does the same for the
+underwater state's constant buoyancy (`fadd [0.01]` at 0x68A4CA, which every
+dive ends in), as MTA does after its dive fix (#3344): without it a swimmer
+under water rose with 1.6667 / timestep times the buoyancy, 4x at 120 fps.
+The lift stub sits after the others, and a reload writes the block again, so
+an earlier run's block gains it.
 
 **floatfps.** `cBuoyancy::CalcBuoyancyForce` (0x6C2750) is already
 `immersion * buoyancy * timestep`. Swim FPS Fix.asi replaces that timestep
@@ -2047,3 +2063,217 @@ file still there. Keep turns wheelfps off, saved, and asks no more. Remove
 refuses `yes` before it has explained, and after 30 seconds; confirmed, it
 renames the file to .cs.disabled with its bytes intact. Swim FPS Fix.asi is
 named once for its two options, an unknown hook not at all.
+
+## 41. MTA's frame-rate fixes (crashfix.dll)
+
+MTA:SA's `CMultiplayerSA_FrameRateFixes.cpp` (GPLv3), compared in
+docs/MTA_FRAMERATE_FIXES.md, in `lib/fixes/native/framerate.c`, which
+`crashfix.c` includes: one DLL, and every row installs, stands down and logs
+like a crash fix ("frame-rate fix KEY ... hooked"), under the option the DLL
+names for it (`CrashFix_Option`). Besides jmp hooks the table now has NOP
+runs, pointer swaps (an operand repointed at a constant of ours) and call
+redirects; each checks the stock bytes first and uninstall writes back what
+it found. `/fixes patches` counts them apart from the crash fixes, and the
+startup line has "frame-rate fixes (MTA)". Physics is scaled by
+`timestep / 1.6667`, stock at 30 fps; effects run on a 30 Hz tick of ours.
+
+| option | rows | what |
+|---|---|---|
+| `turnfps` | turndamping 0x544D29 | `CPhysical::ApplyAirResistance` multiplies the turn speed by 0.99 every step (the move speed already uses `pow(..., timestep)`): `pow(0.99, timestep / 1.6667)`, so a spin dies as fast at any fps |
+| `pedfps` | climb1-2 0x6811E9, 0x68128A; aimwalk 0x61E4F2, aimreset 0x61E5E4 | the climb's pull to the hold reads a constant 1.6667 as its timestep, so it takes the same time at any fps instead of a huge speed (climbing over objects killing the player, MTA #602); moving while aiming compares against 0.1 scaled and keeps its move command (camera jitter) |
+| `vehiclefps` | boatcontrol 0x6DC23F, boatwater 0x6D2771; heli1-2 0x6C4F29, 0x6C4F37; chassis1-2 0x6F42D5, 0x6F434E, doorangle 0x6F4422 (every part since 0.22.0, 43); carsleep 0x6B1D34, bikesleep 0x6B997C, bikeclamp 0x6B99BD; carsettle 0x6B1AF5, bikesettle 0x6B9850, carfall 0x6B361C, bikefall 0x6BC18F; still1-6 | boats, helicopter takeoff, the swinging chassis, and parked cars settling: the still frames before a car sleeps scale with the frame rate (10 at 30 fps, up to 240), the stillness threshold with them (from the exe's 0.005), no sleep on a car's first frame, and the still damping keeps its fall speed |
+| `effectsfps` | tick 0x561C5D; shake 0x52C723, movingfog 0x716BA6, glass1-3; 19 gates | the camera shake, moving fog and glass shards scaled; wheel dirt and sand, exhaust, boat and rain splashes, rain, swimming effects and bubbles, plane smoke and damage particles, rocket smoke, the water cannon (its reach, its push, its particles), broken objects despawning and the money counter only on a 30 Hz frame |
+| `pushfps` | push1-8, pushalt1-2: the 10 calls to `CPhysical::ApplyCollision` (0x548680) and its other form (0x544D50) | a ped's push on a car with no driver is held to what momentum allows (ped mass x10 against the car's), its tilt and lift kept out |
+
+**The tick.** `CTimer::Update`'s frame counter increment is replayed, then
+`cf_tick` sets `cf_frame_due` when 33 ms of game time have passed (a step of
+33 ms, resynced after 66) and counts those frames in `cf_frame30`. MTA makes
+`CTimer::m_FrameCounter` itself count at 30 Hz instead; ProperShaders reads
+that counter (eight references), so fixes leaves it alone and the water
+cannon's push reads `cf_frame30`. With the tick not in place (or taken out)
+`cf_frame_due` is 1 and every gate passes, as stock.
+
+**Changed from MTA**:
+
+- 0x6F4354 jumps to 0x6F42DB, inside MTA's 14-byte chassis hook, so the
+  driverless chassis got NOPs (no impulse) and a value left on the x87 stack;
+  fixes hooks the two constants (0x6F42D5, 0x6F434E) and keeps the shared
+  tail.
+- MTA's 16-byte bike clamp covers 0x6B99CE, which the `!idle` path's `je`
+  lands on: in NOPs, so that path no longer clamped and the count could wrap
+  at 255. fixes takes 0x6B99BD..0x6B99D5 and does
+  `if (!idle || count > limit) count = limit`.
+- The helicopter's two rates are hooked at their `fadd`s, not as one 42-byte
+  block.
+- Each gate keeps the flags and every register (`pushfd`, a memory compare);
+  MTA's use a register each.
+- The rain gate leaves through the function's own `add esp,84h / ret`
+  (0x72AF5E).
+- The aiming threshold is stored and compared from memory as the last x87
+  instruction; MTA's ended with `fxch / fstp`, which leave C0..C3 undefined.
+- The stillness threshold scales the exe's 0.005 (MTA scales 0.0045, not
+  stock at 30 fps).
+- MTA's third climb site (0x68131B) is the get-to-position timer
+  (`m_GetToPosCounter += GetTimeStepInMS()`, abort past 1000 ms, then a push
+  back). With the constant it counted 33 ms a frame, so at 300 fps it ran out
+  in 0.1 s and the climb aborted with the ped pushed back from the object
+  (seen 2026-10-29). It keeps the real timestep; the pull, now as at 30 fps,
+  needs real time there.
+- Not taken: `CWeapon::Update`'s shot timing (0x73DC3D), which shortens
+  every weapon's firing state at high fps (a fire-rate change on SA-MP), and
+  the headless-ped particles (MTA's `setPedHeadless`).
+
+**Tests.** `crashfix_dll_test.sh`: every row goes in on the stock bytes and
+comes out leaving them; the tick, the sleep frames and threshold, the turn
+damping and the push cap run directly; heli1, boatwater, chassis1, aimwalk
+and shake run through their hooks with the game's own constants, their way
+back made a `ret`; the wheel-dirt gate returns 0 on a frame not due and runs
+the game's code on a due one. `fixes_test.lua`: a frame-rate row follows its
+option, not `crashfix`, and is counted apart.
+
+## 42. San Andreas Online: shadow meshes, IK chains, the vehicle glass list
+
+San Andreas Online (Dryxio/san-andreas-online, an MTA fork, GPLv3) adds two
+crash fixes and a growing alpha list MTA lacks (docs/SAO_REVIEW.md). All
+three are rows of crashfix.dll: they check the stock bytes, stand down for
+another hook and log like the others.
+
+| key | site | what |
+|---|---|---|
+| `stencilveh`, `stencilobj` | 0x70FC87, 0x710471 | `CStencilShadows::RenderForVehicle` / `RenderForObject` transform the col's whole shadow mesh (`CCollisionData+0x24` vertices) into room for 2048 points; past that they write off the end and crash at 0x80D5EF. More than 2048 (unsigned) leaves through the function's epilogue (0x7102D8, 0x710AB2), at the same stack depth: the only call between leaves 8 bytes for its `ret 8`. The vehicle hook stores the pending float first and runs `test eax,eax` last, for the `jle` after. Only reached with volumetric shadows on (`volshadows`); off, GetFxQuality returns 0 to the whole shadow manager |
+| `ikchain` | 0x6183B2 | `IKChain_c::Init` indexes the ped's frames with `RpHAnimIDGetIndex`, -1 for a bone the skin lacks, and crashes at 0x6183CA (head tracking, gun pointing). SA:O checks at the entry; fixes checks where the game looks the effector up, after its own early returns, so only a chain the game would have built is counted: every bone from the effector to the pivot through `BoneNodeManager_c::ms_boneInfos` (0x8D26D0) must be in the hierarchy, or the function returns false (0x6184A3) and `IKChainManager_c::AddIKChain` puts the chain back |
+| `glass1`-`glass6` (option `glasslist`) | 0x733D35, 0x734092, 0x734141, 0x734211, 0x734356, 0x734482 | the six calls to `CLinkList::InsertSorted` for `CVisibilityPlugins::m_alphaList` (0xC88070), which `CRenderer::RenderOneNonRoad` clears and draws per vehicle: 20 links, and past them the game draws a part at once, unsorted. A full list gets as many links again (at least 20) from a pool of 980 in the DLL, never freed; the growth counts on the row of the site that asked (its return address). Once the pool is gone the game's fallback stands |
+
+**Changed from SA:O**: the IK check sits after the game's own checks (above);
+the glass links come from a static pool instead of the heap, so there is no
+Initialise or Shutdown hook; the world-entity alpha list (0x733DF5,
+0x7345F2) is left to the limit adjuster's `AlphaEntityList`, which hooks
+those two calls.
+
+**Not taken**: the DFT-30's left middle wheel (SilentPatch fixes it), SA:O's
+frame-rate file (an older subset of MTA's, 41) and its features.
+
+**Tests.** `crashfix_dll_test.sh`: each row in and out on the stock bytes;
+the vehicle shadow hook runs at 0, 100 and 5000 vertices and the object
+one at 2048, 2049 and a count read as negative, the float and flags checked; `cf_ik_bones_valid` against a
+fake hierarchy with the right arm (25 to 21) whole, a bone missing, no pivot,
+a bone the table lacks and no hierarchy, and the hook through both ways out
+with the stack as it was; the glass list filled through the game's own
+`InsertAtomicIntoSortedList`: 20 on the game's links, 20 more on the 21st,
+40 more on the 41st, still sorted, another list left alone, the pool's end.
+`fixes_test.lua`: a glass row follows `glasslist`, is counted on its own
+line and its growth is not logged or counted as a crash.
+
+## 43. FramerateVigilante's frame-rate fixes, MTA's ped matrix checks
+
+FramerateVigilante (Junior_Djjr, MIT) fixes high-fps bugs MTA's file (41)
+does not; `lib/fixes/native/vigilante.c` has the ones SA-MP reaches. MTA's
+two checks on a ped's bone matrices sit outside its crash-fix file, in
+`CMultiplayerSA.cpp` and `CMultiplayerSA_Rendering.cpp`;
+`lib/fixes/native/pedmatrix.c` has them. Both are crashfix.dll rows: stock
+bytes checked, another hook stood down for, a line each.
+
+| option | key | site | what |
+|---|---|---|---|
+| `vehiclefps` | `doorangle` | 0x6F4422 | `CDoor::Process` adds a part's angular speed to its angle once a frame: every door, bonnet, boot and ladder swung faster at high fps. 41's row scaled the chassis alone; it now scales every part by `timestep / 1.6667` |
+| `vehiclefps` | `doordamp1`-`4` | 0x6F4391, 0x6F43A1, 0x6F43CA, 0x6F43D2 | the same function's damping once a frame: 0.98 a boat's part, 0.92 the fire truck's ladder, 0.97 a bonnet and any other part, each `pow(rate, timestep / 1.6667)` (a part settled too fast at high fps) |
+| `vehiclefps` | `burnout` | 0x6A5003 | `CAutomobile::ProcessCarWheelPair` turns a car in a burnout by `min(1, 3000 / turn mass) * -0.002 * turn mass * steer` a frame (`ApplyTurnForce`, no timestep): it spun faster at high fps. The product is scaled |
+| `swimfps` | `swimpitch1`-`3` | 0x68A6BD, 0x68A735, 0x68A7C0 | `ProcessSwimmingResistance` damps the dive's pitch rate (`m_fStateChanger`) by 0.95 a frame while adding to it per second: `pow(0.95, timestep / 1.6667)` |
+| `swimfps` | `swimsurface` | 0x68A7E8 | its pull to the water level is capped at `timestep * 0.1` a step, a smaller speed at high fps; the operand reads 1.6667, so the cap is 0.1667 at any fps |
+| `sirenfps` | `siren` | 0x6E0961 | `CVehicle::ProcessSirenAndHorn` calls a horn press a tap, which switches the siren, when it lasts at most 3 of pad 0's last 5 frames: 100 ms at 30 fps, 12 ms at 240, so at high fps a tap only honks. A press under 150 ms is a tap and one held 150 ms is the horn, timed per vehicle in a table of 16: SA-MP runs the function for other players' cars with their pads. The site is HOODLUM's `nop / nop / jmp` stub; the hook leaves by the game's three ways out |
+| `pedmatrix` | `pedanim` | 0x7C5A5C | `RpHAnimHierarchyUpdateMatrices`, before it puts a bone's keyframe matrix (at `[esp+54h]`) under its parent: a rotation element of 2 or more, an offset past 10, NaN or inf zeroes it, so the bone and its children shrink to nothing instead of stretching across the screen (MTA's `CheckAnimMatrix`) |
+| `pedmatrix` | `pedskin` | 0x7335B0 | `CVisibilityPlugins::RenderPedCB`: a ped atomic whose skin matrices (its RpHAnimHierarchy, at the skin plugin's offset 0xC978A4) hold NaN, inf or anything past 100000 is not drawn and returns its atomic as a drawn one does. Unity Roleplay's z -10000 is well inside |
+
+`pedanim` and `pedskin` count what they catch; their lines are info ("ped
+fix pedskin ... caught a ped's broken bones"), not crashes, and `/fixes
+patches` and the startup summary show them as "ped fixes". The frame-rate
+rows count nothing.
+
+**Changed from FramerateVigilante**: each damping is `pow`, not its linear
+`1 - (1 - rate) * timestep * 0.6`; the burnout is scaled after the game's
+`min`, where FramerateVigilante scales the 3000 inside it (a car under 3000
+turn mass, most of them, then scaled by less); its third pitch site,
+0x68A7BD, is the `fld` before the `fmul`, and its code goes on inside the
+`fmul`; the siren's press time is kept per vehicle, not once.
+
+**Changed from MTA**: a zeroed bone sits at its parent's origin (MTA's puts
+it 1 above); the skin check tests every element (MTA's tests y where three
+of z's upper bounds should be).
+
+**Not taken**: the rifle's aim-walk step (0x61E0CA): samp.dll points
+`ControlGunMove`'s timestep operand (0x61E0C2) at its own value, and
+`pedfps`' `aimwalk` handles the threshold. The on-rails wheel spin
+(0x6B523F..0x6B5269): only `STATUS_SIMPLE` cars, which SA-MP has none of.
+The fps limit, refresh rate and the automatic limits for cutscenes,
+missions, minigames, schools and the pause menu: single-player, and frame
+caps are 33's.
+
+**Tests.** `crashfix_dll_test.sh`: each row in and out on the stock bytes;
+`cf_damping` at 30 and 60 fps and with no timestep; `doorangle`, the four
+dampings, `burnout` and `swimpitch1` through their hooks with the game's
+constants, one x87 value left; `swimsurface`'s operand; `cf_siren_horn`
+through a tap, a 150 ms hold and two cars pressed apart, and the hook to
+each of the game's ways out; `cf_ped_anim` with a good bone, a rotation of
+2.5, an offset of 10.5 and NaN, and through its hook (the matrix at
+`[esp+54h]`, eax kept); `cf_ped_skin_ok` with z -10000, 200000, NaN and no
+hierarchy, and through its hook both ways. `fixes_test.lua`: a ped row
+follows `pedmatrix` and is counted and logged on its own; `swimfps` switches
+its DLL rows with its fixes.lua sites.
+
+## 44. A frozen driver's car rolls on
+
+`TogglePlayerControllable(playerid, 0)` (RPC 15) makes SA-MP lock the
+player's controls and nothing else, so a car the player drives coasts on,
+down a hill or off the road. fixes reads the RPC on its way to SA-MP
+(it passes untouched) and, while the player is frozen and drives, holds the
+car: CPhysical's `bDontApplySpeed` (+40h bit 13, what `FREEZE_CAR_POSITION`,
+0519, sets) and its move and turn speeds (+44h, +50h) zeroed every frame, so
+it stops where it is and nothing is left to apply when it goes. It lets go
+when the server unfreezes the player, when the controls are back without
+one (`isPlayerControlOn`: a respawn, a reconnect), when the player is no
+longer the driver or leaves the car, and with the option off; the bit is
+cleared only if fixes set it. Only the local player's car: others' cars move
+as their drivers' sync says. Option `freezecar`, on by default.
+
+**Tests.** `fixes_test.lua`: RPC 15 passes untouched; frozen while driving,
+the bit is set and the speeds kept at 0; unfrozen, the bit goes and the
+other flags stay; a car held by something else stays held; not the driver,
+the controls back, the option off or out of the car lets go.
+
+## 45. The parachute spins at high fps
+
+The parachute is not engine code: `player_parachute.scm` in
+`data\script\script.img` (`script_name 'PLCHUTE'`) runs once a frame while
+the player has one, and steers with values tuned at 30 fps. Falling, the
+heading turns by `roll / 5` a frame, and roll and pitch move 1/20 of the way
+to the stick a frame; open, the heading turns by `roll / 15` and the sink rate
+moves 1/20 of the way to its target; the falling speed moves 1% of the way. At
+144 fps the turn is almost five times the 30 fps one and the rest settle
+faster: the player spins and speeds off. The canopy's opening runs on the
+script's millisecond timer and is fine.
+
+While PLCHUTE runs (found in `CTheScripts::pActiveScripts`, 0xA8B42C, by its
+name at +8; its code at +10h), fixes rewrites its 11 such constants every
+frame from the timestep, k = timestep / 1.6667 (at most 4):
+
+| instruction | how many | stock | as |
+|---|---|---|---|
+| `21@ /= 5.0`, `21@ /= 15.0` (the turn) | 1, 1 | 5, 15 | divided by k |
+| `x /= 20.0` (roll, pitch, sink rate) | 7 | 1/20 a frame | 1 - (1 - 1/20)^k |
+| `21@ *= 0.01` (falling speed) | 2 | 0.01 a frame | 1 - 0.99^k |
+
+so a second of play does what a second at 30 fps did. The game loads a
+build of the script 216 bytes longer than the PC `script.img` holds (ten
+`09C6` instructions with four arguments), so the sites are found in the
+loaded code by their whole instructions (`op 00 03 <local> 00 06 <float>`)
+once per load, after `script_name 'PLCHUTE'` at its start, and only if all
+11 are there (986 / 1003 for the first in the two builds). Off, the stock
+values go back. The log says "chutefps: the parachute steers as at 30 fps"
+the first time it writes; holding the parachute with nothing to fix logs why
+once, with the running scripts.
+
+**Tests.** `fixes_test.lua`: a running PLCHUTE laid out as the loaded build:
+30 fps leaves the stock values, 150 fps a fifth of the turn and the blends
+as above, the stick's `/= 4.267` untouched, off puts them back, a build with
+one site fewer is left alone. The scan was also run over the code saved from
+the game and over the PC file: 7, 1, 1 and 2 in both.

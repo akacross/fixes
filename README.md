@@ -39,6 +39,9 @@ Crashes:
 - The entity-reference pool running out at 3000, which leaves dangling
   pointers. It grows in blocks of 4096.
 - The hospital restart point buffer overflowing.
+- A vehicle or object shadow mesh over 2048 vertices (with volumetric
+  shadows on) and an IK chain through a bone the ped's skin lacks (San
+  Andreas Online's fixes).
 
 Game bugs:
 - Tail light damage reads the wrong light.
@@ -59,12 +62,27 @@ Game bugs:
   SkyGFX stand it down too.
 - A server's car vanishes after you get out of it, its upgrade parts left
   behind (a script marking it no longer needed): the car is kept.
+- A server freezes you while you drive and the car rolls on: it is held too.
+- A ped with broken bone data draws its triangles across the screen: the bad
+  bone shrinks to nothing, or the ped is not drawn (MTA's checks).
+- A car's glass and other see-through parts past 20 draw unsorted: the list
+  grows (San Andreas Online's fix).
 
 Frame rate (each as at 30 fps, the rate the game was tuned for):
 - Off the throttle a car stops dead at high fps and rolls at low: the
   coasting slow-down is the same every second at any fps (Car Speed FPS Fix).
 - Swimming is slow at high fps: it is as fast at any fps (Swim FPS Fix).
 - Buoyancy as Swim FPS Fix scales it (less lift above 30 fps, boats too).
+- MTA's frame-rate fixes: a spin slows as fast at any fps; climbing over
+  objects no longer kills; moving while aiming; boats, helicopter takeoff and
+  parked cars settling; particles, rain, splashes and the water cannon at 30
+  a second; camera shake, fog and falling glass by the timestep; a ped
+  walking into a parked car no longer shoves it away.
+- FramerateVigilante's: doors, bonnets and boots swing and settle as at 30
+  fps; a burnout no longer spins faster; the dive and holding at the surface
+  when swimming; a quick horn tap switches the siren at any fps.
+- The parachute: turning, rolling and speeding up as at 30 fps instead of
+  spinning at high fps (its script's per-frame values follow the timestep).
 
 If Car Speed FPS Fix (CLEO) is running, fixes leaves it and its file alone,
 turns its own coasting fix off so nothing is applied twice, and asks in chat
@@ -86,7 +104,10 @@ no heat haze, no clouds and the rest).
 The full list, with each patch's disassembly and reasoning, is in
 [docs/MEMORY_FIXES.md](docs/MEMORY_FIXES.md);
 [docs/MTA_CRASHFIX_UPDATES.md](docs/MTA_CRASHFIX_UPDATES.md) compares the
-crash fixes with MTA's current ones.
+crash fixes with MTA's current ones,
+[docs/MTA_FRAMERATE_FIXES.md](docs/MTA_FRAMERATE_FIXES.md) the frame-rate
+fixes, and [docs/SAO_REVIEW.md](docs/SAO_REVIEW.md) what San Andreas Online
+adds.
 
 ## Install
 
@@ -114,6 +135,11 @@ that averted a crash says so.
 - `/fixes patches` counts the patches and hooks: applied, owned by another
   mod, refused, off.
 - `/fixes <option> on|off` switches an option at once.
+- `/fixes drift on` writes a line every 30 s to `moonloader/logs/drift.log`:
+  the frame rate and frame times, and every count that could grow over a
+  session (the text cache, the game's pools, memory). `/fixes drift report`
+  compares now with the start, for a frame rate that falls the longer you
+  play.
 - `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
   session and uses fixes' own, `keep` keeps it and turns `wheelfps` off,
   `remove` explains first, and only `/fixes cleo remove yes` within 30
@@ -142,6 +168,13 @@ that averted a crash says so.
 | `wheelfps` | on | the coasting slow-down off the throttle is the same at any fps |
 | `swimfps` | on | swimming is as fast at any fps |
 | `floatfps` | on | buoyancy scaled as Swim FPS Fix does (boats too) |
+| `turnfps`, `pedfps`, `vehiclefps`, `effectsfps`, `pushfps` | on | MTA's frame-rate fixes (FramerateVigilante's doors and burnout under `vehiclefps`) |
+| `sirenfps` | on | a horn tap under 150 ms switches the siren at any fps |
+| `chutefps` | on | the parachute steers as at 30 fps |
+| `freezecar` | on | a server freezing you while you drive holds your car too |
+| `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
+| `glasslist` | on | a car's see-through parts drawn in order past 20 |
+| `drift` | off | the frame-rate log above |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |
 | `noflashes`, `nosound`, `novehiclelighting`, `nospecular`, `notargetblip`, `nointeriorreflections`, `nopostfx` | off | each takes that effect away |
 
@@ -172,6 +205,11 @@ against gta_sa.exe's own code, and `position_guard_test.sh` and
   **DarkP1xel**.
 - The coasting fix follows Car Speed FPS Fix by **Junior_Djjr**; the swim and
   buoyancy fixes follow Swim FPS Fix.asi; the GXT fix follows gxt_crash_fix.
+- The door, burnout, swim and siren frame-rate fixes are from
+  FramerateVigilante by [Junior_Djjr](https://github.com/JuniorDjjr) (MIT).
+- The shadow-mesh and IK-chain crash fixes and the glass list are from
+  [San Andreas Online](https://github.com/Dryxio/san-andreas-online)
+  (GPL-3.0), an MTA fork.
 
 ## License
 

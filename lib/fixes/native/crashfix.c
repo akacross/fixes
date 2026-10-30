@@ -19,7 +19,13 @@
  *   - the train's rail distance wraps by the length the game's loop uses.
  *   - RwMatrixMultiply checks all three matrices and returns its destination.
  *   - CPlaceName clears bInVehicle in its copy of the flags, not on the ped.
+ * stencilveh, stencilobj and ikchain are San Andreas Online's
+ * (Dryxio/san-andreas-online, an MTA fork, GPLv3); ikchain checks where the
+ * game looks the effector up, after its own checks.
  * A crash averted is one `lock inc` on the hook's counter; fixes reads them.
+ * MTA's frame-rate fixes are in framerate.c and FramerateVigilante's in
+ * vigilante.c, each switched by its own option; MTA's ped matrix checks are in
+ * pedmatrix.c, the vehicle glass list in glasslist.c.
  *
  *   ./build.sh            -> ../crashfix.dll
  */
@@ -142,7 +148,12 @@
     H(impact, "Fx_c::AddBulletImpact: sand and dust once per 500 ms", 0x49F3E8, 5, -1, "\xA1\x3C\xF0\xB6\x00") \
     H(mouse, "no SetCursorPos while the game is in the background", 0x745423, 8, -1, \
         "\x8B\x44\x24\x08\x8B\x4C\x24\x04") \
-    H(samp, "SA-MP's association helper: bad pointers", 0, 5, -1, "\x74\x12\x8B\x50\x10")
+    H(stencilveh, "CStencilShadows::RenderForVehicle: a shadow mesh over 2048 vertices", 0x70FC87, 6, -1, \
+        "\x85\xC0\xD9\x5C\x24\x6C") \
+    H(stencilobj, "CStencilShadows::RenderForObject: a shadow mesh over 2048 vertices", 0x710471, 6, -1, \
+        "\x85\xC0\xD9\x44\x24\x38") \
+    H(ikchain, "IKChain_c::Init: a bone the ped's skin does not have", 0x6183B2, 6, -1, "\x50\xE8\x88\xC6\x11\x00") \
+    H(samp,"SA-MP's association helper: bad pointers", 0, 5, -1, "\x74\x12\x8B\x50\x10")
 
 #define DECLARE(k, name, va, len, mi, stock) void cf_hook_##k(void); volatile LONG cf_n_##k;
 HOOKS(DECLARE)
@@ -338,6 +349,29 @@ void cf_limit_line(float *start, float *end, volatile LONG *count)
         end[0] = start[0], end[1] = start[1], end[2] = start[2] + 0.01f;
     }
     InterlockedIncrement(count);
+}
+
+/* ------------------------------------------------------------------------ */
+/* IKChain_c::Init                                                          */
+/* ------------------------------------------------------------------------ */
+typedef struct { int16_t bone, prev; float limits[9]; } BoneInfo;  /* BoneNodeManager_c::ms_boneInfos */
+typedef int (__cdecl *BoneIndexFn)(void *hierarchy, int bone);
+
+/* Each bone from the effector to the pivot is in the hierarchy and the bone
+ * table; the game indexes the frames with -1 for one that is not. */
+int cf_ik_bones_valid(void *hierarchy, int effector, int pivot)
+{
+    const BoneIndexFn index = (BoneIndexFn)0x7C51A0;               /* RpHAnimIDGetIndex */
+    const BoneInfo *info = (const BoneInfo *)0x8D26D0;
+    if (!hierarchy) return 0;
+    for (int bone = effector, depth = 0; bone != pivot; depth++) {
+        int i = 0;
+        if (depth == 32 || index(hierarchy, bone) < 0) return 0;
+        while (i < 32 && info[i].bone != bone) i++;
+        if (i == 32 || info[i].prev < 0) return 0;
+        bone = info[i].prev;
+    }
+    return index(hierarchy, pivot) >= 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1457,6 +1491,46 @@ __asm__(
 "    GO 0x74542B\n"
 "1:  GO 0x745433\n"
 
+/* CStencilShadows::RenderForVehicle: eax shadow vertices go into room for
+ * 2048; more skips this shadow. The test last: its flags feed a jle. */
+"HOOK stencilveh\n"
+"    fstp dword ptr [esp+0x6C]\n"
+"    cmp eax, 2048\n"
+"    ja 1f\n"
+"    test eax, eax\n"
+"    GO 0x70FC8D\n"
+"1:  AVERTED stencilveh\n"
+"    GO 0x7102D8\n"                 /* the epilogue */
+
+/* CStencilShadows::RenderForObject: the same */
+"HOOK stencilobj\n"
+"    cmp eax, 2048\n"
+"    ja 1f\n"
+"    test eax, eax\n"
+"    fld dword ptr [esp+0x38]\n"
+"    GO 0x710477\n"
+"1:  AVERTED stencilobj\n"
+"    GO 0x710AB2\n"
+
+/* IKChain_c::Init, the clump in eax: the effector's chain checked first */
+"HOOK ikchain\n"
+"    push eax\n"
+"    mov eax, 0x734A40\n"           /* GetAnimHierarchyFromSkinClump */
+"    call eax\n"
+"    pushad\n"
+"    push dword ptr [esp+0x54]\n"   /* the pivot bone */
+"    push dword ptr [esp+0x48]\n"   /* the effector bone */
+"    push eax\n"
+"    call _cf_ik_bones_valid\n"
+"    add esp, 12\n"
+"    test eax, eax\n"
+"    popad\n"
+"    jz 1f\n"
+"    GO 0x6183B8\n"
+"1:  AVERTED ikchain\n"
+"    add esp, 4\n"
+"    GO 0x6184A3\n"                 /* return false */
+
 /* SA-MP's association helper: a bad pointer from
  * RpAnimBlendClumpGetAssociation or in its +10h returns 0 */
 "HOOK samp\n"
@@ -1475,27 +1549,44 @@ __asm__(
 "    jmp eax\n"
 ".att_syntax\n");
 
+#include "framerate.c"
+#include "vigilante.c"
+#include "pedmatrix.c"
+#include "glasslist.c"
+
 /* ------------------------------------------------------------------------ */
 /* The table                                                                */
 /* ------------------------------------------------------------------------ */
 #define MAX_LEN 24
+
+enum { KIND_JMP, KIND_NOP, KIND_PTR, KIND_CALL };   /* a jmp to the hook; NOPs; a dword = to; call to */
 
 typedef struct {
     const char *key, *name;
     uint32_t va;
     uint8_t len;
     int8_t mi;                  /* offset of a ms_modelInfoPtrs displacement, -1: none */
-    const char *stock;          /* the bytes the jmp replaces, as gta_sa.exe 1.0 US has them */
+    const char *stock;          /* the bytes it replaces, as gta_sa.exe 1.0 US has them */
     void (*hook)(void);
     volatile LONG *averted;
+    const char *option;         /* the fixes option that switches it */
+    uint8_t kind;
+    const void *to;
     int installed;
     uint8_t saved[MAX_LEN];
 } Hook;
 
-#define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k},
-static Hook hooks[] = { HOOKS(ROW) };
+#define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k, "crashfix"},
+#define FROW(k, option, name, va, len, stock) {#k, name, va, len, -1, stock, cf_hook_##k, &cf_n_##k, option},
+#define PROW(k, option, kind, name, va, len, stock, to) {#k, name, va, len, -1, stock, NULL, &cf_n_##k, option, kind, to},
+static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) GLASSLIST(PROW) };
 #define HOOK_COUNT ((int)(sizeof hooks / sizeof hooks[0]))
-#define SAMP_HOOK (HOOK_COUNT - 1)
+
+static int samp_hook(void)
+{
+    for (int i = 0; i < HOOK_COUNT; i++) if (!strcmp(hooks[i].key, "samp")) return i;
+    return -1;
+}
 
 static int readable(const void *p, size_t n)
 {
@@ -1553,11 +1644,14 @@ __declspec(dllexport) uint32_t __cdecl CrashFix_Address(int i) { return i >= 0 &
  * before it is installed. */
 __declspec(dllexport) int __cdecl CrashFix_SetSampSite(uint32_t va)
 {
-    if (hooks[SAMP_HOOK].installed) return 0;
-    hooks[SAMP_HOOK].va = va;
+    int s = samp_hook();
+    if (s < 0 || hooks[s].installed) return 0;
+    hooks[s].va = va;
     cf_samp_check_site = va;
     return 1;
 }
+
+__declspec(dllexport) const char *__cdecl CrashFix_Option(int i) { return i >= 0 && i < HOOK_COUNT ? hooks[i].option : NULL; }
 
 __declspec(dllexport) void __cdecl CrashFix_SetShadows(int volumetric) { cf_volumetric_shadows = volumetric != 0; }
 
@@ -1572,6 +1666,17 @@ static uint32_t hook_target(uint32_t va, const uint8_t *site)
         return readable(slot, 4) ? *slot : 0;
     }
     return 0;
+}
+
+/* The bytes a hook of ours puts at its site */
+static void ours(const Hook *h, uint8_t *code)
+{
+    memset(code, 0x90, MAX_LEN);
+    switch (h->kind) {
+    case KIND_JMP:  code[0] = 0xE9; *(uint32_t *)(code + 1) = (uint32_t)h->hook - (h->va + 5); break;
+    case KIND_CALL: code[0] = 0xE8; *(uint32_t *)(code + 1) = (uint32_t)h->to - (h->va + 5); break;
+    case KIND_PTR:  *(uint32_t *)code = (uint32_t)h->to; break;
+    }
 }
 
 /* -> 1 installed now, 2 already ours, 3 another hook (found = its target),
@@ -1597,9 +1702,7 @@ __declspec(dllexport) int __cdecl CrashFix_Install(int i, uint32_t *found)
         return 0;
     }
     uint8_t code[MAX_LEN];
-    memset(code, 0x90, sizeof code);
-    code[0] = 0xE9;
-    *(uint32_t *)(code + 1) = (uint32_t)h->hook - (h->va + 5);
+    ours(h, code);
     memcpy(h->saved, site, h->len);
     if (!write_code(h->va, code, h->len)) {
         write_code(h->va, h->saved, h->len);
@@ -1614,10 +1717,12 @@ __declspec(dllexport) int __cdecl CrashFix_Uninstall(int i)
 {
     if (i < 0 || i >= HOOK_COUNT || !hooks[i].installed) return 0;
     Hook *h = &hooks[i];
-    const uint8_t *site = (const uint8_t *)h->va;
-    if (site[0] != 0xE9 || h->va + 5 + *(const uint32_t *)(site + 1) != (uint32_t)h->hook) return 0;
+    uint8_t code[MAX_LEN];
+    ours(h, code);
+    if (memcmp((const void *)h->va, code, h->len)) return 0;
     if (!write_code(h->va, h->saved, h->len)) return 0;
     h->installed = 0;
+    if (!strcmp(h->key, "tick")) cf_frame_due = 1;       /* the gates pass again */
     return 1;
 }
 

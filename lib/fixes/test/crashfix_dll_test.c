@@ -69,6 +69,115 @@ static int find(const char *key)
 
 static uint32_t averted(const char *key) { return CrashFix_Averted(find(key)); }
 
+static uint32_t hook_of(const char *key) { return (uint32_t)hooks[find(key)].hook; }
+
+/* A hook's way back into the game, made a ret so it returns here */
+static uint8_t patched;
+static void ret_at(uint32_t va) { patched = *(uint8_t *)va; *(uint8_t *)va = 0xC3; }
+static void unret(uint32_t va) { *(uint8_t *)va = patched; }
+
+/* Call a hook with x on the x87 stack (takes 1), nothing (0) and take st0
+ * after, or neither (-1); the status word after it in fpu_sw. Not inlined:
+ * the x87 stack is empty around a call. */
+float fpu_in, fpu_out;
+uint32_t fpu_target;
+uint16_t fpu_sw;
+__attribute__((noinline)) static float call_fpu(uint32_t entry, float x, int takes)
+{
+    fpu_target = entry, fpu_in = x;
+    if (takes > 0)
+        __asm__ volatile("finit\n\tflds _fpu_in\n\tcall *_fpu_target\n\tfnstsw _fpu_sw\n\tfstps _fpu_out\n" ::: "memory", "eax", "ecx", "edx");
+    else if (takes == 0)
+        __asm__ volatile("finit\n\tcall *_fpu_target\n\tfnstsw _fpu_sw\n\tfstps _fpu_out\n" ::: "memory", "eax", "ecx", "edx");
+    else
+        __asm__ volatile("finit\n\tcall *_fpu_target\n" ::: "memory", "eax", "ecx", "edx");
+    return fpu_out;
+}
+
+/* Call a hook as code deep in a function reaches it: eax set, x on the x87
+ * stack (takes 1) or not, the 100h bytes above its return address from
+ * site_stack and back (site_stack[i] is the hook's [esp+4+4i]); after it eax
+ * in site_ret, the flags in site_flags, the status word in fpu_sw and st0 in
+ * fpu_out if it left one (left 1). */
+uint32_t site_eax, site_ret, site_flags, site_stack[64];
+int site_takes, site_left;
+__attribute__((noinline)) static void call_site(uint32_t entry, uint32_t eax, float x, int takes, int left)
+{
+    fpu_target = entry, fpu_in = x, site_eax = eax, site_takes = takes, site_left = left;
+    __asm__ volatile(
+        "finit\n\t"
+        "cmpl $0, _site_takes\n\t"
+        "je 1f\n\t"
+        "flds _fpu_in\n"
+        "1:\n\t"
+        "sub $0x100, %%esp\n\t"
+        "xor %%ecx, %%ecx\n"
+        "2:\n\t"
+        "mov _site_stack(,%%ecx,4), %%eax\n\t"
+        "mov %%eax, (%%esp,%%ecx,4)\n\t"
+        "inc %%ecx\n\t"
+        "cmp $64, %%ecx\n\t"
+        "jb 2b\n\t"
+        "mov _site_eax, %%eax\n\t"
+        "call *_fpu_target\n\t"
+        "mov %%eax, _site_ret\n\t"
+        "pushfl\n\t"
+        "popl _site_flags\n\t"
+        "fnstsw _fpu_sw\n\t"
+        "xor %%ecx, %%ecx\n"
+        "3:\n\t"
+        "mov (%%esp,%%ecx,4), %%eax\n\t"
+        "mov %%eax, _site_stack(,%%ecx,4)\n\t"
+        "inc %%ecx\n\t"
+        "cmp $64, %%ecx\n\t"
+        "jb 3b\n\t"
+        "add $0x100, %%esp\n\t"
+        "cmpl $0, _site_left\n\t"
+        "je 4f\n\t"
+        "fstps _fpu_out\n"
+        "4:\n"
+        ::: "memory", "eax", "ecx", "edx");
+}
+
+/* Call a hook with ebp, esi and edi from reg_ebp, reg_esi and reg_edi, x on
+ * the x87 stack (takes 1) or not; st0 after in fpu_out if it left one (left
+ * 1), the status word before that in fpu_sw. -> eax */
+uint32_t reg_ebp, reg_esi, reg_edi, reg_eax;
+__attribute__((noinline)) static uint32_t call_regs(uint32_t entry, float x, int takes, int left)
+{
+    fpu_target = entry, fpu_in = x, site_takes = takes, site_left = left;
+    __asm__ volatile(
+        "finit\n\t"
+        "push %%ebp\n\t"
+        "push %%esi\n\t"
+        "push %%edi\n\t"
+        "push %%ebx\n\t"
+        "cmpl $0, _site_takes\n\t"
+        "je 1f\n\t"
+        "flds _fpu_in\n"
+        "1:\n\t"
+        "mov _reg_ebp, %%ebp\n\t"
+        "mov _reg_esi, %%esi\n\t"
+        "mov _reg_edi, %%edi\n\t"
+        "call *_fpu_target\n\t"
+        "mov %%eax, _reg_eax\n\t"
+        "fnstsw _fpu_sw\n\t"
+        "pop %%ebx\n\t"
+        "pop %%edi\n\t"
+        "pop %%esi\n\t"
+        "pop %%ebp\n\t"
+        "cmpl $0, _site_left\n\t"
+        "je 2f\n\t"
+        "fstps _fpu_out\n"
+        "2:\n"
+        ::: "memory", "eax", "ecx", "edx");
+    return reg_eax;
+}
+
+/* A thiscall function of four arguments, x the second */
+typedef uint32_t (__attribute__((thiscall)) *Thiscall4)(void *self, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
+static uint32_t call_thiscall4(uint32_t entry, uint32_t x) { return ((Thiscall4)entry)(NULL, 0, x, 0, 0); }
+
 /* The texture dictionary the game keeps: RwObject type 6, the list at +8; a
  * texture links at +8 and is named at +10h. */
 typedef struct Link { struct Link *next, *prev; } Link;
@@ -107,7 +216,12 @@ __declspec(dllexport) int __cdecl run(void)
         if (!CrashFix_Address(i)) continue;          /* the SA-MP hook */
         uint32_t found;
         int r = CrashFix_Install(i, &found);
-        if (r != 1 || ((uint8_t *)CrashFix_Address(i))[0] != 0xE9) { all_in = 0; printf("  %s: %d\n", CrashFix_Key(i), r); }
+        uint8_t want[MAX_LEN];
+        ours(&hooks[i], want);
+        if (r != 1 || memcmp((void *)CrashFix_Address(i), want, hooks[i].len)) {
+            all_in = 0;
+            printf("  %s: %d\n", CrashFix_Key(i), r);
+        }
     }
     ok(all_in, "each one hooked");
     ok(CrashFix_Install(find("misc1"), NULL) == 2, "a second install: already ours");
@@ -412,6 +526,368 @@ __declspec(dllexport) int __cdecl run(void)
         cf_limit_line(c, d2, &cf_n_los);
         ok(c[2] == -10000.04f && d2[2] == -9990.0f && cf_n_los == before,
            "a line at z -10000 (Unity Roleplay's objects) stays, nothing counted");
+    }
+
+    printf("== San Andreas Online's: shadow meshes over 2048 vertices (stencilveh, stencilobj)\n");
+    {
+        uint8_t keep[2] = {*(uint8_t *)0x70FC8D, *(uint8_t *)0x7102D8};
+        *(uint8_t *)0x70FC8D = *(uint8_t *)0x7102D8 = 0xC3;
+        memset(site_stack, 0, sizeof site_stack);
+        call_site(hook_of("stencilveh"), 100, 1.5f, 1, 0);
+        ok(averted("stencilveh") == 0 && *(float *)&site_stack[26] == 1.5f && !(site_flags & 0x40) && !(fpu_sw & 0x3800),
+           "100 vertices: on, the float stored, the flags of test eax");
+        call_site(hook_of("stencilveh"), 0, 1.5f, 1, 0);
+        ok(averted("stencilveh") == 0 && (site_flags & 0x40), "none: ZF for the jle after");
+        site_stack[26] = 0;
+        call_site(hook_of("stencilveh"), 5000, 2.5f, 1, 0);
+        ok(averted("stencilveh") == 1 && *(float *)&site_stack[26] == 2.5f && !(fpu_sw & 0x3800),
+           "5000: the shadow skipped, the float stored first");
+        *(uint8_t *)0x70FC8D = keep[0], *(uint8_t *)0x7102D8 = keep[1];
+
+        keep[0] = *(uint8_t *)0x710477, keep[1] = *(uint8_t *)0x710AB2;
+        *(uint8_t *)0x710477 = *(uint8_t *)0x710AB2 = 0xC3;
+        *(float *)&site_stack[13] = 3.5f;
+        call_site(hook_of("stencilobj"), 2048, 0, 0, 1);
+        ok(averted("stencilobj") == 0 && fpu_out == 3.5f && !(site_flags & 0x40), "2048: on, its float loaded");
+        call_site(hook_of("stencilobj"), 2049, 0, 0, 0);
+        ok(averted("stencilobj") == 1 && !(fpu_sw & 0x3800), "2049: skipped, nothing on the x87 stack");
+        call_site(hook_of("stencilobj"), 0xFFFFFFF0u, 0, 0, 0);
+        ok(averted("stencilobj") == 2, "a count read as negative: skipped too");
+        *(uint8_t *)0x710477 = keep[0], *(uint8_t *)0x710AB2 = keep[1];
+    }
+
+    printf("== San Andreas Online's: IKChain_c::Init with a bone the skin lacks (ikchain)\n");
+    {
+        typedef struct { int id, index, flags; void *frame; } Node;
+        static Node nodes[8];
+        static struct { int flags, count; void *matrices, *unaligned; Node *nodes; } hier = {0, 0, NULL, NULL, nodes};
+        static const int arm[] = {21, 22, 23, 24, 25};
+        for (int i = 0; i < 5; i++) nodes[i].id = arm[i];
+        hier.count = 5;
+        ok(cf_ik_bones_valid(&hier, 25, 21), "the right arm, hand to clavicle: all there");
+        ok(cf_ik_bones_valid(&hier, 21, 21), "the pivot alone");
+        ok(!cf_ik_bones_valid(NULL, 25, 21), "no hierarchy: refused");
+        nodes[2].id = 99;
+        ok(!cf_ik_bones_valid(&hier, 25, 21), "no 23 between: refused");
+        nodes[2].id = 23, nodes[0].id = 98;
+        ok(!cf_ik_bones_valid(&hier, 25, 21), "no pivot: refused");
+        nodes[0].id = 21, nodes[4].id = 77;
+        ok(!cf_ik_bones_valid(&hier, 77, 21), "an effector the bone table lacks: refused");
+        nodes[4].id = 25;
+
+        uint8_t keepGet[6], keepOn[2], keepOff = *(uint8_t *)0x6184A3;
+        memcpy(keepGet, (void *)0x734A40, 6);
+        memcpy(keepOn, (void *)0x6183B8, 2);
+        *(uint8_t *)0x734A40 = 0xB8, *(void **)0x734A41 = &hier, *(uint8_t *)0x734A45 = 0xC3;   /* mov eax, &hier / ret */
+        memcpy((void *)0x6183B8, "\x59\xC3", 2);                                              /* its argument, then back */
+        *(uint8_t *)0x6184A3 = 0xC3;
+        site_stack[7] = 25, site_stack[11] = 21;
+        call_site(hook_of("ikchain"), 0x1234, 0, 0, 0);
+        ok(averted("ikchain") == 0, "through the hook, all there: on to the game's lookup");
+        nodes[1].id = 99;
+        call_site(hook_of("ikchain"), 0x1234, 0, 0, 0);
+        ok(averted("ikchain") == 1, "no 22: false returned, the stack as it was");
+        memcpy((void *)0x734A40, keepGet, 6);
+        memcpy((void *)0x6183B8, keepOn, 2);
+        *(uint8_t *)0x6184A3 = keepOff;
+    }
+
+    printf("== San Andreas Online's: the vehicle glass list grows (glasslist)\n");
+    {
+        typedef uint8_t (__cdecl *InsertAtomicFn)(void *atomic, float distance);
+        const InsertAtomicFn insertAtomic = (InsertAtomicFn)0x733D10;
+        static AlphaLink links[20];
+        AlphaList *list = ALPHA_LIST;
+        list->usedHead.next = &list->usedTail, list->usedTail.prev = &list->usedHead;
+        list->freeHead.next = &list->freeTail, list->freeTail.prev = &list->freeHead;
+        for (int i = 19; i >= 0; i--) {
+            links[i].prev = &list->freeHead, links[i].next = list->freeHead.next;
+            links[i].next->prev = &links[i], list->freeHead.next = &links[i];
+        }
+        int all = 1;
+        for (int i = 0; i < 20; i++) all &= insertAtomic((void *)(uintptr_t)(0x1000 + i), 100.0f - i) != 0;
+        ok(all && cf_glass_used == 0 && averted("glass1") == 0, "20 parts: the game's own links");
+        ok(insertAtomic((void *)0x2000, 50.5f) != 0 && cf_glass_used == 20 && averted("glass1") == 1,
+           "the 21st: 20 links more, counted on its site's row");
+        int n = 0, sorted = 1;
+        float last = -1.0f;
+        for (AlphaLink *l = list->usedHead.next; l != &list->usedTail; l = l->next, n++) {
+            if (l->distance < last) sorted = 0;
+            last = l->distance;
+        }
+        ok(n == 21 && sorted, "21 in the list, nearest first");
+        for (int i = 0; i < 19; i++) insertAtomic((void *)0x3000, 10.0f + i);
+        ok(insertAtomic((void *)0x4000, 1.0f) != 0 && cf_glass_used == 60 && averted("glass1") == 2, "the 41st: 40 more");
+        static AlphaList other;
+        other.usedHead.next = &other.usedTail, other.usedTail.prev = &other.usedHead;
+        other.freeHead.next = &other.freeTail, other.freeTail.prev = &other.freeHead;
+        static const struct { void *object, *render; float distance; } info = {NULL, NULL, 1.0f};
+        ok(cf_insert_alpha(&other, NULL, &info) == NULL && cf_glass_used == 60, "another list full: the game's NULL");
+        cf_glass_used = GLASS_POOL;
+        for (int i = 0; i < 39; i++) insertAtomic((void *)0x5000, 5.0f);
+        ok(insertAtomic((void *)0x6000, 5.0f) == 0 && averted("glass1") == 2,
+           "the pool used up: the game draws that part at once, as before");
+        cf_glass_used = GLASS_POOL - 5;
+        ok(insertAtomic((void *)0x7000, 5.0f) != 0 && cf_glass_used == GLASS_POOL, "the last 5 links");
+    }
+
+    printf("== MTA's frame-rate fixes: the 30 Hz tick, sleep frames, turn damping\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        uint32_t *ms = (uint32_t *)0xB7CB84;
+        *ms = 1000; cf_tick();
+        int first = cf_frame_due;
+        *ms = 1010; cf_tick();
+        int early = cf_frame_due;
+        *ms = 1033; cf_tick();
+        int due = cf_frame_due;
+        *ms = 1050; cf_tick();
+        int between = cf_frame_due;
+        *ms = 1066; cf_tick();
+        ok(first && !early && due && !between && cf_frame_due, "due every 33 ms, not in between");
+        uint32_t n = cf_frame30;
+        *ms = 5000; cf_tick();
+        *ms = 5010; cf_tick();
+        ok(cf_frame30 == n + 1 && !cf_frame_due, "a jump in time: one due frame, then on from there");
+        *ts = 50.0f / 30.0f;
+        ok(cf_sleep_frames() == 10 && fabsf(cf_still - 0.005f) < 1e-7f, "30 fps: 10 still frames, 0.005, stock");
+        *ts = 50.0f / 60.0f;
+        ok(cf_sleep_frames() == 20 && fabsf(cf_still - 0.0025f) < 1e-7f, "60 fps: 20, the threshold halved");
+        *ts = 50.0f / 1000.0f;
+        ok(cf_sleep_frames() == 240, "1000 fps: capped at 240");
+        *ts = 3.0f;
+        ok(cf_sleep_frames() == 10, "below 30 fps: never fewer than 10");
+        float turn[3] = {1, 2, 3};
+        *ts = 50.0f / 30.0f;
+        cf_turn_damping(turn);
+        ok(fabsf(turn[0] - 0.99f) < 1e-6f && fabsf(turn[2] - 2.97f) < 1e-5f, "30 fps: the turn speed times 0.99, stock");
+        turn[0] = 1;
+        *ts = 50.0f / 60.0f;
+        cf_turn_damping(turn);
+        ok(fabsf(turn[0] - sqrtf(0.99f)) < 1e-6f, "60 fps: times sqrt(0.99) a step, 0.99 every two");
+    }
+
+    printf("== MTA's frame-rate fixes: a ped's push on a parked car\n");
+    {
+        static uint8_t car[0x600], ped[0x600], matrix[0x48];
+        float *ts = (float *)0xB7CB5C;
+        car[0x36] = 2, ped[0x36] = 3;
+        *(float *)(car + 0x8C) = 1000.0f, *(float *)(car + 0x90) = 2000.0f, *(float *)(ped + 0x8C) = 70.0f;
+        *(void **)(car + 0x14) = matrix;
+        *(float *)(matrix + 0x00) = 1.0f;                   /* right */
+        *(float *)(matrix + 0x14) = 1.0f;                   /* forward */
+        float v0[3] = {0}, w0[3] = {0}, pedV[3] = {0, 0.1f, 0}, v[3] = {0, 0.5f, 0.2f}, w[3] = {0.3f, 0.3f, 0};
+        *ts = 0.4f;
+        govern_push(car, ped, v0, w0, pedV, v, w);
+        float most = 0.1f * (700.0f / 1700.0f);
+        ok(fabsf(v[1] - most) < 1e-6f && v[0] == 0 && v[2] == 0, "forward no more than momentum gives, no lift");
+        ok(w[0] == 0 && w[1] == 0, "no tilt");
+        *(void **)(car + 0x460) = ped;
+        float v2[3] = {0, 0.5f, 0.2f};
+        govern_push(car, ped, v0, w0, pedV, v2, w);
+        ok(v2[1] == 0.5f && v2[2] == 0.2f, "a car with a driver: left alone");
+    }
+
+    printf("== MTA's frame-rate fixes through their hooks\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        float k = 50.0f / 30.0f;
+        *ts = k / 2;
+        ret_at(0x6C4F2F);
+        ok(fabsf(call_fpu(hook_of("heli1"), 1.0f, 1) - (1.0f + *(float *)0x858CDC * 0.5f)) < 1e-6f,
+           "heli1: the takeoff rate times timestep / 1.6667");
+        unret(0x6C4F2F);
+        ret_at(0x6D2777);
+        ok(fabsf(call_fpu(hook_of("boatwater"), 2.0f, 1) - 2.0f * *(float *)0x871DDC * 0.5f) < 1e-6f,
+           "boatwater: the resistance scaled");
+        unret(0x6D2777);
+        ret_at(0x6F42DB);
+        ok(fabsf(call_fpu(hook_of("chassis1"), 0, 0) - *(float *)0x872328 * 0.5f) < 1e-7f, "chassis1: the impulse scaled");
+        unret(0x6F42DB);
+        ret_at(0x61E4F8);
+        call_fpu(hook_of("aimwalk"), 0.07f, 1);
+        int above = !(fpu_sw & 0x0100);
+        float kept = call_fpu(hook_of("aimwalk"), 0.03f, 1);
+        int below = (fpu_sw & 0x0100) != 0;
+        unret(0x61E4F8);
+        ok(above && below && kept == 0.03f, "aimwalk: 60 fps compares against 0.05, the amount left on the stack");
+        float before = *(float *)0xB6EC30;
+        ret_at(0x52C735);
+        call_fpu(hook_of("shake"), 0, -1);
+        unret(0x52C735);
+        ok(fabsf(*(float *)0xB6EC30 - (before + *(float *)0x858C80 * 0.5f)) < 1e-5f, "shake: the phase steps scaled");
+        cf_frame_due = 0;
+        ok(call_thiscall4(hook_of("wheeldirt"), 0x1234) == 0, "a gate on a frame not due: returns 0, its 10h of arguments taken");
+        cf_frame_due = 1;
+        uint8_t keep[3];
+        memcpy(keep, (void *)0x6D2D56, 3);
+        memcpy((void *)0x6D2D56, "\xC2\x10\x00", 3);
+        ok(call_thiscall4(hook_of("wheeldirt"), 0x1234) == 0x1234, "on a due frame: the game's code (its first argument read)");
+        memcpy((void *)0x6D2D56, keep, 3);
+        *ts = k;
+    }
+
+    printf("== FramerateVigilante's: swinging parts, the burnout, swimming\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        float k = 50.0f / 30.0f;
+        *ts = k;
+        ok(cf_damping(0.97f) == 0.97f, "30 fps: a damping as stock");
+        *ts = k / 2;
+        ok(fabsf(cf_damping(0.97f) - sqrtf(0.97f)) < 1e-6f, "60 fps: its square root a frame, the same a second");
+        *ts = 0;
+        ok(cf_damping(0.97f) == 0.97f, "no timestep: as stock");
+        *ts = k / 2;
+        static float door[8];
+        door[3] = 1.0f, door[5] = 0.2f;                    /* m_angle +0Ch, m_angVel +14h */
+        reg_esi = (uint32_t)door;
+        ret_at(0x6F442A);
+        call_regs(hook_of("doorangle"), 0, 0, 1);
+        unret(0x6F442A);
+        ok(fabsf(fpu_out - 1.1f) < 1e-6f, "doorangle: a door (not a chassis) turns by its speed scaled");
+        ret_at(0x6F4397);
+        ok(fabsf(call_fpu(hook_of("doordamp1"), 0, 0) - sqrtf(*(float *)0x872310)) < 1e-6f, "doordamp1: a boat's 0.98");
+        unret(0x6F4397);
+        ret_at(0x6F43A7);
+        ok(fabsf(call_fpu(hook_of("doordamp2"), 0, 0) - sqrtf(*(float *)0x872314)) < 1e-6f, "doordamp2: the ladder's 0.92");
+        unret(0x6F43A7);
+        ret_at(0x6F43D0);
+        ok(fabsf(call_fpu(hook_of("doordamp3"), 0, 0) - sqrtf(*(float *)0x872318)) < 1e-6f, "doordamp3: a bonnet's 0.97");
+        unret(0x6F43D0);
+        ret_at(0x6F43D8);
+        ok(fabsf(call_fpu(hook_of("doordamp4"), 0, 0) - sqrtf(*(float *)0x87230C)) < 1e-6f && ((fpu_sw >> 11) & 7) == 7,
+           "doordamp4: any other part's 0.97, one value left");
+        unret(0x6F43D8);
+        static float frame[0x50];
+        frame[0] = -0.002f * 2500.0f;                      /* [ebp-130h] */
+        reg_ebp = (uint32_t)&frame[0x130 / 4];
+        ret_at(0x6A5009);
+        call_regs(hook_of("burnout"), 1.0f, 1, 1);
+        unret(0x6A5009);
+        ok(fabsf(fpu_out - (-5.0f * 0.5f)) < 1e-5f, "burnout: min(1, 3000 / 2500) times -0.002 * 2500, then scaled");
+        static float task[0x10];
+        task[0x34 / 4] = 2.0f;                              /* m_fStateChanger, the pitch rate */
+        reg_edi = (uint32_t)task;
+        ret_at(0x68A6C3);
+        call_regs(hook_of("swimpitch1"), 2.0f, 1, 1);
+        int one = ((fpu_sw >> 11) & 7) == 7;
+        unret(0x68A6C3);
+        ok(one && fabsf(fpu_out - 2.0f * sqrtf(0.95f)) < 1e-5f, "swimpitch1: the rate times 0.95 per 30 fps step, one value left");
+        int r = CrashFix_Install(find("swimsurface"), NULL);
+        ok(r >= 1 && *(float **)0x68A7E8 == &cf_k30, "swimsurface: the pull's cap reads 1.6667, so it is 0.1667 at any fps");
+        ok(CrashFix_Uninstall(find("swimsurface")) == 1 && *(uint32_t *)0x68A7E8 == 0xB7CB5C, "and back");
+        if (r == 2) CrashFix_Install(find("swimsurface"), NULL);
+        *ts = k;
+    }
+
+    printf("== FramerateVigilante's: a horn tap switches the siren (siren)\n");
+    {
+        uint8_t *history = (uint8_t *)0xB73569, *now = (uint8_t *)0xB7356E;
+        uint32_t *ms = (uint32_t *)0xB7CB84;
+        static uint8_t carA[0x600], carB[0x600];
+        memset(history, 0, 5);
+        /* one pad frame: the horn held or not at the game's time t */
+#define PAD(held, t) (*now = (*now + 1) % 5, history[*now] = (held), *ms = (t))
+        *now = 0;
+        PAD(0, 1000);
+        ok(cf_siren_horn(carA) == 0, "nothing held: neither");
+        PAD(1, 1010);
+        ok(cf_siren_horn(carA) == 0, "pressed: not the horn yet");
+        PAD(1, 1060);
+        ok(cf_siren_horn(carA) == 0, "held 50 ms: still not");
+        PAD(0, 1110);
+        ok(cf_siren_horn(carA) == 2, "let go after 100 ms: the siren switched");
+        PAD(0, 1120);
+        ok(cf_siren_horn(carA) == 0, "then nothing");
+        PAD(1, 2000);
+        cf_siren_horn(carA);
+        PAD(1, 2149);
+        int before = cf_siren_horn(carA);
+        PAD(1, 2150);
+        int at = cf_siren_horn(carA);
+        PAD(0, 2400);
+        ok(before == 0 && at == 1 && cf_siren_horn(carA) == 0, "held 150 ms: the horn; let go: no switch");
+        PAD(1, 3000);
+        cf_siren_horn(carA);
+        *ms = 3100;
+        cf_siren_horn(carB);
+        PAD(0, 3120);
+        int a = cf_siren_horn(carA);
+        *ms = 3290;
+        ok(a == 2 && cf_siren_horn(carB) == 0, "each car its own press: a tap for one, too long for the other");
+        static const uint8_t ways[3][3] = {{0xB0, 0, 0xC3}, {0xB0, 1, 0xC3}, {0xB0, 2, 0xC3}};
+        static const uint32_t to[3] = {0x6E09F7, 0x6E09E8, 0x6E0999};
+        uint8_t keep[3][3];
+        for (int i = 0; i < 3; i++) memcpy(keep[i], (void *)to[i], 3), memcpy((void *)to[i], ways[i], 3);
+        reg_esi = (uint32_t)carA;
+        PAD(1, 4000);
+        int pressed = call_regs(hook_of("siren"), 0, 0, 0) & 0xFF;
+        PAD(0, 4050);
+        int tapped = call_regs(hook_of("siren"), 0, 0, 0) & 0xFF;
+        PAD(1, 5000);
+        call_regs(hook_of("siren"), 0, 0, 0);
+        PAD(1, 5200);
+        int horn = call_regs(hook_of("siren"), 0, 0, 0) & 0xFF;
+        for (int i = 0; i < 3; i++) memcpy((void *)to[i], keep[i], 3);
+        ok(pressed == 0 && tapped == 2 && horn == 1, "through the hook: the game's way out for each");
+#undef PAD
+    }
+
+    printf("== MTA's: a ped's bone matrices (pedanim, pedskin)\n");
+    {
+        float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5f, -0.2f, 9.5f, 0};
+        float good[16];
+        memcpy(good, m, sizeof m);
+        cf_ped_anim(m);
+        ok(!memcmp(m, good, sizeof m) && averted("pedanim") == 0, "a bone 9.5 from its parent: left");
+        m[5] = 2.5f;
+        cf_ped_anim(m);
+        int zero = 1;
+        for (int i = 0; i < 15; i++) if (i != 3 && i != 7 && i != 11 && m[i] != 0) zero = 0;
+        ok(zero && averted("pedanim") == 1, "a rotation of 2.5: zeroed");
+        memcpy(m, good, sizeof m), m[13] = -10.5f;
+        cf_ped_anim(m);
+        ok(m[0] == 0 && averted("pedanim") == 2, "10.5 from its parent: zeroed");
+        memcpy(m, good, sizeof m), m[2] = NAN;
+        cf_ped_anim(m);
+        ok(m[0] == 0 && averted("pedanim") == 3, "NaN: zeroed");
+        memcpy(&site_stack[20], good, sizeof good);
+        ((float *)&site_stack[20])[14] = INFINITY;
+        uint8_t keep[3];
+        memcpy(keep, (void *)0x7C5A61, 2);
+        memcpy((void *)0x7C5A61, "\x58\xC3", 2);           /* pop the eax it pushed, ret */
+        call_site(hook_of("pedanim"), 0x1234, 0, 0, 0);
+        memcpy((void *)0x7C5A61, keep, 2);
+        ok(averted("pedanim") == 4 && ((float *)&site_stack[20])[0] == 0 && site_ret == 0x1234,
+           "through the hook: the matrix at [esp+54h], eax kept");
+
+        uint32_t *offset = (uint32_t *)0xC978A4, was = *offset;
+        static float bones[3][16];
+        static struct { int32_t flags, count; float (*matrices)[16]; } hier = {0, 3, bones};
+        static uint8_t atomic[0x80];
+        for (int i = 0; i < 3; i++) memcpy(bones[i], good, sizeof good);
+        bones[2][14] = -10000.0f;                           /* where Unity Roleplay keeps objects */
+        *offset = 0x40, *(void **)(atomic + 0x40) = &hier;
+        ok(cf_ped_skin_ok(atomic), "skin matrices in the world, z -10000 too: drawn");
+        bones[1][12] = 200000.0f;
+        ok(!cf_ped_skin_ok(atomic), "one 200000 out: not drawn");
+        bones[1][12] = 0, bones[0][9] = NAN;
+        ok(!cf_ped_skin_ok(atomic), "a NaN: not drawn");
+        bones[0][9] = 0;
+        *(void **)(atomic + 0x40) = NULL;
+        ok(cf_ped_skin_ok(atomic), "no hierarchy: the game's to draw");
+        *(void **)(atomic + 0x40) = &hier;
+        memcpy(keep, (void *)0x7335B6, 3);
+        memcpy((void *)0x7335B6, "\x5F\x5E\xC3", 3);       /* pop edi, esi; ret */
+        site_stack[0] = (uint32_t)atomic;
+        call_site(hook_of("pedskin"), 0, 0, 0, 0);
+        int drawn = site_ret == 1 && averted("pedskin") == 0;
+        bones[2][0] = INFINITY;
+        call_site(hook_of("pedskin"), 0, 0, 0, 0);
+        memcpy((void *)0x7335B6, keep, 3);
+        ok(drawn && site_ret == (uint32_t)atomic && averted("pedskin") == 1,
+           "through the hook: drawn on, or its atomic returned and counted");
+        *offset = was;
     }
 
     printf("== fixes.lua's fog routine through RwD3D9SetRenderState\n");

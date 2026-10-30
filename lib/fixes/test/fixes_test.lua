@@ -159,7 +159,8 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing == 5 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, crashfix on, dialoglines on, floatclock on, floatfps on, focusmenu off', 1, true)
+    ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, chutefps on, crashfix on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
+        and all:find('turnfps on', 1, true) and all:find('vehiclefps on', 1, true) and all:find('freezecar on', 1, true) and all:find('chutefps on', 1, true) and all:find('pedfps on', 1, true) and all:find('pushfps on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
     env.fixesCommand('frameclone')
@@ -823,6 +824,103 @@ do
     ok(env.onReceiveRpc(93, bs) == nil and bs.rd == 0, 'a client message passes, nothing read')
 end
 
+print('\n== chutefps: the parachute script\'s per-frame constants follow the timestep')
+do
+    local SCRIPT, BASE, TS = 0x51000000, 0x52000000, 0xB7CB5C
+    local F20, F5, F15, F001 = {0, 0, 0xA0, 0x41}, {0, 0, 0xA0, 0x40}, {0, 0, 0x70, 0x41}, {0x0A, 0xD7, 0x23, 0x3C}
+    -- the loaded build's sites: {offset, opcode, the float's bytes}
+    local sites = {{1003, 0x17, F20}, {1029, 0x17, F5}, {1135, 0x17, F20}, {1536, 0x13, F001}, {1578, 0x13, F001},
+        {3344, 0x17, F20}, {3370, 0x17, F15}, {3578, 0x17, F20}, {3911, 0x17, F20}, {4080, 0x17, F20}, {4238, 0x17, F20}}
+    local function load()
+        for i = 0, 0x1800 - 1 do mem[BASE + i] = 0x90 end
+        put(BASE, 0xA4, 0x03, 0x09, 0x50, 0x4C, 0x43, 0x48, 0x55, 0x54, 0x45)
+        put(BASE + 985, 0x17, 0, 3, 0x15, 0, 6, 0x48, 0x8A, 0x88, 0x40)          -- /= 4.267, left alone
+        for _, site in ipairs(sites) do put(BASE + site[1], site[2], 0, 3, 0x15, 0, 6, unpack(site[3])) end
+    end
+    load()
+    putU32(0xA8B42C, SCRIPT); putU32(SCRIPT, 0); put(SCRIPT + 8, ('plchute'):byte(1, -1)); putU32(SCRIPT + 0x10, BASE)
+    local function at(off) return mem[BASE + off + 6] end
+    mem[TS] = 50 / 30
+    env.chuteTick()
+    ok(math.abs(at(1003) - 20) < 1e-9 and math.abs(at(1029) - 5) < 1e-9 and math.abs(at(1536) - 0.01) < 1e-12,
+        '30 fps: the stock values, found by their instructions')
+    mem[TS] = 50 / 150
+    env.chuteTick()
+    ok(math.abs(at(1029) - 25) < 1e-9 and math.abs(at(3370) - 75) < 1e-9, '150 fps: a turn a frame is a fifth')
+    local blend = 1 - (1 - 1 / 20) ^ 0.2
+    ok(math.abs(at(1003) - 1 / blend) < 1e-9 and math.abs(at(4238) - 1 / blend) < 1e-9,
+        'a /20 blend: 1 - 0.95^0.2 a frame, 0.95 a 30 fps step')
+    ok(math.abs(at(1578) - (1 - 0.99 ^ 0.2)) < 1e-12, 'a *0.01 blend the same way')
+    ok(mem[BASE + 985 + 6] == 0x48, 'the /= 4.267 (the stick) left alone')
+    env.fixesCommand('chutefps off')
+    ok(math.abs(at(1029) - 5) < 1e-9 and math.abs(at(1003) - 20) < 1e-9, 'off: the stock values back')
+    env.fixesCommand('chutefps on')
+    load()
+    put(BASE + 4238, 0x90, 0x90)                                               -- a build with one /= 20.0 fewer
+    putU32(SCRIPT + 0x10, BASE + 0x2000)
+    for i = 0, 0x1800 - 1 do mem[BASE + 0x2000 + i] = mem[BASE + i] end
+    mem[TS] = 50 / 150
+    env.chuteTick()
+    ok(mem[BASE + 0x2000 + 1003 + 6] == 0x00 and mem[BASE + 0x2000 + 1029 + 6] == 0x00,
+        'a build without every site: left alone')
+    putU32(0xA8B42C, 0)
+end
+
+print('\n== freezecar: frozen by the server while driving, the car is held too')
+do
+    local CAR, PTR = 0x1234, 0x50000000
+    local inCar, driver, controls, exists = true, 1, false, true
+    env.PLAYER_PED, env.PLAYER_HANDLE = 1, 0
+    env.isCharInAnyCar = function() return inCar end
+    env.storeCarCharIsInNoSave = function() return CAR end
+    env.getDriverOfCar = function() return driver end
+    env.getCarPointer = function() return PTR end
+    env.doesVehicleExist = function() return exists end
+    env.isPlayerControlOn = function() return controls end
+    local function rpc(moveable) local bs = newBs(); w8(bs, moveable); return screen(15, bs) end
+    local function flags() return getU32(PTR + 0x40) end
+    putU32(PTR + 0x40, 0x0001); putU32(PTR + 0x44, 0x3F800000); putU32(PTR + 0x54, 0x3F000000)
+    local r, untouched, back = rpc(0)
+    ok(r == nil and untouched and back, 'RPC 15 passes on to SA-MP, read offset back')
+    env.freezeCarTick()
+    ok(flags() == 0x2001 and getU32(PTR + 0x44) == 0 and getU32(PTR + 0x54) == 0,
+        'frozen while driving: the car does not apply its speed, its move and turn speeds are 0')
+    putU32(PTR + 0x48, 0x3F800000)
+    env.freezeCarTick()
+    ok(getU32(PTR + 0x48) == 0, 'and are kept at 0 every frame')
+    rpc(1)
+    ok(flags() == 0x0001, 'unfrozen: the bit back off, the rest as it was')
+    putU32(PTR + 0x40, 0x2000)
+    rpc(0); env.freezeCarTick(); rpc(1)
+    ok(flags() == 0x2000, 'a car already held by something else stays held')
+    putU32(PTR + 0x40, 0)
+    rpc(0); env.freezeCarTick()
+    driver = 2
+    env.freezeCarTick()
+    ok(flags() == 0, 'not the driver any more: let go')
+    driver = 1
+    env.freezeCarTick()
+    ok(flags() == 0x2000, 'the driver again, still frozen: held again')
+    controls = true
+    env.freezeCarTick()
+    ok(flags() == 0, 'the controls back without an RPC (a respawn): let go')
+    controls = false
+    env.freezeCarTick()
+    ok(flags() == 0, 'and not held again until the server freezes again')
+    rpc(0)
+    env.fixesCommand('freezecar off')
+    env.freezeCarTick()
+    ok(flags() == 0, 'option off: not held')
+    env.fixesCommand('freezecar on')
+    env.freezeCarTick()
+    ok(flags() == 0x2000, 'on: held')
+    inCar = false
+    env.freezeCarTick()
+    ok(flags() == 0, 'out of the car: let go')
+    rpc(1)
+    env.PLAYER_PED, env.PLAYER_HANDLE = nil, nil
+end
+
 print('\n== RPCs: /fixes says nothing until something was refused')
 before = #chat
 env.fixesCommand('')
@@ -1159,6 +1257,10 @@ do
             {key = 'misc4', name = 'divide by zero', va = 0x4F02D2, result = 0, found = 0x90909090},
             {key = 'misc19', name = 'RwFrameCloneHierarchy', va = 0x7F0BF7, result = 1},
             {key = 'misc12', name = 'UncompressAnimation', va = 0x4D41C5, result = 1},
+            {key = 'heli1', name = 'heli takeoff', va = 0x6C4F29, result = 1, option = 'vehiclefps'},
+            {key = 'glass2', name = 'vehicle glass', va = 0x734092, result = 1, option = 'glasslist'},
+            {key = 'pedskin', name = 'ped skin', va = 0x7335B0, result = 1, option = 'pedmatrix'},
+            {key = 'swimpitch1', name = 'dive pitch', va = 0x68A6BD, result = 1, option = 'swimfps'},
             {key = 'samp', name = 'SA-MP helper', va = 0, result = 1},
         },
         installs = {}, uninstalls = {}, shadows = nil, sampSite = nil,
@@ -1180,6 +1282,7 @@ do
         CrashFix_Uninstall = function(i) local h = cf.hooks[i + 1]; cf.uninstalls[#cf.uninstalls + 1] = h.key; h.on = false; return 1 end,
         CrashFix_Installed = function(i) return cf.hooks[i + 1].on and 1 or 0 end,
         CrashFix_Averted = function(i) return cf.hooks[i + 1].averted or 0 end,
+        CrashFix_Option = function(i) return cf.hooks[i + 1].option or 'crashfix' end,
     }
     local oldLoad, oldLL, oldString = fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string
     fakeFfi.load = function() return lib end
@@ -1187,8 +1290,16 @@ do
     fakeFfi.string = function(p, n) if type(p) == 'string' then return p end return oldString(p, n) end
 
     local from = #printed
-    ok(env.fixCrashes('game') == 1, 'one hook installed')
-    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4', 'misc1, 2 and 4 tried; misc19 and misc12 wait for their options, samp for SA-MP')
+    ok(env.fixCrashes('game') == 5, 'misc1, heli1, glass2, pedskin and swimpitch1 installed')
+    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4 heli1 glass2 pedskin swimpitch1',
+        'misc1, 2 and 4 tried; misc19 and misc12 wait for their options, samp for SA-MP; heli1 under vehiclefps, glass2 glasslist,'
+        .. ' pedskin pedmatrix, swimpitch1 swimfps')
+    ok(lineAfter(from, 'pedskin') and lineAfter(from, 'pedskin'):find('0x7335B0 ped fix pedskin (ped skin): hooked', 1, true),
+        'a ped fix says so: ' .. tostring(lineAfter(from, 'pedskin')))
+    ok(lineAfter(from, 'heli1') and lineAfter(from, 'heli1'):find('0x6C4F29 frame-rate fix heli1 (heli takeoff): hooked', 1, true),
+        'a frame-rate row says so: ' .. tostring(lineAfter(from, 'heli1')))
+    ok(lineAfter(from, 'glass2') and lineAfter(from, 'glass2'):find('0x734092 glass list glass2 (vehicle glass): hooked', 1, true),
+        'and a glass list row: ' .. tostring(lineAfter(from, 'glass2')))
     ok(cf.shadows == 0, 'blob shadows: volshadows is off')
     ok(lineAfter(from, 'misc1') and lineAfter(from, 'misc1'):find('0x5D9A6E crash fix misc1 (CPed shadow render): hooked', 1, true),
         'hooked: ' .. tostring(lineAfter(from, 'misc1')))
@@ -1223,19 +1334,54 @@ do
     ok(#printed == n0 + 2, 'more within a minute: not yet')
     tick(1061)
     ok(#printed == n0 + 3 and printed[#printed]:find('(9 so far)', 1, true), 'a minute on, the total: ' .. tostring(printed[#printed]))
+    cf.hooks[7].averted = 1
+    tick(2000)
+    ok(#printed == n0 + 4 and printed[#printed]:find('glass list glass2 (vehicle glass) grew for a car with more see-through parts (1 so far)', 1, true)
+        and not printed[#printed]:find('averted', 1, true), 'a glass list that grew is no crash: ' .. tostring(printed[#printed]))
+    cf.hooks[8].averted = 3
+    tick(3000)
+    ok(#printed == n0 + 5 and printed[#printed]:find("ped fix pedskin (ped skin) caught a ped's broken bones (3 so far)", 1, true)
+        and not printed[#printed]:find('averted', 1, true), 'and a ped left out: ' .. tostring(printed[#printed]))
 
     print('\n== crash fixes: options')
+    local function installedSince(mark, key)
+        for i = mark + 1, #cf.installs do if cf.installs[i] == key then return true end end
+    end
+    local mark = #cf.installs
     env.fixesCommand('frameclone on')
-    ok(cf.installs[#cf.installs] == 'misc19', '/fixes frameclone on installs hook 19')
+    ok(installedSince(mark, 'misc19'), '/fixes frameclone on installs hook 19')
+    mark = #cf.installs
     env.fixesCommand('oldcrashfixes on')
-    ok(cf.installs[#cf.installs] == 'misc12', '/fixes oldcrashfixes on installs hook 12')
+    ok(installedSince(mark, 'misc12'), '/fixes oldcrashfixes on installs hook 12')
     env.fixesCommand('oldcrashfixes off')
     ok(cf.uninstalls[#cf.uninstalls] == 'misc12', 'and off takes it out')
     cf.uninstalls = {}
     cf.hooks[3].result = 1
     env.fixesCommand('crashfix off')
-    ok(table.concat(cf.uninstalls, ' ') == 'misc1 misc19 samp', '/fixes crashfix off removes each one that is ours: ' ..
-        table.concat(cf.uninstalls, ' '))
+    ok(table.concat(cf.uninstalls, ' ') == 'misc1 misc19 samp', '/fixes crashfix off removes each one that is ours, '
+        .. 'not the frame-rate rows: ' .. table.concat(cf.uninstalls, ' '))
+    env.fixesCommand('vehiclefps off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'heli1', '/fixes vehiclefps off takes its rows out')
+    mark = #cf.installs
+    env.fixesCommand('vehiclefps on')
+    ok(installedSince(mark, 'heli1'), 'and on puts them back')
+    env.fixesCommand('glasslist off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'glass2' and env.crashFixState('glass') == 'off (option glasslist)',
+        '/fixes glasslist off takes the glass list out: ' .. env.crashFixState('glass'))
+    mark = #cf.installs
+    env.fixesCommand('glasslist on')
+    ok(installedSince(mark, 'glass2'), 'and on puts it back')
+    env.fixesCommand('pedmatrix off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'pedskin' and env.crashFixState('ped') == 'off (option pedmatrix)',
+        '/fixes pedmatrix off takes the ped fixes out: ' .. env.crashFixState('ped'))
+    mark = #cf.installs
+    env.fixesCommand('pedmatrix on')
+    ok(installedSince(mark, 'pedskin'), 'and on puts them back')
+    env.fixesCommand('swimfps off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'swimpitch1', "/fixes swimfps off takes its DLL rows out with fixes.lua's")
+    mark = #cf.installs
+    env.fixesCommand('swimfps on')
+    ok(installedSince(mark, 'swimpitch1'), 'and on puts them back')
     env.fixesCommand('crashfix on')
     env.fixesCommand('volshadows on')
     ok(cf.shadows == 1, '/fixes volshadows on reaches the DLL')
@@ -1246,8 +1392,83 @@ do
     local line
     for i = fromChat + 1, #chat do if chat[i]:find('crash fixes (', 1, true) then line = chat[i] end end
     ok(line and line:find('(6 hooks): 3 hooked, 1 owned elsewhere, 0 refused, 2 off', 1, true), '/fixes patches: ' .. tostring(line))
+    local frLine
+    for i = fromChat + 1, #chat do if chat[i]:find('frame-rate fixes (', 1, true) then frLine = chat[i] end end
+    ok(frLine and frLine:find('(2 sites): 2 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true),
+        'and the frame-rate rows apart: ' .. tostring(frLine))
+    local pedLine
+    for i = fromChat + 1, #chat do if chat[i]:find('ped fixes (', 1, true) then pedLine = chat[i] end end
+    ok(pedLine and pedLine:find('(1 sites): 1 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true)
+        and env.crashFixState('ped') == 'in place', 'and the ped fixes: ' .. tostring(pedLine))
+    ok(env.crashFixState('frame') == 'in place', 'their state apart too')
+    local glassLine
+    for i = fromChat + 1, #chat do if chat[i]:find('glass list (', 1, true) then glassLine = chat[i] end end
+    ok(glassLine and glassLine:find('(1 sites): 1 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true)
+        and env.crashFixState('glass') == 'in place', 'and the glass list: ' .. tostring(glassLine))
+    fromChat = #chat
+    env.fixesCommand('')
+    local status
+    for i = fromChat + 1, #chat do if chat[i]:find('crash fixes: ', 1, true) then status = chat[i] end end
+    ok(status and status:find('; 9 crash(es) averted', 1, true),
+        'the glass list\'s growth and the peds left out are not counted as crashes: ' .. tostring(status))
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString
+end
+
+--------------------------------------------------------------------------------
+-- 0.22.0: /fixes drift, a line every 30 s of the frame rate and what grows
+--------------------------------------------------------------------------------
+print('\n== drift: frame times and counts, compared over a session')
+do
+    local D = upvalue(env.driftFrame, 'DRIFT')
+    local now, lines = 0, {}
+    D.clock = function() return now end
+    D.write = function(line) lines[#lines + 1] = line end
+    D.EVERY = 1
+    env.fixesCommand('drift report')
+    ok(chat[#chat]:find('drift is off', 1, true), 'off: says how to start it: ' .. tostring(chat[#chat]))
+    local POOL, FLAGS = 0x40000000, 0x40001000
+    putU32(0xB7449C, POOL); putU32(POOL + 4, FLAGS); putU32(POOL + 8, 10)
+    for i = 0, 9 do mem[FLAGS + i] = i < 3 and 1 or 0x80 end
+    putU32(0x8E4CB4, 200 * 1048576); putU32(0xA9AE80 + 0x14, 37)
+    env.sampIs3dTextDefined = function(id) return id < 5 end
+    env.fixesCommand('drift on')
+    ok(lines[1] and lines[1]:find('fixes drift: a line every 1 s', 1, true), 'on: a session header: ' .. tostring(lines[1]))
+    env.driftFrame()
+    while #lines < 2 do now = now + 4; env.driftFrame() end
+    ok(lines[2]:find('fps=250 ms=4.00', 1, true) and lines[2]:find('worst=4.0 slow=0', 1, true),
+        'a second of 4 ms frames: 250 fps: ' .. lines[2])
+    ok(lines[2]:find('objects=3/10', 1, true) and lines[2]:find('streamMB=200', 1, true) and lines[2]:find('fx=37', 1, true)
+        and lines[2]:find('labels=5', 1, true) and not lines[2]:find('peds=', 1, true),
+        'the counts that can be read, and not the ones that cannot: ' .. lines[2])
+    env.fixesCommand('drift report')
+    ok(chat[#chat]:find('too early, 1 line', 1, true), 'one line: too early to compare: ' .. tostring(chat[#chat]))
+    for i = 3, 5 do mem[FLAGS + i] = 1 end
+    putU32(0xA9AE80 + 0x14, 30)
+    while #lines < 3 do now = now + 5; env.driftFrame() end
+    ok(lines[3]:find('fps=200', 1, true) and lines[3]:find('objects=6/10', 1, true), 'the next second: 200 fps, 6 objects: ' .. lines[3])
+    now = now + 25; env.driftFrame()
+    now = now + 3000; env.driftFrame()
+    while #lines < 4 do now = now + 5; env.driftFrame() end
+    ok(lines[4]:find('worst=25.0 slow=1 paused=3.0s', 1, true), 'a 25 ms frame: the worst and a hitch; a 3 s gap: '
+        .. 'a pause, not a frame: ' .. lines[4])
+    local from = #chat
+    env.fixesCommand('drift report')
+    local report = table.concat(chat, ' ', from + 1)
+    ok(report:find('250 -> ', 1, true) and report:find('grew most: objects 3 -> 6', 1, true) and report:find('fell: fx 37 -> 30', 1, true),
+        'the report: fps then, now, what grew and fell: ' .. report)
+    for _ = 1, 10 do now = now + 5; env.driftFrame() end
+    env.fixesCommand('textcache off')
+    ok(lines[#lines]:find('/fixes textcache off (fps since the last line: 200)', 1, true),
+        'an option switched: its own line, with the frame rate before it: ' .. lines[#lines])
+    env.fixesCommand('textcache on')
+    env.fixesCommand('drift off')
+    ok(lines[#lines]:find('stopped', 1, true), 'off: a last line')
+    local n = #lines
+    now = now + 5000; env.driftFrame()
+    ok(#lines == n, 'and no more')
+    putU32(0xB7449C, 0)
+    env.sampIs3dTextDefined = nil
 end
 
 --------------------------------------------------------------------------------
@@ -1572,15 +1793,18 @@ do
 end
 
 print('\n== swimfps and floatfps share the block')
-ok(env.fixFrameRate('swimfps') == 2 and env.fixFrameRate('floatfps') == 1 and allocs == 1, 'no second block')
+ok(env.fixFrameRate('swimfps') == 3 and env.fixFrameRate('floatfps') == 1 and allocs == 1, 'no second block')
 ok(mem[0x68A4FC] == 0xE9 and callTarget(0x68A4FC) == FPS.stubs.swim and same(get(0x68A501, 13), hex(('90'):rep(13))),
     'the swim site jmps (18 bytes: the rest NOPed)')
 ok(mem[0x68A42B] == 0xE8 and callTarget(0x68A42B) == FPS.stubs.dive, 'the -0.1 site calls the dive stub')
+ok(mem[0x68A4CA] == 0xE8 and callTarget(0x68A4CA) == FPS.stubs.lift and mem[0x68A4CF] == 0x90,
+    'the underwater buoyancy site calls the lift stub, its 6th byte NOPed')
+ok(same(get(FPS.stubs.lift, 6), hex('D905CC088700')), 'the lift stub loads the 0.01 itself')
 ok(mem[0x6C27AE] == 0xE8 and callTarget(0x6C27AE) == FPS.stubs.float, 'the buoyancy site calls the float stub')
 
 print('\n== off puts each option\'s sites back, and only those')
-ok(env.stopFrameRate('swimfps') == 2 and same(get(0x68A4FC, 18), hex('D95C241CD9442414D8C9D95C2420D84C2418'))
-    and same(get(0x68A42B, 6), hex('D80DF48E8500')), 'swimfps stock')
+ok(env.stopFrameRate('swimfps') == 3 and same(get(0x68A4FC, 18), hex('D95C241CD9442414D8C9D95C2420D84C2418'))
+    and same(get(0x68A42B, 6), hex('D80DF48E8500')) and same(get(0x68A4CA, 6), hex('D805CC088700')), 'swimfps stock')
 ok(callTarget(0x6D6E69) == wheelStub and callTarget(0x6C27AE) == FPS.stubs.float, 'the others stay')
 env.fixesCommand('wheelfps off')
 ok(same(get(0x6D6E69, 6), hex('D905CCB9C200')), '/fixes wheelfps off: ' .. tostring(chat[#chat]))
@@ -1948,7 +2172,7 @@ for i = 1, #arg do
     if arg[i] == '--fps-bytes' and arg[i + 1] then
         local FPS = upvalue(env.fixFrameRate, 'FPS')
         local code = FPS.code(0x20000000,           -- the game globals at +F00h, the jmp back to +F80h
-            {timestep = 0x20000F00, friction = 0x20000F04, minus = 0x20000F08, back = 0x20000F80})
+            {timestep = 0x20000F00, friction = 0x20000F04, minus = 0x20000F08, back = 0x20000F80, lift = 0x20000F0C})
         local f = assert(io.open(arg[i + 1], 'wb'))
         for _, b in ipairs(code) do f:write(string.char(b)) end
         f:close()
