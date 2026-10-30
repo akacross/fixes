@@ -62,7 +62,6 @@ Game bugs:
   SkyGFX stand it down too.
 - A server's car vanishes after you get out of it, its upgrade parts left
   behind (a script marking it no longer needed): the car is kept.
-- A server freezes you while you drive and the car rolls on: it is held too.
 - A ped with broken bone data draws its triangles across the screen: the bad
   bone shrinks to nothing, or the ped is not drawn (MTA's checks).
 - A car's glass and other see-through parts past 20 draw unsorted: the list
@@ -171,7 +170,6 @@ that averted a crash says so.
 | `turnfps`, `pedfps`, `vehiclefps`, `effectsfps`, `pushfps` | on | MTA's frame-rate fixes (FramerateVigilante's doors and burnout under `vehiclefps`) |
 | `sirenfps` | on | a horn tap under 150 ms switches the siren at any fps |
 | `chutefps` | on | the parachute steers as at 30 fps |
-| `freezecar` | on | a server freezing you while you drive holds your car too |
 | `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
 | `glasslist` | on | a car's see-through parts drawn in order past 20 |
 | `drift` | off | the frame-rate log above |

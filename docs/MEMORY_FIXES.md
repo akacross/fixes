@@ -58,9 +58,8 @@ carries San Andreas Online's two crash fixes and its growing vehicle glass
 list (42, option `glasslist`, on by default). Since 0.22.0 it carries
 FramerateVigilante's frame-rate fixes that MTA's lack and MTA's two ped
 matrix checks (43, options `sirenfps` and `pedmatrix`, on by default; the
-rest under `vehiclefps` and `swimfps`), a car held while the server freezes
-its driver (44, option `freezecar`, on by default), the parachute at any fps
-(45, option `chutefps`, on by default) and `/fixes drift`
+rest under `vehiclefps` and `swimfps`), the parachute at any fps (44,
+option `chutefps`, on by default) and `/fixes drift`
 (docs/PERF.md). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
@@ -2220,27 +2219,7 @@ hierarchy, and through its hook both ways. `fixes_test.lua`: a ped row
 follows `pedmatrix` and is counted and logged on its own; `swimfps` switches
 its DLL rows with its fixes.lua sites.
 
-## 44. A frozen driver's car rolls on
-
-`TogglePlayerControllable(playerid, 0)` (RPC 15) makes SA-MP lock the
-player's controls and nothing else, so a car the player drives coasts on,
-down a hill or off the road. fixes reads the RPC on its way to SA-MP
-(it passes untouched) and, while the player is frozen and drives, holds the
-car: CPhysical's `bDontApplySpeed` (+40h bit 13, what `FREEZE_CAR_POSITION`,
-0519, sets) and its move and turn speeds (+44h, +50h) zeroed every frame, so
-it stops where it is and nothing is left to apply when it goes. It lets go
-when the server unfreezes the player, when the controls are back without
-one (`isPlayerControlOn`: a respawn, a reconnect), when the player is no
-longer the driver or leaves the car, and with the option off; the bit is
-cleared only if fixes set it. Only the local player's car: others' cars move
-as their drivers' sync says. Option `freezecar`, on by default.
-
-**Tests.** `fixes_test.lua`: RPC 15 passes untouched; frozen while driving,
-the bit is set and the speeds kept at 0; unfrozen, the bit goes and the
-other flags stay; a car held by something else stays held; not the driver,
-the controls back, the option off or out of the car lets go.
-
-## 45. The parachute spins at high fps
+## 44. The parachute spins at high fps
 
 The parachute is not engine code: `player_parachute.scm` in
 `data\script\script.img` (`script_name 'PLCHUTE'`) runs once a frame while

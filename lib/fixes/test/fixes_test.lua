@@ -160,7 +160,7 @@ do
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
     ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, chutefps on, crashfix on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
-        and all:find('turnfps on', 1, true) and all:find('vehiclefps on', 1, true) and all:find('freezecar on', 1, true) and all:find('chutefps on', 1, true) and all:find('pedfps on', 1, true) and all:find('pushfps on', 1, true)
+        and all:find('turnfps on', 1, true) and all:find('vehiclefps on', 1, true) and all:find('chutefps on', 1, true) and all:find('pedfps on', 1, true) and all:find('pushfps on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
     env.fixesCommand('frameclone')
@@ -864,61 +864,6 @@ do
     ok(mem[BASE + 0x2000 + 1003 + 6] == 0x00 and mem[BASE + 0x2000 + 1029 + 6] == 0x00,
         'a build without every site: left alone')
     putU32(0xA8B42C, 0)
-end
-
-print('\n== freezecar: frozen by the server while driving, the car is held too')
-do
-    local CAR, PTR = 0x1234, 0x50000000
-    local inCar, driver, controls, exists = true, 1, false, true
-    env.PLAYER_PED, env.PLAYER_HANDLE = 1, 0
-    env.isCharInAnyCar = function() return inCar end
-    env.storeCarCharIsInNoSave = function() return CAR end
-    env.getDriverOfCar = function() return driver end
-    env.getCarPointer = function() return PTR end
-    env.doesVehicleExist = function() return exists end
-    env.isPlayerControlOn = function() return controls end
-    local function rpc(moveable) local bs = newBs(); w8(bs, moveable); return screen(15, bs) end
-    local function flags() return getU32(PTR + 0x40) end
-    putU32(PTR + 0x40, 0x0001); putU32(PTR + 0x44, 0x3F800000); putU32(PTR + 0x54, 0x3F000000)
-    local r, untouched, back = rpc(0)
-    ok(r == nil and untouched and back, 'RPC 15 passes on to SA-MP, read offset back')
-    env.freezeCarTick()
-    ok(flags() == 0x2001 and getU32(PTR + 0x44) == 0 and getU32(PTR + 0x54) == 0,
-        'frozen while driving: the car does not apply its speed, its move and turn speeds are 0')
-    putU32(PTR + 0x48, 0x3F800000)
-    env.freezeCarTick()
-    ok(getU32(PTR + 0x48) == 0, 'and are kept at 0 every frame')
-    rpc(1)
-    ok(flags() == 0x0001, 'unfrozen: the bit back off, the rest as it was')
-    putU32(PTR + 0x40, 0x2000)
-    rpc(0); env.freezeCarTick(); rpc(1)
-    ok(flags() == 0x2000, 'a car already held by something else stays held')
-    putU32(PTR + 0x40, 0)
-    rpc(0); env.freezeCarTick()
-    driver = 2
-    env.freezeCarTick()
-    ok(flags() == 0, 'not the driver any more: let go')
-    driver = 1
-    env.freezeCarTick()
-    ok(flags() == 0x2000, 'the driver again, still frozen: held again')
-    controls = true
-    env.freezeCarTick()
-    ok(flags() == 0, 'the controls back without an RPC (a respawn): let go')
-    controls = false
-    env.freezeCarTick()
-    ok(flags() == 0, 'and not held again until the server freezes again')
-    rpc(0)
-    env.fixesCommand('freezecar off')
-    env.freezeCarTick()
-    ok(flags() == 0, 'option off: not held')
-    env.fixesCommand('freezecar on')
-    env.freezeCarTick()
-    ok(flags() == 0x2000, 'on: held')
-    inCar = false
-    env.freezeCarTick()
-    ok(flags() == 0, 'out of the car: let go')
-    rpc(1)
-    env.PLAYER_PED, env.PLAYER_HANDLE = nil, nil
 end
 
 print('\n== RPCs: /fixes says nothing until something was refused')

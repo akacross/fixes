@@ -934,8 +934,6 @@ local OPTIONS = {
         end},
     chutefps = {default = true, label = "the parachute turns, rolls and speeds up as at 30 fps (it spun at high fps)",
         apply = function() chuteTick(); return 0, 0 end},
-    freezecar = {default = true, label = "a server freezing you while you drive holds your car too, instead of letting it roll on",
-        apply = function() freezeCarTick(); return 0, 0 end},
     positionguard = {default = true, label = "NaN, inf and off-map positions put back before a ped, car or object is placed",
         apply = function(on)
             if on then return fixPositionGuard() and 1 or 0, 0 end
@@ -2965,7 +2963,7 @@ local rpcCounts = {anim = 0, menu = 0, dialog = 0, pos = 0}
 local RPC_KIND = {[RPC_APPLY_ANIM] = "anim", [RPC_APPLY_ACTOR_ANIM] = "anim",
                   [RPC_INIT_MENU] = "menu", [RPC_SHOW_DIALOG] = "dialog",
                   [RPC_SET_PLAYER_POS] = "pos", [RPC_SET_PLAYER_POS_FIND_Z] = "pos",
-                  [RPC_SET_VEHICLE_POS] = "pos", [15] = "freeze"}     -- 15: TogglePlayerControllable
+                  [RPC_SET_VEHICLE_POS] = "pos"}
 
 local function skipBytes(bs, n) if n > 0 then raknetBitStreamIgnoreBits(bs, n * 8) end end
 
@@ -3081,8 +3079,6 @@ local function screenRpc(id, bs)
                 vehicle and ("vehicle " .. vehicle) or "the player", why))
             return false
         end
-    elseif id == 15 then
-        freezeCarRpc(raknetBitStreamReadInt8(bs) ~= 0)
     elseif id == RPC_SHOW_DIALOG and options.dialoglines ~= false then
         local cut, longest = cutDialogLines(bs)
         if cut then
@@ -3219,69 +3215,6 @@ end
             log(("[fixes] chutefps: the parachute steers as at 30 fps (code at 0x%X, %d constants)"):format(
                 code_.base, #code_.sites), "info")
         end
-    end
-end)()
-
--- A server freezing the player (TogglePlayerControllable, RPC 15) only locks
--- the controls, so a car being driven rolls on. While the player is frozen
--- and drives, the car is held too: CPhysical's bDontApplySpeed set (+40h bit
--- 13, as FREEZE_CAR_POSITION) and its speeds zeroed every frame. It goes
--- when the server lets go, the controls come back (a respawn) or the player
--- is no longer its driver; the bit is cleared only if fixes set it. Option
--- "freezecar". In a function of its own: the chunk has no locals to spare.
-;(function()
-    local FLAGS, DONT_APPLY_SPEED = 0x40, 0x2000
-    local frozen, held = false, nil            -- held: {car = handle, was = the bit before}
-
-    local function zero(ptr)
-        local p = ffi.cast("uint32_t*", ptr + 0x44)   -- move speed +44h, turn speed +50h
-        for i = 0, 5 do p[i] = 0 end
-    end
-
-    local function release()
-        if not held then return end
-        local car, was = held.car, held.was
-        held = nil
-        pcall(function()
-            if not doesVehicleExist(car) then return end
-            local ptr = getCarPointer(car)
-            local flags = ffi.cast("uint32_t*", ptr + FLAGS)
-            if not was then flags[0] = bit.band(flags[0], bit.bnot(DONT_APPLY_SPEED)) end
-            zero(ptr)
-        end)
-        log("[fixes] freezecar: the car goes with the player again", "info")
-    end
-
-    -- The car the player drives, or nil
-    local function driven()
-        local ok, car = pcall(function()
-            if not isCharInAnyCar(PLAYER_PED) then return nil end
-            local car = storeCarCharIsInNoSave(PLAYER_PED)
-            return getDriverOfCar(car) == PLAYER_PED and car or nil
-        end)
-        return ok and car or nil
-    end
-
-    function freezeCarRpc(moveable)
-        frozen = not moveable
-        if not frozen then release() end
-    end
-
-    -- From the main loop, every frame
-    function freezeCarTick()
-        if not frozen and not held then return end
-        if frozen and type(isPlayerControlOn) == "function" and isPlayerControlOn(PLAYER_HANDLE) then frozen = false end
-        local car = frozen and options.freezecar and driven() or nil
-        if held and held.car ~= car then release() end
-        if not car then return end
-        local ptr = getCarPointer(car)
-        if not held then
-            local flags = ffi.cast("uint32_t*", ptr + FLAGS)
-            held = {car = car, was = bit.band(flags[0], DONT_APPLY_SPEED) ~= 0}
-            flags[0] = bit.bor(flags[0], DONT_APPLY_SPEED)
-            log("[fixes] freezecar: frozen by the server while driving; the car is held too", "info")
-        end
-        zero(ptr)
     end
 end)()
 
@@ -3933,7 +3866,6 @@ function main()
     while true do
         wait(0)
         driftFrame()
-        freezeCarTick()
         chuteTick()
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
