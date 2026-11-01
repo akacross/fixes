@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.22.0")
+script_version("0.23.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -856,6 +856,15 @@ for _, v in ipairs({
         end}
 end
 
+-- The Frame Limiter and loading screens flip with vsync; `_rwD3D9CameraShowRaster`
+-- (0x7F99B0) switches the device's PresentationInterval for it with a full
+-- Reset, and never checks it: a Reset that fails (ProperShaders' resources
+-- under DXVK) leaves the backbuffer NULL and it crashes at 0x7F9A3C. The jump
+-- keeps the interval the device was made with (no vsync); the Frame Limiter
+-- still caps the frame rate. docs/MEMORY_FIXES.md 47.
+gamePatches[#gamePatches + 1] = {name = "the Frame Limiter does not reset the device to switch vsync", va = 0x7F99E5,
+    from = hexBytes("74 13 81 F9 00 00 00 80"), to = hexBytes("E9 F6 00 00 00 90 90 90"), option = "novsyncreset"}
+
 -- WndProc's WM_SETFOCUS (0x748063): `call 0x53BC60` opens the pause menu on
 -- the next frame when the window gets focus back and no menu is up. SA-MP NOPs
 -- the call at load while its flag at samp.dll+0x26EB28 (R5) is 1, else the one at
@@ -932,6 +941,11 @@ local OPTIONS = {
             if on then return startDrift() and 1 or 0, 0 end
             return stopDrift() and 1 or 0, 0
         end},
+    deathtrace = {default = false, label = "the last 3 s before each death (health, vehicle, tasks, what came in) in logs\\death.log",
+        apply = function(on)
+            if on then return startDeathTrace() and 1 or 0, 0 end
+            return stopDeathTrace() and 1 or 0, 0
+        end},
     chutefps = {default = true, label = "the parachute turns, rolls and speeds up as at 30 fps (it spun at high fps)",
         apply = function() chuteTick(); return 0, 0 end},
     positionguard = {default = true, label = "NaN, inf and off-map positions put back before a ped, car or object is placed",
@@ -957,6 +971,8 @@ local OPTIONS = {
         apply = function() return fixCrashes("game"), 0 end},
     pedmatrix = {default = true, label = "a ped whose bone matrices went bad is not drawn stretched across the screen (MTA)",
         apply = function() return fixCrashes("game"), 0 end},
+    skygrad = {default = true, label = "the sky's gradient dithered, so it shows no colour bands (as skygrad.asi)",
+        apply = function() return fixCrashes("game"), 0 end},
     noheathaze = {default = true, label = "no heat haze"},
     noclouds = {default = true, label = "no clouds (a few frames)"},
     noflashes = {default = false, label = "no flash effects"},
@@ -966,6 +982,8 @@ local OPTIONS = {
     notargetblip = {default = false, label = "no target blip over aimed peds"},
     nointeriorreflections = {default = false, label = "no interior floor reflections"},
     nopostfx = {default = false, label = "no post effects"},
+    novsyncreset = {default = true,
+        label = "the Frame Limiter and loading screens do not reset the device for vsync (a failed reset crashed at 0x7F9A3C)"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
     keepcars = {default = true, label = "a car marked no longer needed (opcode 01C3) is kept, not deleted with its parts left behind"},
@@ -2686,8 +2704,9 @@ end
 -- MTA's and FramerateVigilante's frame-rate fixes live in the same DLL
 -- (framerate.c, vigilante.c), each hook under the option the DLL names for it,
 -- and so do MTA's ped matrix checks (pedmatrix.c, option pedmatrix) and San
--- Andreas Online's vehicle glass list (glasslist.c, option glasslist).
--- docs/MEMORY_FIXES.md 30, 34, 41, 42, 43.
+-- Andreas Online's vehicle glass list (glasslist.c, option glasslist) and the
+-- dithered sky (sky.c, option skygrad).
+-- docs/MEMORY_FIXES.md 30, 34, 41, 42, 43, 45.
 pcall(ffi.cdef, [[
     int CrashFix_Count(void);
     const char* CrashFix_Key(int i);
@@ -2733,13 +2752,13 @@ local function crashFixOption(lib, i)
     return ok and p ~= nil and ffi.string(p) or "crashfix"
 end
 
--- What a hook is by its option: "crash", "glass", "ped" or "frame" (the frame-rate fixes)
+-- What a hook is by its option: "crash", "glass", "ped", "sky" or "frame" (the frame-rate fixes)
 local crashFixKind
 do
-    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped"}
+    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky"}
     function crashFixKind(option) return kinds[option] or "frame" end
 end
-local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix"}
+local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix", sky = "sky fix"}
 
 -- part: "game" (gta_sa.exe, from the start) or "samp" (samp.dll's helper,
 -- once SA-MP is up). -> hooks installed or removed now.
@@ -2806,7 +2825,7 @@ function setCrashFixShadows(on)
 end
 
 -- -> in place, owned elsewhere, refused, off; the hooks of `kind` ("crash"
--- if nil, "frame", "glass", "ped")
+-- if nil, "frame", "glass", "ped", "sky")
 local function crashFixCounts(kind)
     local n = {ok = 0, owned = 0, refused = 0, off = 0}
     for _, e in pairs(crashFixes) do
@@ -2822,13 +2841,14 @@ end
 -- The state of the hooks of `kind` (as crashFixCounts) as one of
 -- otherFixes' ("in place", "left to X", "off ...", "not in place")
 local CRASHFIX_OFF = {crash = "off (option crashfix)", glass = "off (option glasslist)", ped = "off (option pedmatrix)",
+    sky = "off (option skygrad)",
     frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps)"}
 function crashFixState(kind)
     kind = kind or "crash"
     local off = CRASHFIX_OFF[kind]
     if not crashFixLib then
         local wanted = kind == "crash" and options.crashfix ~= false or kind == "glass" and options.glasslist
-            or kind == "ped" and options.pedmatrix
+            or kind == "ped" and options.pedmatrix or kind == "sky" and options.skygrad
         return wanted and "not in place" or off
     end
     local n, owners, seen = crashFixCounts(kind), {}, {}
@@ -2859,6 +2879,9 @@ local function crashFixTick(now)
             if crashFixKind(e.option) == "glass" then
                 log(string.format("[fixes] glass list %s (%s) grew for a car with more see-through parts (%d so far)",
                     ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
+            elseif crashFixKind(e.option) == "sky" then
+                log(string.format("[fixes] sky fix %s: the shaders could not be made; the stock sky is drawn",
+                    ffi.string(crashFixLib.CrashFix_Key(i))), "warn")
             elseif crashFixKind(e.option) == "ped" then
                 log(string.format("[fixes] ped fix %s (%s) caught a ped's broken bones (%d so far)",
                     ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
@@ -3090,6 +3113,7 @@ local function screenRpc(id, bs)
 end
 
 function onReceiveRpc(id, bs)
+    if deathRpcIn then deathRpcIn(id, bs) end
     if not RPC_KIND[id] then return end
     local start = raknetBitStreamGetReadOffset(bs)
     local ok, keep = pcall(screenRpc, id, bs)
@@ -3123,7 +3147,7 @@ end
     local HEAD = {0xA4, 0x03, 0x09, 0x50, 0x4C, 0x43, 0x48, 0x55, 0x54, 0x45}   -- script_name 'PLCHUTE'
     local SIZE = 0x1800
     local found                 -- {base = va, sites = {{at = va of the float, kind}}} for the code last seen
-    local told, listed
+    local told, listed, since
 
     -- `op 00 03 <local> 00 06 <float>`: the kinds' sites in the code at base, or nil and why
     local function scan(base)
@@ -3195,12 +3219,19 @@ end
     function chuteTick()
         local code_, why = code()
         if not code_ then
+            -- a new PLCHUTE is named on its first frame: only one missing 3 s is told
             if not listed and options.chutefps then
                 local ok, weapon = pcall(getCurrentCharWeapon, PLAYER_PED)
-                if ok and weapon == 46 then list(why) end
+                if not (ok and weapon == 46) then since = nil
+                else
+                    local now = readU32(0xB7CB84)                       -- CTimer::m_snTimeInMilliseconds
+                    since = since or now
+                    if now - since >= 3000 then list(why) end
+                end
             end
             return
         end
+        since = nil
         local k
         if options.chutefps then
             local t = ffi.cast("float*", 0xB7CB5C)[0]                -- CTimer::ms_fTimeStep
@@ -3684,7 +3715,7 @@ function fixesCommand(params)
         local cf = crashFixCounts()
         say(("crash fixes (%d hooks): %d hooked, %d owned elsewhere, %d refused, %d off"):format(
             cf.ok + cf.owned + cf.refused + cf.off, cf.ok, cf.owned, cf.refused, cf.off))
-        for _, k in ipairs({{"frame", "frame-rate fixes"}, {"ped", "ped fixes"}, {"glass", "glass list"}}) do
+        for _, k in ipairs({{"frame", "frame-rate fixes"}, {"ped", "ped fixes"}, {"glass", "glass list"}, {"sky", "sky fix"}}) do
             local fr = crashFixCounts(k[1])
             if fr.ok + fr.owned + fr.refused + fr.off > 0 then
                 say(("%s (%d sites): %d in place, %d owned elsewhere, %d refused, %d off"):format(
@@ -3770,6 +3801,258 @@ function fixesCommand(params)
         refused > 0 and (", %d left alone (another mod's bytes)"):format(refused) or ""))
 end
 
+-- What killed the player (option "deathtrace", off by default). Every frame it
+-- keeps the last 3 s of the player's health, armour, vehicle, ped state, task
+-- tree and position, and of the packets and RPCs SA-MP received and the damage
+-- it reported; on a death it writes them to logs\death.log with what the game
+-- blamed (the ped's last damage weapon and entity, its last collision) and
+-- what SA-MP told the server (RPC 53, the death; RPC 115, damage taken).
+;(function()
+    local DEATH = {
+        LOG = getWorkingDirectory() .. "\\logs\\death.log",
+        KEEP = 3000,                -- ms of history
+        WAIT = 3000,                -- ms after dying for SA-MP's death report
+        TASKS = {[205] = "get up", [207] = "fall", [208] = "fall and get up", [209] = "fall and stay down",
+            [212] = "die", [214] = "die in car", [215] = "die in car", [217] = "die", [218] = "dead",
+            [230] = "hit response", [231] = "hit by gun", [240] = "in air and land", [241] = "in air", [242] = "land",
+            [251] = "be damaged", [277] = "fall to death", [500] = "hit head", [505] = "hit ped with car",
+            [603] = "out of the way of a car", [700] = "enter car as passenger", [701] = "enter car as driver",
+            [703] = "drag ped from car", [704] = "leave car", [705] = "leave car and die", [709] = "car drive",
+            [720] = "shuffle seats", [725] = "car drive", [808] = "car shuffle", [813] = "car get out",
+            [814] = "car jump out", [816] = "car set ped out", [817] = "quick drag ped out",
+            [818] = "quick be dragged out", [819] = "set ped quick dragged out", [820] = "slow drag ped out",
+            [821] = "slow be dragged out", [822] = "set ped slow dragged out", [823] = "be dragged out",
+            [824] = "be dragged out and stand up", [825] = "quick be dragged out", [826] = "bike jacked",
+            [834] = "car fall out", [1008] = "be hit", [1009] = "be hit while moving", [1027] = "stealth kill"},
+        PACKETS = {[200] = "vehicle sync", [203] = "aim sync", [206] = "bullet sync", [207] = "player sync",
+            [209] = "unoccupied sync", [210] = "trailer sync", [211] = "passenger sync"},
+        RPCS = {[12] = "SetPlayerPos", [13] = "SetPlayerPosFindZ", [14] = "SetPlayerHealth", [26] = "EnterVehicle",
+            [55] = "DeathMessage", [66] = "SetPlayerArmour", [70] = "PutPlayerInVehicle", [71] = "RemovePlayerFromVehicle",
+            [86] = "ApplyAnimation", [87] = "ClearAnimations", [88] = "SetSpecialAction", [90] = "SetPlayerVelocity",
+            [91] = "SetVehicleVelocity", [154] = "ExitVehicle", [159] = "SetVehiclePos", [166] = "WorldPlayerDeath"},
+        WEAPONS = {[0] = "fist", [37] = "flamethrower", [49] = "vehicle", [50] = "helicopter blades", [51] = "explosion",
+            [53] = "drowned", [54] = "collision or fall", [255] = "suicide"},
+        on = false, frames = {}, net = {}, sent = {},
+    }
+
+    local function clock() return DRIFT.clock() end
+
+    -- What an entity is: "player 12 Name", "vehicle 412 (model 560, driver player 3 Name)", ...
+    local function entity(p)
+        if not p or p == 0 or not readable(p, 0x48) then return "nothing" end
+        local kind = readU8(p + 0x36) % 8
+        local model = ffi.cast("uint16_t*", p + 0x22)[0]
+        local function player(ped)
+            local okH, h = pcall(getCharPointerHandle, ped)
+            local okI, found, id = pcall(sampGetPlayerIdByCharHandle, okH and h or -1)
+            local okM, me = pcall(getCharPointer, PLAYER_PED)
+            if okM and ped == me then return "you" end
+            if okI and found then
+                local okN, name = pcall(sampGetPlayerNickname, id)
+                return ("player %d %s"):format(id, okN and name or "?")
+            end
+            return ("a ped (model %d)"):format(ffi.cast("uint16_t*", ped + 0x22)[0])
+        end
+        if kind == 3 then return player(p) end
+        if kind == 2 then
+            local okH, h = pcall(getVehiclePointerHandle, p)
+            local okI, found, id = pcall(sampGetVehicleIdByCarHandle, okH and h or -1)
+            local driver = readable(p + 0x460, 4) and readU32(p + 0x460) or 0
+            return ("vehicle %s (model %d, driver %s)"):format(okI and found and id or "?", model,
+                driver ~= 0 and player(driver) or "none")
+        end
+        return ("%s (model %d)"):format(kind == 4 and "an object" or kind == 1 and "a building" or "an entity", model)
+    end
+
+    -- The ped's primary tasks, each slot's tree: "0:701>808 3:208>207"
+    local function tasks(ped)
+        local intel = readU32(ped + 0x47C)
+        if intel == 0 or not readable(intel, 0x18) then return "" end
+        local slots = {}
+        for slot = 0, 4 do
+            local task, chain = readU32(intel + 4 + slot * 4), {}
+            while task ~= 0 and #chain < 8 and readable(task, 12) and readable(readU32(task), 20) do
+                local vt = readU32(task)
+                chain[#chain + 1] = tostring(ffi.cast("int(__thiscall*)(uintptr_t)", readU32(vt + 16))(task))
+                task = tonumber(ffi.cast("uintptr_t", ffi.cast("uintptr_t(__thiscall*)(uintptr_t)", readU32(vt + 8))(task)))
+            end
+            if #chain > 0 then slots[#slots + 1] = slot .. ":" .. table.concat(chain, ">") end
+        end
+        return table.concat(slots, " ")
+    end
+
+    local function named(chain)
+        return (chain:gsub("%d+", function(n)
+            local name = DEATH.TASKS[tonumber(n)]
+            return name and (n .. " " .. name) or n
+        end))
+    end
+
+    local function prune(list, now)
+        local keep = 1
+        while keep <= #list and now - list[keep].t > DEATH.KEEP do keep = keep + 1 end
+        if keep > 1 then
+            for i = keep, #list do list[i - keep + 1] = list[i] end
+            for i = #list - keep + 2, #list do list[i] = nil end
+        end
+    end
+
+    function DEATH.write(lines)
+        local f = io.open(DEATH.LOG, "a")
+        if f then f:write(table.concat(lines, "\n"), "\n"); f:close() end
+    end
+
+    local function report()
+        local d, lines = DEATH.dying, {}
+        DEATH.dying = nil
+        local function at(t) return ("%+.2f s"):format((t - d.t) / 1000) end
+        lines[#lines + 1] = ("== %s died (%s)"):format(d.when, d.reason or "SA-MP sent no death report")
+        lines[#lines + 1] = ("blamed by the game: weapon %d (%s) by %s; last collision %.1f with %s"):format(
+            d.weapon, DEATH.WEAPONS[d.weapon] or "weapon", d.by, d.intensity, d.hit)
+        local timeline = {}             -- {t, text}, in time order after
+        for _, s in ipairs(d.sent) do timeline[#timeline + 1] = {s.t, "SA-MP sent: " .. s.text} end
+        -- a line where anything changes, else one each 250 ms
+        local last = {t = -1e9}
+        for _, f in ipairs(d.frames) do
+            local parts = {}
+            if f.hp ~= last.hp or f.ar ~= last.ar then parts[#parts + 1] = ("health %.1f armour %.1f"):format(f.hp, f.ar) end
+            if f.car ~= last.car then parts[#parts + 1] = f.car ~= "" and ("in " .. f.car) or "on foot" end
+            if f.state ~= last.state then parts[#parts + 1] = "state " .. f.state end
+            if f.tasks ~= last.tasks then parts[#parts + 1] = "tasks " .. named(f.tasks) end
+            if #parts > 0 or f.t - last.t >= 250 then
+                parts[#parts + 1] = ("at %.1f %.1f %.1f moving %.2f"):format(f.x, f.y, f.z, f.speed)
+                timeline[#timeline + 1] = {f.t, table.concat(parts, "; ")}
+                last.t = f.t
+            end
+            last.hp, last.ar, last.car, last.state, last.tasks = f.hp, f.ar, f.car, f.state, f.tasks
+        end
+        local counts, order = {}, {}
+        for _, n in ipairs(d.net) do
+            if n.rpc then
+                timeline[#timeline + 1] = {n.t, ("received RPC %d %s (first word %d)"):format(n.id, DEATH.RPCS[n.id] or "", n.a)}
+            else
+                local key = n.a .. " " .. n.id
+                if not counts[key] then counts[key] = {a = n.a, id = n.id, n = 0, first = n.t}; order[#order + 1] = key end
+                counts[key].n = counts[key].n + 1
+            end
+        end
+        table.sort(timeline, function(a, b) return a[1] < b[1] end)
+        for _, e in ipairs(timeline) do lines[#lines + 1] = at(e[1]) .. " " .. e[2] end
+        for _, key in ipairs(order) do
+            local c = counts[key]
+            local okN, name = pcall(sampGetPlayerNickname, c.a)
+            lines[#lines + 1] = ("from %s player %d %s: %s x%d"):format(at(c.first), c.a, okN and name or "?",
+                DEATH.PACKETS[c.id] or ("packet " .. c.id), c.n)
+        end
+        DEATH.write(lines)
+        log(("[fixes] deathtrace: died (%s, weapon %d by %s); the last 3 s are in logs\\death.log"):format(
+            d.reason or "no death report", d.weapon, d.by), "info")
+    end
+
+    -- From the main loop, every frame
+    function deathFrame()
+        if not DEATH.on then return end
+        local now = clock()
+        if DEATH.dying and now - DEATH.dying.t > DEATH.WAIT then report() end
+        local okP, ped = pcall(getCharPointer, PLAYER_PED)
+        if not okP or not ped or ped == 0 or not readable(ped, 0x770) then return end
+        local hp, ar = ffi.cast("float*", ped + 0x540)[0], ffi.cast("float*", ped + 0x548)[0]
+        local state = readU32(ped + 0x530)
+        local car = ""
+        if readU8(ped + 0x46D) % 2 == 1 and readU32(ped + 0x58C) ~= 0 then car = entity(readU32(ped + 0x58C)) end
+        local okT, tree = pcall(tasks, ped)
+        local okS, speed = pcall(getCharSpeed, PLAYER_PED)
+        local okC, x, y, z = pcall(getCharCoordinates, PLAYER_PED)
+        local frames = DEATH.frames
+        frames[#frames + 1] = {t = now, hp = hp, ar = ar, state = state, car = car, tasks = okT and tree or "?",
+            speed = okS and speed or 0, x = okC and x or 0, y = okC and y or 0, z = okC and z or 0}
+        prune(frames, now)
+        prune(DEATH.net, now)
+        prune(DEATH.sent, now)
+        local dead = hp <= 0 or state == 54 or state == 55
+        if dead and not DEATH.dead and not DEATH.dying then
+            local frozen = {}
+            for i, f in ipairs(frames) do frozen[i] = f end
+            local net, sent = {}, {}
+            for i, n in ipairs(DEATH.net) do net[i] = n end
+            for i, s in ipairs(DEATH.sent) do sent[i] = s end
+            DEATH.dying = {t = now, when = os.date("%Y-%m-%d %H:%M:%S"), frames = frozen, net = net, sent = sent,
+                weapon = readU8(ped + 0x760), by = entity(readU32(ped + 0x764)),
+                intensity = ffi.cast("float*", ped + 0xD8)[0], hit = entity(readU32(ped + 0xDC))}
+        end
+        DEATH.dead = dead
+    end
+
+    -- From onReceiveRpc / onReceivePacket / onSendRpc; the bitstream's read
+    -- position is put back
+    local function first16(bs, skip)
+        local start = raknetBitStreamGetReadOffset(bs)
+        local ok, a = pcall(function()
+            if skip then raknetBitStreamIgnoreBits(bs, skip) end
+            return raknetBitStreamReadInt16(bs)
+        end)
+        raknetBitStreamSetReadOffset(bs, start)
+        return ok and a or -1
+    end
+
+    function deathRpcIn(id, bs)
+        if not DEATH.on then return end
+        DEATH.net[#DEATH.net + 1] = {t = clock(), rpc = true, id = id, a = first16(bs)}
+        if DEATH.dying then table.insert(DEATH.dying.net, DEATH.net[#DEATH.net]) end
+    end
+
+    function deathPacketIn(id, bs)
+        if not DEATH.on or not DEATH.PACKETS[id] then return end
+        DEATH.net[#DEATH.net + 1] = {t = clock(), id = id, a = first16(bs, 8)}
+    end
+
+    function deathRpcOut(id, bs)
+        if not DEATH.on or (id ~= 53 and id ~= 115) then return end
+        local start = raknetBitStreamGetReadOffset(bs)
+        local ok, text = pcall(function()
+            if id == 53 then
+                local reason, killer = raknetBitStreamReadInt8(bs), raknetBitStreamReadInt16(bs)
+                local okN, name = pcall(sampGetPlayerNickname, killer)
+                return ("death, reason %d (%s), killer %d %s"):format(reason, DEATH.WEAPONS[reason] or "weapon", killer,
+                    killer == 65535 and "(none)" or okN and name or "?"), reason
+            end
+            local take, player = raknetBitStreamReadBool(bs), raknetBitStreamReadInt16(bs)
+            local amount, weapon, part = raknetBitStreamReadFloat(bs), raknetBitStreamReadInt32(bs), raknetBitStreamReadInt32(bs)
+            local okN, name = pcall(sampGetPlayerNickname, player)
+            return ("damage %s player %d %s: %.1f, weapon %d (%s), body part %d"):format(take and "taken from" or "given to",
+                player, okN and name or "?", amount, weapon, DEATH.WEAPONS[weapon] or "weapon", part)
+        end)
+        raknetBitStreamSetReadOffset(bs, start)
+        if not ok then return end
+        local s = {t = clock(), text = text}
+        DEATH.sent[#DEATH.sent + 1] = s
+        if DEATH.dying then
+            table.insert(DEATH.dying.sent, s)
+            if id == 53 then DEATH.dying.reason = text; report() end
+        end
+    end
+
+    function startDeathTrace()
+        DEATH.on, DEATH.frames, DEATH.net, DEATH.sent, DEATH.dying, DEATH.dead = true, {}, {}, {}, nil, false
+        log("[fixes] deathtrace: the last 3 s before a death go to logs\\death.log", "info")
+        return true
+    end
+
+    function stopDeathTrace()
+        if DEATH.dying then report() end
+        DEATH.on = false
+        return true
+    end
+end)()
+
+function onReceivePacket(id, bs)
+    deathPacketIn(id, bs)
+end
+
+function onSendRpc(id, bs)
+    deathRpcOut(id, bs)
+end
+
 function main()
     -- gta_sa.exe is mapped before any script runs: the code patches go in now
     -- (the video mode list, for one, is built long before SA-MP is up).
@@ -3830,6 +4113,7 @@ function main()
     otherFixes[#otherFixes + 1] = {"frame-rate fixes (MTA, FramerateVigilante)", crashFixState("frame")}
     otherFixes[#otherFixes + 1] = {"ped fixes (MTA)", crashFixState("ped")}
     otherFixes[#otherFixes + 1] = {"glass list", crashFixState("glass")}
+    otherFixes[#otherFixes + 1] = {"dithered sky", crashFixState("sky")}
     if options.textcache then                    -- d3dx9_25.dll, which samp.dll loads
         worked = fixTextCache()
         noteFix("text cache", worked, textCacheState and textCacheState.owner)
@@ -3861,12 +4145,14 @@ function main()
     FPS.reportDuplicates()
     reportStartup()
     if options.drift then startDrift() end
+    if options.deathtrace then startDeathTrace() end
 
     local nextFilterCheck = 0
     while true do
         wait(0)
         driftFrame()
         chuteTick()
+        deathFrame()
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
         if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now) end

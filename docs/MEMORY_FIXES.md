@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-30):** `fixes.lua` 0.22.0. It applies the 128 `gamePatches`
+**Status (2026-10-31):** `fixes.lua` 0.23.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -60,7 +60,11 @@ FramerateVigilante's frame-rate fixes that MTA's lack and MTA's two ped
 matrix checks (43, options `sirenfps` and `pedmatrix`, on by default; the
 rest under `vehiclefps` and `swimfps`), the parachute at any fps (44,
 option `chutefps`, on by default) and `/fixes drift`
-(docs/PERF.md). It is published as a
+(docs/PERF.md). Since 0.23.0 the sky is drawn dithered, without colour bands
+(45, option `skygrad`, on by default), and `deathtrace` (46, off by default)
+writes the last 3 s before each death to `logs\death.log`; the Frame Limiter no
+longer resets the device to switch vsync (47, option `novsyncreset`, on by
+default). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
@@ -2256,3 +2260,101 @@ once, with the running scripts.
 as above, the stick's `/= 4.267` untouched, off puts them back, a build with
 one site fewer is left alone. The scan was also run over the code saved from
 the game and over the PC file: 7, 1, 1 and 2 in both.
+
+## 45. The sky's colour bands (skygrad)
+
+`CClouds::RenderSkyPolys` (0x714650) draws the sky as six quads in the
+cloud temp buffer (top colour to bottom colour, bottom colour to the below
+horizon grey) and ends with a jump to `CBrightLights::RenderOutGeometryBuffer`
+(0x7154A8 `E9 A3 CC 00 00`). The colours blend smoothly between vertices,
+but the backbuffer holds 8 bits a channel: a sky whose top and bottom colours
+differ by a few dozen steps shows each step as a line across the screen.
+
+skygrad.asi (FraGae) redraws the sky with a vertex and pixel shader that
+round each pixel up or down against a grain texture. `sky.c` (option
+`skygrad`, on by default) does the same with its own code: the row
+`skydither` takes the jump, and `cf_sky_flush` draws the buffer the game
+built (same quads, same colours) with
+
+- a `vs_2_0` that transforms by `_RwD3D9D3D9ViewTransform` (0xC9BC80) times
+  `_RwD3D9D3D9ProjTransform` (0x8E2458), the matrices the game's own draw
+  uses, and passes the colour as a texture coordinate (full precision);
+- a `ps_2_0` that takes c * 255 to floor(c * 255) + 1 where a per-pixel
+  threshold (interleaved gradient noise of the pixel position, from
+  `RsGlobal`'s size) is under its fraction, else to the floor.
+
+Everything goes through the game's RwD3D9 wrappers (`_rwD3D9SetFVF`
+0x7F9F30, `_rwD3D9SetVertexShader` 0x7F9FB0, `_rwD3D9SetPixelShader`
+0x7F9FF0, `_rwD3D9SetVertexShaderConstant` 0x7FACA0,
+`_rwD3D9DrawIndexedPrimitiveUP` 0x7FA1F0, which flushes RW's render state
+queue), so RW's caches match the device after; the shaders are set back to
+none and the buffer emptied, as the stock flush does. The shaders are made
+with `RwD3D9CreateVertexShader` / `CreatePixelShader` (0x7FAC60, 0x7FACC0)
+on the first sky with a device; if the card refuses them the stock flush
+draws every sky and the log says so once.
+
+skygrad.asi itself replaces the call to `RenderSkyPolys` at 0x53D81D and
+never reaches 0x7154A8, so with it installed fixes' row stays in but does
+nothing.
+
+**Tests.** `crashfix_dll_test.c`, under Wine on a real D3D9 device put where
+RwD3D9 keeps it: a 64x256 sky from (40, 90, 170) to (52, 120, 210) through
+the hook and the game's wrappers. Drawn the stock way every row is one
+value and its mean is up to 0.55 of a step off the gradient; dithered, every
+row's mean is within 0.05 and every pixel within 1. The shaders are made
+once, the buffer is emptied and RwD3D9's shader and FVF caches match the
+device after; with nothing in the buffer the stock flush runs and no
+shaders are made.
+
+## 46. What killed the player (deathtrace)
+
+A diagnostic, not a fix: bots on SA-MP jack a car from the passenger side
+(sprint, then F) and the driver dies as he falls out. The jack itself is the
+game's: `CTaskComplexCarSlowBeDraggedOut` (0x64C8B0) with the jacker's own
+door gives `CTaskSimpleCarFallOut` (`CAR_FALLOUT_LHS`), and nothing on that
+path takes health (the quick jack, `IsCarQuickJackPossible` 0x64EF00,
+always returns false). So the death is damage dealt around it, and which
+damage decides the patch.
+
+With option `deathtrace` on, `deathFrame` keeps 3 s of the player's health
+(ped +540h), armour (+548h), ped state (+530h, 54 die, 55 dead), vehicle
+(+46Dh bit 0, +58Ch), primary task trees (+47Ch intelligence, slots at +4,
+each task's type and subtask through its vtable +10h, +8h) and position;
+`onReceivePacket` and `onReceiveRpc` add the sync packets (200, 203, 206,
+207, 209, 210, 211) with their sender and every RPC with its first word, and
+`onSendRpc` the damage SA-MP reports (115) and the death (53). When the
+player dies the history is frozen with what the game blamed: the last damage
+weapon (+760h) and entity (+764h), the last collision's intensity (+D8h) and
+entity (+DCh), each named as a SA-MP player or vehicle with its driver. The
+report goes to `logs\death.log` when SA-MP sends RPC 53, or 3 s after
+without one, as one time-ordered timeline. Bitstreams are read and put back.
+
+**Tests.** `fixes_test.lua`: a jacked driver: the car drive task, an
+EnterVehicle RPC and a vehicle sync from player 12, on foot with `823>834`
+(be dragged out, car fall out), dead with weapon 49 by that player and a
+532.5 collision with his car, then RPC 115 and RPC 53: one report, in
+order, nothing older than 3 s, the read positions untouched; a second death
+with no RPC 53 is written after 3 s; off, nothing is kept.
+
+## 47. The Frame Limiter's device Reset
+
+`psCameraShowRaster` (0x745240) flips with `rwRASTERFLIPWAITVSYNC` while the
+Frame Limiter is on or a loading screen shows. `_rwD3D9CameraShowRaster`
+(0x7F99B0) then switches the PresentationInterval (0xC9C074; the device is
+made with `D3DPRESENT_INTERVAL_IMMEDIATE`, 0x80000000) to ONE, or back, with
+a full Reset (vtable +40h), and checks nothing: when the Reset fails,
+GetBackBuffer leaves 0xC97C30 NULL and the Release after it reads address 0
+at 0x7F9A3C. Seen 2026-10-31 with ProperShaders under DXVK: switching the
+Frame Limiter on, ProperShaders.log "Device Reset failed (0x8876086C)", then
+the crash. A window resize fails the same way in `_rwD3D9CameraClear`
+(0x7F7C82); that one is not covered here.
+
+Option `novsyncreset` (on by default) writes a jump at 0x7F99E5 (`74 13 81
+F9 00 00 00 80` -> `E9 F6 00 00 00 90 90 90`) to 0x7F9AE0, the flip with the
+interval as it is: the device keeps the interval it was made with and is
+never Reset for vsync. The Frame Limiter still caps the frame rate (33); it
+no longer turns vsync on.
+
+**Tests.** `fixes_test.lua`: on by default over the stock bytes, the jump
+lands on 0x7F9AE0, off puts the switch back, another mod's bytes there are
+left alone.

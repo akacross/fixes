@@ -15,6 +15,8 @@
  */
 #include "../native/crashfix.c"
 #include <stdio.h>
+#define COBJMACROS
+#include <d3d9.h>
 
 static int passed, failed;
 static void ok(int cond, const char *what)
@@ -203,6 +205,143 @@ typedef void (__cdecl *FallOutFn)(void *assoc, void *task);
 
 static int walked;
 static void *__cdecl count_texture(Texture *t, void *data) { (void)t; walked++; return data; }
+
+/* The sky's vertical gradient from `top` to `bottom` (0xRRGGBB) over a
+ * 64x256 backbuffer, through skydither or with the stock fixed-function
+ * draw; -> the backbuffer's pixels, NULL without a device */
+#define SKY_W 64
+#define SKY_H 256
+static IDirect3DDevice9 *sky_device;
+
+static IDirect3DDevice9 *sky_open(void)
+{
+    HMODULE d3d9 = LoadLibraryA("d3d9.dll");
+    IDirect3D9 *(WINAPI *create)(UINT) = d3d9 ? (void *)GetProcAddress(d3d9, "Direct3DCreate9") : NULL;
+    IDirect3D9 *d3d = create ? create(D3D_SDK_VERSION) : NULL;
+    if (!d3d) return NULL;
+    HWND window = CreateWindowA("STATIC", "sky", WS_POPUP, 0, 0, SKY_W, SKY_H, NULL, NULL, NULL, NULL);
+    D3DPRESENT_PARAMETERS pp = {SKY_W, SKY_H, D3DFMT_X8R8G8B8, 1};
+    pp.SwapEffect = D3DSWAPEFFECT_DISCARD, pp.hDeviceWindow = window, pp.Windowed = TRUE;
+    IDirect3DDevice9 *device = NULL;
+    if (FAILED(IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+                                       D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &device))
+        && FAILED(IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+                                          D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &device))) return NULL;
+    return device;
+}
+
+static uint32_t *sky_draw(uint32_t top, uint32_t bottom, int dithered)
+{
+    static uint32_t pixels[SKY_W * SKY_H];
+    IDirect3DDevice9 *dev = sky_device;
+    SkyVertex *v = (SkyVertex *)SKY_VERTICES;
+    uint16_t *ix = (uint16_t *)SKY_INDICES;
+    const float corner[4][2] = {{-1, 1}, {1, 1}, {-1, -1}, {1, -1}};
+    for (int i = 0; i < 4; i++)
+        v[i] = (SkyVertex){corner[i][0], corner[i][1], 0.5f, 0, 0, 0, 0xFF000000 | (i < 2 ? top : bottom), 0, 0};
+    static const uint16_t quad[6] = {0, 2, 1, 1, 2, 3};          /* as SetUpOneSkyPoly */
+    memcpy(ix, quad, sizeof quad);
+    SKY_NVERTICES = 4, SKY_NINDICES = 6;
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, 0, 1, 0);
+    IDirect3DDevice9_BeginScene(dev);
+    if (dithered) ((void (*)(void))hook_of("skydither"))();
+    else {
+        IDirect3DDevice9_SetFVF(dev, SKY_FVF);
+        IDirect3DDevice9_DrawIndexedPrimitiveUP(dev, D3DPT_TRIANGLELIST, 0, 4, 2, ix, D3DFMT_INDEX16, v, sizeof *v);
+        SKY_NVERTICES = 0, SKY_NINDICES = 0;
+    }
+    IDirect3DDevice9_EndScene(dev);
+    IDirect3DSurface9 *back = NULL, *copy = NULL;
+    D3DLOCKED_RECT lr;
+    if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &back))
+        || FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, SKY_W, SKY_H, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM,
+                                                               &copy, NULL))
+        || FAILED(IDirect3DDevice9_GetRenderTargetData(dev, back, copy))
+        || FAILED(IDirect3DSurface9_LockRect(copy, &lr, NULL, D3DLOCK_READONLY))) return NULL;
+    for (int y = 0; y < SKY_H; y++) memcpy(pixels + y * SKY_W, (uint8_t *)lr.pBits + y * lr.Pitch, SKY_W * 4);
+    IDirect3DSurface9_UnlockRect(copy);
+    IDirect3DSurface9_Release(copy);
+    IDirect3DSurface9_Release(back);
+    return pixels;
+}
+
+/* -> how far the rows' means stray from the gradient, at most and the most
+ * pixels of a row off by more than 1 from it; one channel, shift 16/8/0 */
+static void sky_measure(const uint32_t *p, int top, int bottom, int shift, double *mean_err, int *off)
+{
+    *mean_err = 0, *off = 0;
+    for (int y = 0; y < SKY_H; y++) {
+        double want = top + (bottom - top) * ((double)y / SKY_H), sum = 0;   /* D3D9 samples at whole pixels */
+        int n = 0;
+        for (int x = 0; x < SKY_W; x++) {
+            int c = (p[y * SKY_W + x] >> shift) & 0xFF;
+            sum += c;
+            if (fabs(c - want) > 1.0) n++;
+        }
+        if (fabs(sum / SKY_W - want) > *mean_err) *mean_err = fabs(sum / SKY_W - want);
+        if (n > *off) *off = n;
+    }
+}
+
+static void sky_test(void)
+{
+    int k = find("skydither");
+    uint32_t found;
+    int r = CrashFix_Install(k, &found);
+    ok(r >= 1 && *(uint8_t *)0x7154A8 == 0xE9
+       && 0x7154AD + *(uint32_t *)0x7154A9 == (uint32_t)hooks[k].hook, "the tail jump to RenderOutGeometryBuffer is ours");
+    void **device = &SKY_DEVICE, *was = *device;
+    *device = NULL;
+    SKY_NINDICES = 0;
+    ((void (*)(void))hook_of("skydither"))();
+    ok(sky_made == 0, "no sky in the buffer: the stock flush, no shaders made");
+
+    sky_device = sky_open();
+    if (!sky_device) { printf("  skipped: no D3D9 device under this Wine\n"); CrashFix_Uninstall(k); return; }
+    float keep_view[16], keep_proj[16], identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    int32_t keep_size[2];
+    memcpy(keep_view, (void *)0xC9BC80, 64), memcpy(keep_proj, (void *)0x8E2458, 64);
+    memcpy(keep_size, (void *)0xC17044, 8);
+    memcpy((void *)0xC9BC80, identity, 64), memcpy((void *)0x8E2458, identity, 64);
+    *(int32_t *)0xC17044 = SKY_W, *(int32_t *)0xC17048 = SKY_H;
+    *(uint32_t *)0xC9A5EC = 0;                                    /* no render states queued */
+    *device = sky_device;
+
+    const int top[3] = {40, 90, 170}, bottom[3] = {52, 120, 210};
+    const uint32_t t = top[0] << 16 | top[1] << 8 | top[2], b = bottom[0] << 16 | bottom[1] << 8 | bottom[2];
+    uint32_t *stock = sky_draw(t, b, 0);
+    double stock_err[3] = {0};
+    int stock_off[3] = {0};
+    if (stock) for (int c = 0; c < 3; c++) sky_measure(stock, top[c], bottom[c], 16 - 8 * c, &stock_err[c], &stock_off[c]);
+    uint32_t *sky = stock ? sky_draw(t, b, 1) : NULL;
+    ok(sky != NULL && sky_made == 1, "the shaders made on the first sky with a device");
+    if (sky) {
+        double err[3];
+        int off[3], mixed = 0;
+        for (int c = 0; c < 3; c++) sky_measure(sky, top[c], bottom[c], 16 - 8 * c, &err[c], &off[c]);
+        for (int y = 0; y < SKY_H && !mixed; y++)
+            for (int x = 1; x < SKY_W; x++)
+                if ((sky[y * SKY_W + x] >> 16 & 0xFF) != (sky[y * SKY_W] >> 16 & 0xFF)) { mixed = 1; break; }
+        printf("  rows' means off the gradient by at most: stock %.2f %.2f %.2f, dithered %.2f %.2f %.2f\n",
+               stock_err[0], stock_err[1], stock_err[2], err[0], err[1], err[2]);
+        ok(stock_err[0] > 0.3 && stock_err[2] > 0.3, "stock: each row one value, the steps show");
+        ok(err[0] < 0.2 && err[1] < 0.2 && err[2] < 0.2, "dithered: each row's mean follows the gradient");
+        if (off[0] || off[1] || off[2]) printf("  pixels off by more than 1 in a row: %d %d %d\n", off[0], off[1], off[2]);
+        ok(off[0] == 0 && off[1] == 0 && off[2] == 0, "and every pixel is within 1 of it");
+        ok(mixed, "a row mixes two values");
+        ok(SKY_NVERTICES == 0 && SKY_NINDICES == 0, "the buffer emptied, as the stock flush does");
+        ok(*(void **)0x8E2448 == NULL && *(void **)0x8E244C == NULL && *(uint32_t *)0x8E2440 == SKY_FVF,
+           "RwD3D9's shader and FVF caches match the device after");
+    }
+
+    *device = was;
+    memcpy((void *)0xC9BC80, keep_view, 64), memcpy((void *)0x8E2458, keep_proj, 64);
+    memcpy((void *)0xC17044, keep_size, 8);
+    ok(CrashFix_Uninstall(k) == 1 && !memcmp((void *)0x7154A8, "\xE9\xA3\xCC\x00\x00", 5), "out again: the stock jump");
+}
 
 __declspec(dllexport) int __cdecl run(void)
 {
@@ -889,6 +1028,9 @@ __declspec(dllexport) int __cdecl run(void)
            "through the hook: drawn on, or its atomic returned and counted");
         *offset = was;
     }
+
+    printf("== the dithered sky (skydither) on a D3D9 device, through the game's RwD3D9\n");
+    sky_test();
 
     printf("== fixes.lua's fog routine through RwD3D9SetRenderState\n");
     {

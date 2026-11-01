@@ -66,6 +66,11 @@ Game bugs:
   bone shrinks to nothing, or the ped is not drawn (MTA's checks).
 - A car's glass and other see-through parts past 20 draw unsorted: the list
   grows (San Andreas Online's fix).
+- The sky shows lines across its gradient (colour bands): it is drawn
+  dithered, so the steps blend.
+- Switching the Frame Limiter on could crash: the game reset the graphics
+  device to turn vsync on, and a failed reset crashed it. The device is no
+  longer reset for that; the Frame Limiter still caps the frame rate.
 
 Frame rate (each as at 30 fps, the rate the game was tuned for):
 - Off the throttle a car stops dead at high fps and rolls at low: the
@@ -139,6 +144,9 @@ that averted a crash says so.
   session (the text cache, the game's pools, memory). `/fixes drift report`
   compares now with the start, for a frame rate that falls the longer you
   play.
+- `/fixes deathtrace on` writes the last 3 s before each death to
+  `moonloader/logs/death.log`: health, vehicle, what the game blamed, what
+  came in from the network and what SA-MP reported.
 - `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
   session and uses fixes' own, `keep` keeps it and turns `wheelfps` off,
   `remove` explains first, and only `/fixes cleo remove yes` within 30
@@ -172,7 +180,10 @@ that averted a crash says so.
 | `chutefps` | on | the parachute steers as at 30 fps |
 | `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
 | `glasslist` | on | a car's see-through parts drawn in order past 20 |
+| `skygrad` | on | the sky drawn dithered, without colour bands |
+| `novsyncreset` | on | the Frame Limiter and loading screens do not reset the graphics device for vsync |
 | `drift` | off | the frame-rate log above |
+| `deathtrace` | off | the death log above |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |
 | `noflashes`, `nosound`, `novehiclelighting`, `nospecular`, `notargetblip`, `nointeriorreflections`, `nopostfx` | off | each takes that effect away |
 
@@ -205,6 +216,8 @@ against gta_sa.exe's own code, and `position_guard_test.sh` and
   buoyancy fixes follow Swim FPS Fix.asi; the GXT fix follows gxt_crash_fix.
 - The door, burnout, swim and siren frame-rate fixes are from
   FramerateVigilante by [Junior_Djjr](https://github.com/JuniorDjjr) (MIT).
+- The dithered sky follows skygrad.asi by **FraGae**; the code and shaders
+  are fixes' own.
 - The shadow-mesh and IK-chain crash fixes and the glass list are from
   [San Andreas Online](https://github.com/Dryxio/san-andreas-online)
   (GPL-3.0), an MTA fork.

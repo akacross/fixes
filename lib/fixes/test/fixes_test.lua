@@ -46,13 +46,17 @@ end
 local allocs, nextBlock = 0, 0x30000000
 local unmapped                              -- va -> true: VirtualQuery reports it reserved, not committed
 local thiscalls = {}   -- {function, this}
+local thiscallReturns  -- function(fn, this) -> what a thiscall returns, if set
 local fakeFfi = {
     cdef = function() end,
     cast = function(ctype, va)
         va = tonumber(va)
         if ctype == 'uintptr_t' or ctype == 'uint32_t' then return va end
         if ctype:find('__thiscall', 1, true) then
-            return function(this) thiscalls[#thiscalls + 1] = {va, tonumber(this)} end
+            return function(this)
+                thiscalls[#thiscalls + 1] = {va, tonumber(this)}
+                if thiscallReturns then return thiscallReturns(va, tonumber(this)) end
+            end
         end
         if ctype:find('int32_t*', 1, true) then
             return setmetatable({}, {__index = function(_, i) return getU32(va + 4 * i) end,
@@ -863,6 +867,29 @@ do
     env.chuteTick()
     ok(mem[BASE + 0x2000 + 1003 + 6] == 0x00 and mem[BASE + 0x2000 + 1029 + 6] == 0x00,
         'a build without every site: left alone')
+    -- a new PLCHUTE is still "noname" on its first frame
+    load()
+    putU32(SCRIPT + 0x10, BASE); put(SCRIPT + 8, ('noname\0'):byte(1, -1))
+    env.getCurrentCharWeapon = function() return 46 end
+    putU32(0xB7CB84, 1000)
+    local before = #printed
+    env.chuteTick()
+    putU32(0xB7CB84, 3999)
+    env.chuteTick()
+    ok(#printed == before, 'holding the parachute, PLCHUTE not named yet: nothing told')
+    put(SCRIPT + 8, ('plchute'):byte(1, -1))
+    env.chuteTick()
+    put(SCRIPT + 8, ('noname\0'):byte(1, -1))
+    putU32(0xB7CB84, 5000)
+    env.chuteTick()
+    putU32(0xB7CB84, 7999)
+    env.chuteTick()
+    ok(#printed == before, 'named, then gone again: the 3 s start over')
+    putU32(0xB7CB84, 8000)
+    env.chuteTick()
+    ok(#printed == before + 1 and printed[#printed]:find('no PLCHUTE running', 1, true),
+        'missing 3 s: told once: ' .. tostring(printed[#printed]))
+    env.getCurrentCharWeapon = nil
     putU32(0xA8B42C, 0)
 end
 
@@ -1076,6 +1103,25 @@ do
     ok(same(get(SITE, 5), hooked), 'a redirected call is left to its owner')
 end
 
+print('\n== novsyncreset: the Frame Limiter keeps the device, no Reset to switch vsync')
+do
+    local SITE, STOCK = 0x7F99E5, {0x74, 0x13, 0x81, 0xF9, 0x00, 0x00, 0x00, 0x80}
+    local JMP = {0xE9, 0xF6, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90}
+    put(SITE, unpack(STOCK))
+    env.applyGamePatches('early')
+    ok(same(get(SITE, 8), JMP), 'on by default: a jmp over the interval switch')
+    ok(SITE + 5 + 0xF6 == 0x7F9AE0, 'to the flip that uses the interval as it is')
+    env.fixesCommand('novsyncreset off')
+    ok(same(get(SITE, 8), STOCK), 'off: the stock switch back')
+    put(SITE, 0xE9, 0x00, 0x10, 0x00, 0x00)                    -- another mod's jmp there
+    local theirs = get(SITE, 8)
+    env.fixesCommand('novsyncreset on')
+    ok(same(get(SITE, 8), theirs), 'other bytes there are left alone')
+    put(SITE, unpack(STOCK))
+    env.fixesCommand('novsyncreset on')
+    ok(same(get(SITE, 8), JMP), 'and on again over the stock bytes')
+end
+
 print('\n== visual switches: crashes.asi\'s defaults, each its own option')
 for _, p in ipairs(patchList) do
     if p.option and p.option:find('^no') or p.option == 'windowed' or p.option == 'background' then put(p.va, unpack(p.from)) end
@@ -1206,6 +1252,7 @@ do
             {key = 'glass2', name = 'vehicle glass', va = 0x734092, result = 1, option = 'glasslist'},
             {key = 'pedskin', name = 'ped skin', va = 0x7335B0, result = 1, option = 'pedmatrix'},
             {key = 'swimpitch1', name = 'dive pitch', va = 0x68A6BD, result = 1, option = 'swimfps'},
+            {key = 'skydither', name = 'sky', va = 0x7154A8, result = 1, option = 'skygrad'},
             {key = 'samp', name = 'SA-MP helper', va = 0, result = 1},
         },
         installs = {}, uninstalls = {}, shadows = nil, sampSite = nil,
@@ -1235,10 +1282,12 @@ do
     fakeFfi.string = function(p, n) if type(p) == 'string' then return p end return oldString(p, n) end
 
     local from = #printed
-    ok(env.fixCrashes('game') == 5, 'misc1, heli1, glass2, pedskin and swimpitch1 installed')
-    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4 heli1 glass2 pedskin swimpitch1',
+    ok(env.fixCrashes('game') == 6, 'misc1, heli1, glass2, pedskin, swimpitch1 and skydither installed')
+    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4 heli1 glass2 pedskin swimpitch1 skydither',
         'misc1, 2 and 4 tried; misc19 and misc12 wait for their options, samp for SA-MP; heli1 under vehiclefps, glass2 glasslist,'
-        .. ' pedskin pedmatrix, swimpitch1 swimfps')
+        .. ' pedskin pedmatrix, swimpitch1 swimfps, skydither skygrad')
+    ok(lineAfter(from, 'skydither') and lineAfter(from, 'skydither'):find('0x7154A8 sky fix skydither (sky): hooked', 1, true),
+        'the sky fix says so: ' .. tostring(lineAfter(from, 'skydither')))
     ok(lineAfter(from, 'pedskin') and lineAfter(from, 'pedskin'):find('0x7335B0 ped fix pedskin (ped skin): hooked', 1, true),
         'a ped fix says so: ' .. tostring(lineAfter(from, 'pedskin')))
     ok(lineAfter(from, 'heli1') and lineAfter(from, 'heli1'):find('0x6C4F29 frame-rate fix heli1 (heli takeoff): hooked', 1, true),
@@ -1287,6 +1336,10 @@ do
     tick(3000)
     ok(#printed == n0 + 5 and printed[#printed]:find("ped fix pedskin (ped skin) caught a ped's broken bones (3 so far)", 1, true)
         and not printed[#printed]:find('averted', 1, true), 'and a ped left out: ' .. tostring(printed[#printed]))
+    cf.hooks[10].averted = 1
+    tick(4000)
+    ok(#printed == n0 + 6 and printed[#printed]:find('sky fix skydither: the shaders could not be made; the stock sky is drawn', 1, true),
+        'shaders the card refused: the stock sky, said: ' .. tostring(printed[#printed]))
 
     print('\n== crash fixes: options')
     local function installedSince(mark, key)
@@ -1322,6 +1375,12 @@ do
     mark = #cf.installs
     env.fixesCommand('pedmatrix on')
     ok(installedSince(mark, 'pedskin'), 'and on puts them back')
+    env.fixesCommand('skygrad off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'skydither' and env.crashFixState('sky') == 'off (option skygrad)',
+        '/fixes skygrad off takes the sky fix out: ' .. env.crashFixState('sky'))
+    mark = #cf.installs
+    env.fixesCommand('skygrad on')
+    ok(installedSince(mark, 'skydither') and env.crashFixState('sky') == 'in place', 'and on puts it back')
     env.fixesCommand('swimfps off')
     ok(cf.uninstalls[#cf.uninstalls] == 'swimpitch1', "/fixes swimfps off takes its DLL rows out with fixes.lua's")
     mark = #cf.installs
@@ -1350,6 +1409,10 @@ do
     for i = fromChat + 1, #chat do if chat[i]:find('glass list (', 1, true) then glassLine = chat[i] end end
     ok(glassLine and glassLine:find('(1 sites): 1 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true)
         and env.crashFixState('glass') == 'in place', 'and the glass list: ' .. tostring(glassLine))
+    local skyLine
+    for i = fromChat + 1, #chat do if chat[i]:find('sky fix (', 1, true) then skyLine = chat[i] end end
+    ok(skyLine and skyLine:find('(1 sites): 1 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true),
+        'and the sky fix: ' .. tostring(skyLine))
     fromChat = #chat
     env.fixesCommand('')
     local status
@@ -1358,6 +1421,96 @@ do
         'the glass list\'s growth and the peds left out are not counted as crashes: ' .. tostring(status))
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString
+end
+
+--------------------------------------------------------------------------------
+-- 0.23.0: /fixes deathtrace, the last 3 s before a death
+--------------------------------------------------------------------------------
+print('\n== deathtrace: a jack, a fall-out and a death, with what came in and what SA-MP sent')
+do
+    local D = upvalue(env.deathFrame, 'DEATH')
+    local DR = upvalue(env.driftFrame, 'DRIFT')
+    local now, written = 0, {}
+    DR.clock = function() return now end
+    D.write = function(lines) for _, l in ipairs(lines) do written[#written + 1] = l end end
+    local PED, BOT, CAR, CAR2, INTEL, T1, T2, VT = 0x41000000, 0x41001000, 0x42000000, 0x42001000, 0x43000000,
+        0x44000000, 0x44000100, 0x45000000
+    env.PLAYER_PED = 1
+    env.getCharPointer = function() return PED end
+    env.getCharCoordinates = function() return 1500.0, -1600.0, 13.5 end
+    env.getCharSpeed = function() return 0.25 end
+    env.getCharPointerHandle = function(p) return p end
+    env.getVehiclePointerHandle = function(p) return p end
+    env.sampGetPlayerIdByCharHandle = function(h) if h == BOT then return true, 12 end return false end
+    env.sampGetVehicleIdByCarHandle = function(h) return true, h == CAR and 1 or 2 end
+    env.sampGetPlayerNickname = function(id) return 'Bot_' .. id end
+    env.raknetBitStreamReadBool = function(bs) return env.raknetBitStreamReadInt8(bs) ~= 0 end
+    local types, subs = {[T1] = 709}, {}
+    putU32(VT + 16, 0x50000010); putU32(VT + 8, 0x50000008)
+    putU32(T1, VT); putU32(T2, VT)
+    thiscallReturns = function(fn, this)
+        if fn == 0x50000010 then return types[this] end
+        if fn == 0x50000008 then return subs[this] or 0 end
+    end
+    putU32(PED + 0x47C, INTEL); putU32(INTEL + 4, T1)
+    mem[PED + 0x540], mem[PED + 0x548] = 77.0, 0.0
+    putU32(PED + 0x530, 50); mem[PED + 0x46D] = 1; putU32(PED + 0x58C, CAR)
+    mem[CAR + 0x36], mem[CAR + 0x22] = 2, 560; putU32(CAR + 0x460, PED)
+    mem[BOT + 0x36], mem[BOT + 0x22] = 3, 50
+    mem[CAR2 + 0x36], mem[CAR2 + 0x22] = 2, 411; putU32(CAR2 + 0x460, BOT)
+
+    env.fixesCommand('deathtrace on')
+    now = -4000; env.deathFrame()
+    now = 0; mem[PED + 0x540] = 100.0; env.deathFrame()
+    local sync = newBs(); w8(sync, 200); w16(sync, 12); w32(sync, 0)
+    now = 100; env.onReceivePacket(200, sync)
+    local enter = newBs(); w16(enter, 12); w16(enter, 1); w8(enter, 1)
+    now = 150; env.onReceiveRpc(26, enter)
+    ok(sync.rd == 0 and enter.rd == 0, 'the packet and the RPC are read where SA-MP will read them')
+    now = 200; env.deathFrame()
+    now = 500; mem[PED + 0x46D] = 0; putU32(PED + 0x530, 1); putU32(INTEL + 4, T1); types[T1] = 823; subs[T1] = T2; types[T2] = 834
+    env.deathFrame()
+    now = 900; mem[PED + 0x540] = 0.0; putU32(PED + 0x530, 54)
+    mem[PED + 0x760] = 49; putU32(PED + 0x764, BOT); mem[PED + 0xD8] = 532.5; putU32(PED + 0xDC, CAR2)
+    env.deathFrame()
+    local dmg = newBs(); w8(dmg, 1); w16(dmg, 12)
+    local fbits = require('ffi').new('union { float f; uint32_t u; }'); fbits.f = 46.5; w32(dmg, fbits.u); w32(dmg, 49); w32(dmg, 3)
+    now = 950; env.onSendRpc(115, dmg)
+    ok(#written == 0, 'dying: nothing written before SA-MP reports the death')
+    local death = newBs(); w8(death, 49); w16(death, 12)
+    local before = #printed
+    now = 1400; env.onSendRpc(53, death)
+    ok(dmg.rd == 0 and death.rd == 0, 'what SA-MP sends is read where it will be sent from')
+    local all = table.concat(written, '\n')
+    ok(written[1] and written[1]:find('died (death, reason 49 (vehicle), killer 12 Bot_12)', 1, true),
+        'the death as SA-MP reported it: ' .. tostring(written[1]))
+    ok(all:find('blamed by the game: weapon 49 (vehicle) by player 12 Bot_12; last collision 532.5 with vehicle 2 '
+        .. '(model 411, driver player 12 Bot_12)', 1, true), 'what the game blamed: ' .. tostring(written[2]))
+    ok(all:find('+0.05 s SA-MP sent: damage taken from player 12 Bot_12: 46.5, weapon 49 (vehicle), body part 3', 1, true),
+        'the damage SA-MP reported: ' .. all)
+    ok(all:find('-0.90 s health 100.0 armour 0.0; in vehicle 1 (model 560, driver you); state 50; tasks 0:709 car drive', 1, true)
+        and all:find('-0.40 s on foot; state 1; tasks 0:823 be dragged out>834 car fall out', 1, true)
+        and all:find('+0.00 s health 0.0 armour 0.0; state 54', 1, true), 'health, vehicle, state and tasks as they changed')
+    ok(not all:find('77.0', 1, true), 'nothing older than 3 s')
+    ok(all:find('-0.75 s received RPC 26 EnterVehicle (first word 12)', 1, true)
+        and all:find('from -0.80 s player 12 Bot_12: vehicle sync x1', 1, true), 'what came in, by player: ' .. all)
+    ok(#printed == before + 1 and printed[#printed]:find('deathtrace: died (death, reason 49', 1, true)
+        and printed[#printed]:find('logs\\death.log', 1, true), 'and one line in the log: ' .. tostring(printed[#printed]))
+    local n = #written
+    now = 1500; env.deathFrame()
+    now = 5000; env.deathFrame()
+    ok(#written == n, 'still dead: one report')
+    now = 6000; mem[PED + 0x540] = 100.0; putU32(PED + 0x530, 1); env.deathFrame()
+    now = 7000; mem[PED + 0x540] = 0.0; env.deathFrame()
+    now = 10100; env.deathFrame()
+    ok(#written > n and written[n + 1]:find('died (SA-MP sent no death report)', 1, true),
+        'alive and dead again, no RPC 53: written after 3 s: ' .. tostring(written[n + 1]))
+    env.fixesCommand('deathtrace off')
+    n = #written
+    now = 11000; mem[PED + 0x540] = 100.0; env.deathFrame(); mem[PED + 0x540] = 0.0; now = 11100; env.deathFrame()
+    now = 20000; env.deathFrame()
+    ok(#written == n, 'off: nothing kept or written')
+    thiscallReturns = nil
 end
 
 --------------------------------------------------------------------------------
@@ -1400,7 +1553,7 @@ do
     local from = #chat
     env.fixesCommand('drift report')
     local report = table.concat(chat, ' ', from + 1)
-    ok(report:find('250 -> ', 1, true) and report:find('grew most: objects 3 -> 6', 1, true) and report:find('fell: fx 37 -> 30', 1, true),
+    ok(report:find('250 -> ', 1, true) and report:find('grew most: objects 3 -> 6', 1, true) and report:find('fell: ', 1, true) and report:find('fx 37 -> 30', 1, true),
         'the report: fps then, now, what grew and fell: ' .. report)
     for _ = 1, 10 do now = now + 5; env.driftFrame() end
     env.fixesCommand('textcache off')
