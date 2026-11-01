@@ -131,8 +131,8 @@ game.
 
 ## Use
 
-It works on its own; the log is `moonloader/moonloader.log` (lines start with
-`[fixes]`). Every patch and hook logs a line as it goes in, and a crash fix
+It works on its own; the log is `moonloader/logs/fixes.log`, written anew
+at every launch. Every patch and hook logs a line as it goes in, and a crash fix
 that averted a crash says so.
 
 - `/fixes` lists the options and what each fix is doing.

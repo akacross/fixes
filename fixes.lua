@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.23.0")
+script_version("0.24.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -9,14 +9,26 @@ local timed do
     timed = (ok and type(perf) == 'table' and perf.timed) or function(_, fn, ...) return fn(...) end
 end
 
--- akacross.log (logs\akacross.log, levelled by wording) when the shared runtime
--- is installed, else moonloader.log.
+-- logs\fixes.log, started over at every launch: through akacross.log
+-- (levelled by wording) when the shared runtime is installed, else plain lines.
 local logLine, logScope do
+    local path = getWorkingDirectory() .. "\\logs\\fixes.log"
     local ok, logM = pcall(require, 'akacross.log')
     local okSetup, lg = false, nil
-    if ok and type(logM) == 'table' and logM.setup then okSetup, lg = pcall(logM.setup, {name = 'fixes'}) end
+    if ok and type(logM) == 'table' and logM.setup then okSetup, lg = pcall(logM.setup, {name = 'fixes', file = path, keepSessions = 0}) end
     logLine = okSetup and type(lg) == 'table' and lg.line or nil
     logScope = okSetup and type(lg) == 'table' and type(lg.scope) == 'function' and lg.scope() or nil
+    if not logLine then
+        local f
+        logLine = function(text)
+            if f == nil then
+                f = false
+                pcall(createDirectory, getWorkingDirectory() .. "\\logs")
+                f = io.open(path, "wb") or false
+            end
+            if not (f and pcall(function() f:write(os.date("%H:%M:%S  "), text, "\r\n"); f:flush() end)) then print(text) end
+        end
+    end
 end
 -- log(text[, level]): `level` ('info', 'warn') where the wording would mislead
 -- ("0 refused" is not a warning).
@@ -114,7 +126,7 @@ function sigscanReady()
     if not sigscanOk then return false end
     if sigscanStarted then return true end
     sigscanStarted = pcall(function()
-        -- no logfile: its lines go to logs\akacross.log (area sigscan)
+        -- no logfile: its lines go to logs\fixes.log (area sigscan)
         sigscan.init{cache_file = "config/signature_cache.lua"}
     end)
     if not sigscanStarted then
@@ -781,9 +793,10 @@ local MTA_PATCHES = {     -- va, name, stock, theirs
     {0x82C5CC, "s0beitAntiCrash", "83 EC", "C9 C3"},
 }
 
-local SAMP_WRITES = {          -- what samp.dll R5 writes at a site of these
-    [0x550FBA] = hexBytes("88 13"),          -- 5000
-    [0x54F3A1] = hexBytes("70 17 00 00"),    -- 6000 matrices, more than MTA's 1800
+local SAMP_WRITES = {          -- what samp.dll writes at a site of these: R5, DL
+    [0x550F82] = {hexBytes("50 34 03 00")},                        -- DL 210000
+    [0x550FBA] = {hexBytes("88 13"), hexBytes("50 C3")},           -- 5000, 50000
+    [0x54F3A1] = {hexBytes("70 17 00 00"), hexBytes("20 4E 00 00")},   -- 6000, 20000 matrices; MTA's 1800
 }
 local MTA_OWNERS = {           -- another mod's bytes at a site of these
     [0x7469A0] = {bytes = hexBytes("30 C0 90 90"), by = "SilentPatch (xor al,al: the same non-exclusive mouse)"},
@@ -806,7 +819,9 @@ for _, m in ipairs(MTA_PATCHES) do
             if bytesEqual(found, from) then return nil end           -- stock: several start with the call they NOP
             local owner = hookOwner(va, found)
             if owner then return owner end
-            if SAMP_WRITES[va] and bytesEqual(found, SAMP_WRITES[va]) then return "samp.dll (it writes this site itself)" end
+            for _, b in ipairs(SAMP_WRITES[va] or {}) do
+                if bytesEqual(found, b) then return "samp.dll (it writes this site itself)" end
+            end
             local mod = MTA_OWNERS[va]
             if mod and bytesEqual(found, mod.bytes) then return mod.by end
             if runtime and not bytesEqual(found, hexBytes(m[4])) then return runtime.by end
@@ -3457,7 +3472,8 @@ end
 -- the game's pools, streaming memory, visible entities, effect systems, SA-MP's
 -- 3D labels and textdraws, the process's memory and handles. /fixes drift
 -- report compares the newest line with the session's first. Option "drift",
--- off by default; on, it runs from each start.
+-- off by default; on, it runs from each start. lost and resets count the
+-- device's losses and resets since the start, each a line of its own too.
 pcall(ffi.cdef, [[ int fx_qpc(int64_t* count) __asm__("QueryPerformanceCounter"); ]])
 pcall(ffi.cdef, [[ int fx_qpf(int64_t* frequency) __asm__("QueryPerformanceFrequency"); ]])
 pcall(ffi.cdef, [[
@@ -3480,7 +3496,7 @@ local DRIFT = {
              {"dummies", 0xB744A0}, {"colmodels", 0xB744A4}, {"tasks", 0xB744A8}, {"events", 0xB744AC},
              {"intelligence", 0xB744C0}, {"ptrsingle", 0xB74484}, {"ptrdouble", 0xB74488},
              {"entryinfo", 0xB7448C}, {"txds", 0xC8800C}},
-    on = false, times = {}, n = 0,
+    on = false, times = {}, n = 0, lost = 0, resets = 0,
 }
 
 -- -> milliseconds, from QueryPerformanceCounter
@@ -3560,6 +3576,7 @@ function DRIFT.counts()
         if ffi.C.fx_memory_status(s) ~= 0 then c.addressMB = tonumber(s.totalVirtual - s.availVirtual) / 1048576 end
     end)
     c.luaKB = collectgarbage("count")
+    c.lost, c.resets = DRIFT.lost, DRIFT.resets
     return c
 end
 
@@ -3571,7 +3588,7 @@ DRIFT.FIELDS = {
     {"ptrdouble", "pool"}, {"entryinfo", "pool"}, {"txds", "pool"},
     {"streamMB", "%.0f"}, {"visible", "%d"}, {"lods", "%d"}, {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
     {"refs", "%d"}, {"workingMB", "%.0f"}, {"privateMB", "%.0f"}, {"addressMB", "%.0f"}, {"handles", "%d"},
-    {"gdi", "%d"}, {"user", "%d"}, {"luaKB", "%.0f"},
+    {"gdi", "%d"}, {"user", "%d"}, {"luaKB", "%.0f"}, {"lost", "%d"}, {"resets", "%d"},
 }
 
 -- The frames since the last line and the counts now -> a sample
@@ -3657,6 +3674,15 @@ function driftNote(text)
     DRIFT.write(("%s %s (fps since the last line: %.0f)"):format(os.date("%H:%M:%S"), text,
         total > 0 and n * 1000 / total or 0))
 end
+
+addEventHandler("onD3DDeviceLost", function()
+    DRIFT.lost = DRIFT.lost + 1
+    driftNote(("device lost (%d)"):format(DRIFT.lost))
+end)
+addEventHandler("onD3DDeviceReset", function()
+    DRIFT.resets = DRIFT.resets + 1
+    driftNote(("device reset (%d)"):format(DRIFT.resets))
+end)
 
 -- -> lines comparing the first sample with the newest
 function driftReport()
@@ -3837,6 +3863,18 @@ end
 
     local function clock() return DRIFT.clock() end
 
+    -- A player's name, asked of SAMPFUNCS only for an id in the pool that is
+    -- connected or yours: for any other (65535, "no player", in the damage
+    -- RPC of a fall or a crash) it hands MoonLoader a null and the game faults
+    local function nick(id)
+        if type(id) ~= "number" or id < 0 or id >= 1004 then return id == 65535 and "(none)" or "?" end
+        local okC, connected = pcall(sampIsPlayerConnected, id)
+        local okL, mine, myId = pcall(sampGetPlayerIdByCharHandle, PLAYER_PED)
+        if not (okC and connected) and not (okL and mine and myId == id) then return "?" end
+        local okN, name = pcall(sampGetPlayerNickname, id)
+        return okN and name or "?"
+    end
+
     -- What an entity is: "player 12 Name", "vehicle 412 (model 560, driver player 3 Name)", ...
     local function entity(p)
         if not p or p == 0 or not readable(p, 0x48) then return "nothing" end
@@ -3848,8 +3886,7 @@ end
             local okM, me = pcall(getCharPointer, PLAYER_PED)
             if okM and ped == me then return "you" end
             if okI and found then
-                local okN, name = pcall(sampGetPlayerNickname, id)
-                return ("player %d %s"):format(id, okN and name or "?")
+                return ("player %d %s"):format(id, nick(id))
             end
             return ("a ped (model %d)"):format(ffi.cast("uint16_t*", ped + 0x22)[0])
         end
@@ -3940,8 +3977,7 @@ end
         for _, e in ipairs(timeline) do lines[#lines + 1] = at(e[1]) .. " " .. e[2] end
         for _, key in ipairs(order) do
             local c = counts[key]
-            local okN, name = pcall(sampGetPlayerNickname, c.a)
-            lines[#lines + 1] = ("from %s player %d %s: %s x%d"):format(at(c.first), c.a, okN and name or "?",
+            lines[#lines + 1] = ("from %s player %d %s: %s x%d"):format(at(c.first), c.a, nick(c.a),
                 DEATH.PACKETS[c.id] or ("packet " .. c.id), c.n)
         end
         DEATH.write(lines)
@@ -4012,15 +4048,13 @@ end
         local ok, text = pcall(function()
             if id == 53 then
                 local reason, killer = raknetBitStreamReadInt8(bs), raknetBitStreamReadInt16(bs)
-                local okN, name = pcall(sampGetPlayerNickname, killer)
                 return ("death, reason %d (%s), killer %d %s"):format(reason, DEATH.WEAPONS[reason] or "weapon", killer,
-                    killer == 65535 and "(none)" or okN and name or "?"), reason
+                    nick(killer)), reason
             end
             local take, player = raknetBitStreamReadBool(bs), raknetBitStreamReadInt16(bs)
             local amount, weapon, part = raknetBitStreamReadFloat(bs), raknetBitStreamReadInt32(bs), raknetBitStreamReadInt32(bs)
-            local okN, name = pcall(sampGetPlayerNickname, player)
             return ("damage %s player %d %s: %.1f, weapon %d (%s), body part %d"):format(take and "taken from" or "given to",
-                player, okN and name or "?", amount, weapon, DEATH.WEAPONS[weapon] or "weapon", part)
+                player, nick(player), amount, weapon, DEATH.WEAPONS[weapon] or "weapon", part)
         end)
         raknetBitStreamSetReadOffset(bs, start)
         if not ok then return end

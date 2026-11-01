@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-10-31):** `fixes.lua` 0.23.0. It applies the 128 `gamePatches`
+**Status (2026-11-01):** `fixes.lua` 0.24.0. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -31,7 +31,7 @@ it carries gtasa_crashfix (crashes.asi): MTA's crash-fix hooks in
 `lib/fixes/crashfix.dll` (30, option `crashfix`), MTA's 73 multiplayer patches
 (31, option `mtapatches`) and its visual and display switches (32). The samp.dll side resolves
 each site by signature first (`lib/signature_scanner`, cache in
-`config/signature_cache.lua`, log in `logs/akacross.log`, area sigscan) and
+`config/signature_cache.lua`, log in `logs/fixes.log`, area sigscan) and
 falls back to a per-build table for 0.3.DL-R1, 0.3.7-R1, R3-1 and R5. It moves
 SA-MP's removed-building table (19), disables the F1 help dialog and fixes the
 smoking animation (`SmokeAnimTime`/`SmokeAnimBlend`). The radar and
@@ -67,13 +67,16 @@ longer resets the device to switch vsync (47, option `novsyncreset`, on by
 default). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
-since 0.10.1 its lines go to `akacross.log` under the name `fixes` (levelled
-by wording; only warnings and errors also reach moonloader.log; since 0.10.2
+since 0.10.1 its lines go through `akacross.log` under the name `fixes`, to
+`logs/fixes.log` of their own (started over at every launch, nothing kept;
+levelled by wording; only warnings and errors also reach
+moonloader.log; since 0.10.2
 the patch summaries and the F1 line are info unless something was refused or
 a write did not stick), and
 `akacross.perf` times its waits, with the reference-pool tick as the row
 `thread:fixes/references`. Without the runtime, as in the public repo, it
-prints everything to moonloader.log. Patches stay applied on unload by design.
+writes plain timed lines to `logs/fixes.log`, started over at every launch
+(moonloader.log only if the file cannot be opened). Patches stay applied on unload by design.
 See [MODS.md](MODS.md).
 
 ## Phases
@@ -1634,7 +1637,9 @@ Every `from` is gta_sa.exe 1.0 US's own bytes. SA-MP R5 writes a few of
 these sites itself: where it wrote the same value they land as already set;
 its satchel hook (0x738F3A) and its bigger values at 0x550FBA (5000) and
 0x54F3A1 (6000 matrices, where MTA's would shrink it to 1800) are SA-MP's
-and stand down. SA-MP's satchel hook is a `jmp [ptr]` (FF 25), so `hookOwner`
+and stand down. 0.3.DL writes its own at samp.dll+0xAA208..0xAA2D9:
+210000 at 0x550F82, 50000 at 0x550FBA, 20000 matrices at 0x54F3A1; they
+stand down the same way. SA-MP's satchel hook is a `jmp [ptr]` (FF 25), so `hookOwner`
 reads indirect jumps and calls too. Other mods' (the first in-game run,
 2026-10-25): SilentPatch writes the same non-exclusive mouse at 0x7469A0
 (`xor al,al` for MTA's `mov al,0`) and stands down, named. 0x8A5A84 is

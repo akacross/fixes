@@ -84,7 +84,7 @@ local fakeFfi = {
         return block
     end},
 }
-local files, chat, commands, printed = {}, {}, {}, {}
+local files, chat, commands, printed, events = {}, {}, {}, {}, {}
 local loadedModules = {}   -- name -> handle, for getModuleHandle
 local sampBase = 0
 local env = setmetatable({
@@ -96,6 +96,7 @@ local env = setmetatable({
     end,
     script_name = function() end, script_version = function() end,
     getWorkingDirectory = function() return 'ML' end,
+    addEventHandler = function(name, f) events[name] = f end,
     getModuleHandle = function(name)
         if name == 'samp.dll' then return sampBase end
         return loadedModules[name] or 0
@@ -103,6 +104,13 @@ local env = setmetatable({
     decodeJson = function(t) return files.decoded end,
     encodeJson = function(t) files.saved = {plates = t.plates}; return 'json' end,
     io = {open = function(path, mode)
+        if path == 'ML\\logs\\fixes.log' then           -- fixes' log: its lines, as print's
+            files.logOpened = mode
+            return {write = function(_, time, text, eol)
+                files.logTime, files.logEol = time, eol
+                printed[#printed + 1] = text
+            end, flush = function() end}
+        end
         if mode == 'w' then return {write = function() end, close = function() end} end
         if files.decoded then return {read = function() return 'json' end, close = function() end} end
         return nil
@@ -1037,6 +1045,19 @@ ok(findPrinted('placeableMatrixArraySize') and findPrinted('placeableMatrixArray
 ok(mem[0x738F3A] == 0xE9 and findPrinted('satchelCrashFix'):find('owned by code at 0x', 1, true),
     'SA-MP\'s satchel hook is left: ' .. tostring(findPrinted('satchelCrashFix')))
 
+print('\n== MTA patches: SA-MP 0.3.DL\'s own limits are its')
+stockMta()
+put(0x550F82, 0x50, 0x34, 0x03, 0x00)                      -- DL's 210000
+put(0x550FBA, 0x50, 0xC3)                                  -- DL's 50000
+put(0x54F3A1, 0x20, 0x4E, 0x00, 0x00)                      -- DL's 20000 matrices
+env.applyGamePatches('late')
+ok(same(get(0x550F82, 4), {0x50, 0x34, 0x03, 0x00}) and same(get(0x550FBA, 2), {0x50, 0xC3})
+    and same(get(0x54F3A1, 4), {0x20, 0x4E, 0x00, 0x00}), 'DL\'s three values are left')
+for _, n in ipairs({'value_550F82_8000', 'patch_550FBA', 'placeableMatrixArraySize'}) do
+    local line = findPrinted(n)
+    ok(line and line:find('owned by samp.dll', 1, true) and not line:find('refusing', 1, true), 'named, not refused: ' .. tostring(line))
+end
+
 print('\n== the owners the first in-game run found (2026-10-25): named, not refused')
 stockMta()
 put(0x738F3A, 0xFF, 0x25, 0x00, 0x00, 0x50, 0x40); putU32(0x40500000, 0x13372000)   -- SA-MP's jmp [ptr]
@@ -1443,7 +1464,12 @@ do
     env.getVehiclePointerHandle = function(p) return p end
     env.sampGetPlayerIdByCharHandle = function(h) if h == BOT then return true, 12 end return false end
     env.sampGetVehicleIdByCarHandle = function(h) return true, h == CAR and 1 or 2 end
-    env.sampGetPlayerNickname = function(id) return 'Bot_' .. id end
+    local unnamed = {}             -- ids SAMPFUNCS has no name for: MoonLoader faults on them
+    env.sampIsPlayerConnected = function(id) return id == 12 end
+    env.sampGetPlayerNickname = function(id)
+        if id ~= 12 then unnamed[#unnamed + 1] = id end
+        return 'Bot_' .. id
+    end
     env.raknetBitStreamReadBool = function(bs) return env.raknetBitStreamReadInt8(bs) ~= 0 end
     local types, subs = {[T1] = 709}, {}
     putU32(VT + 16, 0x50000010); putU32(VT + 8, 0x50000008)
@@ -1501,10 +1527,18 @@ do
     now = 5000; env.deathFrame()
     ok(#written == n, 'still dead: one report')
     now = 6000; mem[PED + 0x540] = 100.0; putU32(PED + 0x530, 1); env.deathFrame()
+    local fall = newBs(); w8(fall, 1); w16(fall, 65535); fbits.f = 12.0; w32(fall, fbits.u); w32(fall, 54); w32(fall, 3)
+    now = 6500; env.onSendRpc(115, fall)
+    local gone = newBs(); w8(gone, 200); w16(gone, 40); w32(gone, 0)
+    now = 6600; env.onReceivePacket(200, gone)
     now = 7000; mem[PED + 0x540] = 0.0; env.deathFrame()
     now = 10100; env.deathFrame()
     ok(#written > n and written[n + 1]:find('died (SA-MP sent no death report)', 1, true),
         'alive and dead again, no RPC 53: written after 3 s: ' .. tostring(written[n + 1]))
+    all = table.concat(written, '\n', n + 1)
+    ok(all:find('damage taken from player 65535 (none): 12.0, weapon 54', 1, true)
+        and all:find('player 40 ?: vehicle sync x1', 1, true), 'a fall\'s damage (player 65535) and a player gone: ' .. all)
+    ok(#unnamed == 0, 'SAMPFUNCS is never asked for a name it has none for: ' .. table.concat(unnamed, ', '))
     env.fixesCommand('deathtrace off')
     n = #written
     now = 11000; mem[PED + 0x540] = 100.0; env.deathFrame(); mem[PED + 0x540] = 0.0; now = 11100; env.deathFrame()
@@ -1560,6 +1594,11 @@ do
     ok(lines[#lines]:find('/fixes textcache off (fps since the last line: 200)', 1, true),
         'an option switched: its own line, with the frame rate before it: ' .. lines[#lines])
     env.fixesCommand('textcache on')
+    events.onD3DDeviceLost(); events.onD3DDeviceReset()
+    ok(lines[#lines - 1]:find('device lost (1)', 1, true) and lines[#lines]:find('device reset (1)', 1, true),
+        'a device loss and reset: a line each: ' .. lines[#lines])
+    while not lines[#lines]:find('resets=', 1, true) do now = now + 5; env.driftFrame() end
+    ok(lines[#lines]:find('lost=1 resets=1', 1, true), 'and counted on every line after: ' .. lines[#lines])
     env.fixesCommand('drift off')
     ok(lines[#lines]:find('stopped', 1, true), 'off: a last line')
     local n = #lines
@@ -2287,6 +2326,10 @@ for i = 1, #arg do
         print(('\nwrote the store (%d bytes) to %s'):format(#bytes, arg[i + 1]))
     end
 end
+
+print('\n== the log: logs\\fixes.log, a timed line each')
+ok(files.logOpened == 'wb' and #printed > 0, 'opened once, from the first line: ' .. tostring(files.logOpened) .. ', ' .. #printed .. ' lines')
+ok(tostring(files.logTime):match('^%d%d:%d%d:%d%d  $') and files.logEol == '\r\n', 'the time first, CRLF last')
 
 print(('\nfixes: %d passed, %d failed'):format(passed, failed))
 os.exit(failed == 0 and 0 or 1)
