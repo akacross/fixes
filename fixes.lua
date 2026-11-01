@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.24.0")
+script_version("0.24.1")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -2900,6 +2900,9 @@ local function crashFixTick(now)
             elseif crashFixKind(e.option) == "ped" then
                 log(string.format("[fixes] ped fix %s (%s) caught a ped's broken bones (%d so far)",
                     ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
+            elseif ffi.string(crashFixLib.CrashFix_Key(i)) == "camnan" then
+                log(string.format("[fixes] crash fix camnan (%s): the camera had NaN in it and was set up again (%d so far)",
+                    e.name, n), "warn")
             else
                 log(string.format("[fixes] crash fix %s (%s) averted a crash (%d so far)",
                     ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "warn")

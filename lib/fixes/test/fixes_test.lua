@@ -1274,6 +1274,7 @@ do
             {key = 'pedskin', name = 'ped skin', va = 0x7335B0, result = 1, option = 'pedmatrix'},
             {key = 'swimpitch1', name = 'dive pitch', va = 0x68A6BD, result = 1, option = 'swimfps'},
             {key = 'skydither', name = 'sky', va = 0x7154A8, result = 1, option = 'skygrad'},
+            {key = 'camnan', name = 'NaN camera', va = 0x526FC0, result = 1},
             {key = 'samp', name = 'SA-MP helper', va = 0, result = 1},
         },
         installs = {}, uninstalls = {}, shadows = nil, sampSite = nil,
@@ -1303,8 +1304,8 @@ do
     fakeFfi.string = function(p, n) if type(p) == 'string' then return p end return oldString(p, n) end
 
     local from = #printed
-    ok(env.fixCrashes('game') == 6, 'misc1, heli1, glass2, pedskin, swimpitch1 and skydither installed')
-    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4 heli1 glass2 pedskin swimpitch1 skydither',
+    ok(env.fixCrashes('game') == 7, 'misc1, heli1, glass2, pedskin, swimpitch1, skydither and camnan installed')
+    ok(table.concat(cf.installs, ' ') == 'misc1 misc2 misc4 heli1 glass2 pedskin swimpitch1 skydither camnan',
         'misc1, 2 and 4 tried; misc19 and misc12 wait for their options, samp for SA-MP; heli1 under vehiclefps, glass2 glasslist,'
         .. ' pedskin pedmatrix, swimpitch1 swimfps, skydither skygrad')
     ok(lineAfter(from, 'skydither') and lineAfter(from, 'skydither'):find('0x7154A8 sky fix skydither (sky): hooked', 1, true),
@@ -1361,6 +1362,10 @@ do
     tick(4000)
     ok(#printed == n0 + 6 and printed[#printed]:find('sky fix skydither: the shaders could not be made; the stock sky is drawn', 1, true),
         'shaders the card refused: the stock sky, said: ' .. tostring(printed[#printed]))
+    cf.hooks[11].averted = 2
+    tick(5000)
+    ok(#printed == n0 + 7 and printed[#printed]:find('crash fix camnan (NaN camera): the camera had NaN in it and was set up again (2 so far)', 1, true)
+        and not printed[#printed]:find('averted', 1, true), 'a camera set up again is said as such: ' .. tostring(printed[#printed]))
 
     print('\n== crash fixes: options')
     local function installedSince(mark, key)
@@ -1377,7 +1382,7 @@ do
     cf.uninstalls = {}
     cf.hooks[3].result = 1
     env.fixesCommand('crashfix off')
-    ok(table.concat(cf.uninstalls, ' ') == 'misc1 misc19 samp', '/fixes crashfix off removes each one that is ours, '
+    ok(table.concat(cf.uninstalls, ' ') == 'misc1 misc19 camnan samp', '/fixes crashfix off removes each one that is ours, '
         .. 'not the frame-rate rows: ' .. table.concat(cf.uninstalls, ' '))
     env.fixesCommand('vehiclefps off')
     ok(cf.uninstalls[#cf.uninstalls] == 'heli1', '/fixes vehiclefps off takes its rows out')
@@ -1416,7 +1421,7 @@ do
     env.fixesCommand('patches')
     local line
     for i = fromChat + 1, #chat do if chat[i]:find('crash fixes (', 1, true) then line = chat[i] end end
-    ok(line and line:find('(6 hooks): 3 hooked, 1 owned elsewhere, 0 refused, 2 off', 1, true), '/fixes patches: ' .. tostring(line))
+    ok(line and line:find('(7 hooks): 4 hooked, 1 owned elsewhere, 0 refused, 2 off', 1, true), '/fixes patches: ' .. tostring(line))
     local frLine
     for i = fromChat + 1, #chat do if chat[i]:find('frame-rate fixes (', 1, true) then frLine = chat[i] end end
     ok(frLine and frLine:find('(2 sites): 2 in place, 0 owned elsewhere, 0 refused, 0 off', 1, true),
@@ -1438,7 +1443,7 @@ do
     env.fixesCommand('')
     local status
     for i = fromChat + 1, #chat do if chat[i]:find('crash fixes: ', 1, true) then status = chat[i] end end
-    ok(status and status:find('; 9 crash(es) averted', 1, true),
+    ok(status and status:find('; 11 crash(es) averted', 1, true),
         'the glass list\'s growth and the peds left out are not counted as crashes: ' .. tostring(status))
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString

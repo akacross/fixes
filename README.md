@@ -29,6 +29,9 @@ Crashes:
   involved. Only x and y are held to the map (20000); height may go to
   1000000, so objects a server keeps underground or in the sky are left
   alone.
+- A camera gone NaN (after a fall or a teleport): the world stopped drawing
+  and the screen flashed until a respawn. It is set up again behind you on
+  the next frame.
 - A null GXT string crashing `CMessages::GetStringLength`
   (gxt_crash_fix's fix).
 - SA-MP's removed-building table overflowing past 1000 entries (samp.dll).

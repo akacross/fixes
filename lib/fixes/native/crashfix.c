@@ -22,6 +22,7 @@
  * stencilveh, stencilobj and ikchain are San Andreas Online's
  * (Dryxio/san-andreas-online, an MTA fork, GPLv3); ikchain checks where the
  * game looks the effector up, after its own checks.
+ * camnan is ours: a camera gone NaN is set up again.
  * A crash averted is one `lock inc` on the hook's counter; fixes reads them.
  * MTA's frame-rate fixes are in framerate.c and FramerateVigilante's in
  * vigilante.c, each switched by its own option; MTA's ped matrix checks are in
@@ -138,6 +139,8 @@
         "\x83\xEC\x60\x66\x81\x3D\x78\xCD\xB7\x00\xFF\xFF") \
     H(losclear, "CWorld::GetIsLineOfSightClear from or to nowhere", 0x56A490, 12, -1, \
         "\x83\xEC\x5C\x66\x81\x3D\x78\xCD\xB7\x00\xFF\xFF") \
+    H(camnan, "CCam::Process: a camera gone NaN set up again behind its target", 0x526FC0, 6, -1, \
+        "\xDB\x05\x34\xFE\xB6\x00") \
     H(copyanim, "CAnimBlendAssocGroup::CopyAnimation of an id with no hierarchy", 0x4CE130, 6, -1, \
         "\x64\xA1\x00\x00\x00\x00") \
     H(frame, "CClumpModelInfo::GetFrameFromId: a neighbour for a missing frame", 0x4C53C0, 7, -1, \
@@ -349,6 +352,43 @@ void cf_limit_line(float *start, float *end, volatile LONG *count)
         end[0] = start[0], end[1] = start[1], end[2] = start[2] + 0.01f;
     }
     InterlockedIncrement(count);
+}
+
+/* ------------------------------------------------------------------------ */
+/* CCam::Process                                                            */
+/* ------------------------------------------------------------------------ */
+static int readable(const void *p, size_t n);
+
+/* A CCam's floats by offset: its angles and speeds, bump, vectors, distances */
+static const uint16_t CAM_FLOATS[][2] = {{0x2C, 0x110}, {0x118, 0x120}, {0x124, 0x208}, {0x220, 0x22C}};
+
+/* A camera with a NaN or an infinity feeds it back to itself every frame and
+ * the world is not drawn. Its bad floats are zeroed and it is set up again
+ * as a change of mode does (CCam::Init, its mode kept), behind its target. */
+void cf_cam_check(uint8_t *cam)
+{
+    int bad = 0;
+    for (int r = 0; r < 4; r++)
+        for (int o = CAM_FLOATS[r][0]; o < CAM_FLOATS[r][1]; o += 4)
+            if ((*(uint32_t *)(cam + o) & 0x7F800000u) == 0x7F800000u) *(float *)(cam + o) = 0.0f, bad = 1;
+    if (!bad) return;
+    uint16_t mode = *(uint16_t *)(cam + 0x0C);
+    ((void (__attribute__((thiscall)) *)(void *))0x50E490)(cam);
+    *(uint16_t *)(cam + 0x0C) = mode;
+    const uint8_t *target = *(uint8_t **)(cam + 0x21C);
+    if (!target) target = *(uint8_t **)0xB7CD98;                   /* the player's ped */
+    const float *m = target && readable(target, 0x18) ? *(const float **)(target + 0x14) : NULL;
+    if (m && readable(m, 0x40)) {
+        float fx = m[4], fy = m[5], len = sqrtf(fx * fx + fy * fy);
+        if (valid_position(m + 12) && len > 0.01f) {               /* false for NaN */
+            float *front = (float *)(cam + 0x190), *source = (float *)(cam + 0x19C);
+            fx /= len, fy /= len;
+            source[0] = m[12] - 4.0f * fx, source[1] = m[13] - 4.0f * fy, source[2] = m[14] + 1.0f;
+            front[0] = fx * 0.9701425f, front[1] = fy * 0.9701425f, front[2] = -0.2425356f;    /* (4, -1) normalised */
+            memcpy(cam + 0x1A8, source, 12);                          /* the source before looking behind */
+        }
+    }
+    InterlockedIncrement(&cf_n_camnan);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1407,6 +1447,16 @@ __asm__(
 "    sub esp, 0x5C\n"
 "    cmp word ptr ds:0xB7CD78, 0xFFFF\n"
 "    GO 0x56A49C\n"
+
+/* CCam::Process, this in ecx: the camera checked first */
+"HOOK camnan\n"
+"    pushad\n"
+"    push ecx\n"
+"    call _cf_cam_check\n"
+"    add esp, 4\n"
+"    popad\n"
+"    fild dword ptr ds:0xB6FE34\n"
+"    GO 0x526FC6\n"
 
 /* CAnimBlendAssocGroup::CopyAnimation (this, id): the group and the id */
 "HOOK copyanim\n"

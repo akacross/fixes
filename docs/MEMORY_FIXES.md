@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-11-01):** `fixes.lua` 0.24.0. It applies the 128 `gamePatches`
+**Status (2026-11-01):** `fixes.lua` 0.24.1. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -1612,9 +1612,9 @@ is installed):
 - the SA-MP check also refuses a bad pointer at +10h.
 
 **Reporting.** Each hook has its own counter in the DLL; the main loop logs
-a rise ("crash fix X averted a crash (N so far)"), at most once a minute per
-hook (some fire on every frame for one broken model), and `/fixes` shows the
-session's total. `/fixes patches` has one line for all of them.
+a rise ("crash fix X averted a crash (N so far)"; camnan says the camera was
+set up again), at most once a minute per hook (some fire on every frame for
+one broken model), and `/fixes` shows the session's total. `/fixes patches` has one line for all of them.
 
 **Tests.** `fixes_test.lua` drives the Lua side against a stand-in for the
 DLL: one line per hook (hooked, owned elsewhere, refused), misc19, 12 and 17
@@ -1761,6 +1761,7 @@ that thunk.
 | contact | 0x6080B2 | a ped's contact entity destroyed under it |
 | pathnodes | 0x156F966 | path nodes that failed to allocate |
 | los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end): \|x\|, \|y\| over 16000 as MTA's, \|z\| over 1000000 (MTA's -5000 tripped at a server's z -10000; only x and y enter the sector walk) |
+| camnan | 0x526FC0 | a camera with a NaN or an infinity in its floats (it feeds it back to itself every frame, nothing is drawn and every line of sight starts nowhere): the bad floats zeroed, `CCam::Init` as on a change of mode with the mode kept, the source 4 behind and 1 above its target (or the player's ped) |
 
 **SA-MP moves the model infos.** SA-MP R5 copies
 `CModelInfo::ms_modelInfoPtrs` (0xA9B0C8) to its own 65535-entry array and

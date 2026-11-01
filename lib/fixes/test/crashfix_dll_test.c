@@ -667,6 +667,72 @@ __declspec(dllexport) int __cdecl run(void)
            "a line at z -10000 (Unity Roleplay's objects) stays, nothing counted");
     }
 
+    printf("== a camera gone NaN (camnan)\n");
+    {
+        typedef void (__attribute__((thiscall)) *InitFn)(void *);
+        static uint8_t cam[0x238], clean[0x238], ent[0x40];
+        static float mat[16] = {1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 100, 200, 10, 0};    /* forward (0, 2): not unit */
+        ((InitFn)0x50E490)(cam);
+        *(uint16_t *)(cam + 0x0C) = 18;
+        cam[0x0A] = 0;
+        memcpy(clean, cam, sizeof cam);
+        cf_cam_check(cam);
+        ok(!memcmp(cam, clean, sizeof cam) && averted("camnan") == 0, "a camera with no NaN: left");
+
+        *(float **)(ent + 0x14) = mat;
+        *(void **)(cam + 0x21C) = ent;
+        *(float *)(cam + 0xA0) = NAN;                       /* the true beta */
+        *(float *)(cam + 0x194) = INFINITY;                 /* the front */
+        *(float *)(cam + 0x1D8) = -NAN;                     /* the target's history */
+        cf_cam_check(cam);
+        int finite = 1;
+        for (int o = 0x2C; o < 0x208; o += 4) if (o < 0x110 || o >= 0x124 || o == 0x118 || o == 0x11C)
+            if (!isfinite(*(float *)(cam + o))) finite = 0;
+        const float *src = (const float *)(cam + 0x19C), *front = (const float *)(cam + 0x190);
+        ok(finite && averted("camnan") == 1, "NaN and infinity: every float finite again");
+        ok(*(uint16_t *)(cam + 0x0C) == 18 && cam[0x0A] == 1, "its mode kept, its statics to be reset");
+        ok(src[0] == 100 && src[1] == 196 && src[2] == 11 && !memcmp(cam + 0x1A8, src, 12),
+           "the source 4 behind the target and 1 above");
+        ok(front[0] == 0 && fabsf(front[1] - 0.9701425f) < 1e-6f && fabsf(front[2] + 0.2425356f) < 1e-6f,
+           "the front at the target");
+
+        void **player = (void **)0xB7CD98, *was = *player;
+        *(void **)(cam + 0x21C) = NULL;
+        *player = NULL;
+        *(float *)(cam + 0xA4) = NAN;
+        cf_cam_check(cam);
+        ok(averted("camnan") == 2 && isfinite(*(float *)(cam + 0xA4)), "no target and no player: zeroed only");
+        *(uint32_t *)(cam + 0x21C) = 0x7FC00010;            /* a target with a NaN's bits */
+        *(float *)(cam + 0xA4) = NAN;
+        cf_cam_check(cam);
+        ok(averted("camnan") == 3 && *(uint32_t *)(cam + 0x21C) == 0x7FC00010, "a pointer with a NaN's bits: left");
+        *(void **)(cam + 0x21C) = NULL;
+        *player = ent;
+        mat[13] = NAN;                                      /* the ped nowhere: no source from it */
+        *(float *)(cam + 0xA4) = NAN;
+        *(float *)(cam + 0x1A0) = 5;
+        cf_cam_check(cam);
+        ok(averted("camnan") == 4 && src[1] == 5, "a target nowhere: the source left");
+        mat[13] = 200;
+        *(float *)(cam + 0xA4) = NAN;
+        cf_cam_check(cam);
+        ok(averted("camnan") == 5 && src[1] == 196, "no target: the player's ped");
+
+        static int32_t got_ecx;
+        static float got_st0;
+        uint8_t keep[13], *go = (uint8_t *)0x526FC6, ret[13] = {0x89, 0x0D, 0, 0, 0, 0, 0xD9, 0x1D, 0, 0, 0, 0, 0xC3};
+        *(int32_t **)(ret + 2) = &got_ecx, *(float **)(ret + 8) = &got_st0;    /* mov [got_ecx], ecx / fstp [got_st0] / ret */
+        int32_t *frame = (int32_t *)0xB6FE34, frame_was = *frame;
+        memcpy(keep, go, sizeof keep), memcpy(go, ret, sizeof ret);
+        *frame = 7;
+        *(float *)(cam + 0xA4) = NAN;
+        __asm__ volatile("mov %0, %%ecx\n\tcall *%1" :: "r"(cam), "r"(hook_of("camnan")) : "eax", "ecx", "edx", "memory");
+        memcpy(go, keep, sizeof keep);
+        *frame = frame_was, *player = was;
+        ok(averted("camnan") == 6 && got_ecx == (int32_t)cam && got_st0 == 7.0f,
+           "through the hook: checked, ecx kept, the frame count loaded");
+    }
+
     printf("== San Andreas Online's: shadow meshes over 2048 vertices (stencilveh, stencilobj)\n");
     {
         uint8_t keep[2] = {*(uint8_t *)0x70FC8D, *(uint8_t *)0x7102D8};
