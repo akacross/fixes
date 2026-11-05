@@ -1,8 +1,10 @@
 // fixes.lua's text cache: TextCacheFix by Софтик Инквизитор (blast.hk), used
 // and modified with his permission. Attached when fixes calls
-// TextCache_Install instead of from DllMain. d3dx9_25's CFont (vtable at RVA
-// 0x1580, build 0x423B781A) replays strings it has drawn before. fixes loads it
-// with LoadLibraryA and never frees it: the hooks live here, not in Lua.
+// TextCache_Install instead of from DllMain. d3dx9_25's CFont replays strings
+// it has drawn before: Microsoft's build 0x423B781A (vtable at RVA 0x1580), or
+// any other (Wine's builtin) through the vtable of a font it creates, its
+// sprite-less draws passed through. fixes loads it with LoadLibraryA and never
+// frees it: the hooks live here, not in Lua.
 //
 //   ./build.sh            -> ../text_cache.dll
 #include <windows.h>
@@ -25,7 +27,7 @@ namespace {
 
     constexpr DWORD kD3dxTimestamp = 0x423B781A;
     constexpr uintptr_t kFontVtableRva = 0x1580;
-    constexpr uintptr_t kFontSpriteOffset = 0xC;
+    constexpr uintptr_t kFontSpriteOffset = 0xC;    // the font's own sprite, in Microsoft's build
     constexpr DWORD kSpriteAlphaBlend = 0x10;
 
     constexpr size_t kMaxEntries = 16384;
@@ -133,6 +135,8 @@ namespace {
     unsigned g_recorded;
     int g_mismatches;
     bool g_disabled;
+    uintptr_t g_ownSprite;      // kFontSpriteOffset, or 0: a build whose own sprite is unknown
+    bool g_inside;              // Wine's DrawTextA calls DrawTextW through the vtable
 
     Recorder *AsRecorder(Sprite *s)
     {
@@ -370,7 +374,9 @@ namespace {
         const bool measure = (format & DT_CALCRECT) != 0;
         Sprite *own = nullptr;
         if (!sprite && !measure) {
-            own = *reinterpret_cast<Sprite **>(static_cast<uint8_t *>(font) + kFontSpriteOffset);
+            if (!g_ownSprite)
+                return draw(font, sprite, str, count, rc, format, color);
+            own = *reinterpret_cast<Sprite **>(static_cast<uint8_t *>(font) + g_ownSprite);
             if (!own)
                 return draw(font, sprite, str, count, rc, format, color);
         }
@@ -482,14 +488,25 @@ namespace {
         return result;
     }
 
+    template <typename Char, typename DrawFn>
+    INT OuterDrawText(DrawFn draw, void *font, Sprite *sprite, const Char *str, INT count, LPRECT rc, DWORD format, Color color)
+    {
+        if (g_inside)
+            return draw(font, sprite, str, count, rc, format, color);
+        g_inside = true;
+        const INT result = CachedDrawText(draw, font, sprite, str, count, rc, format, color);
+        g_inside = false;
+        return result;
+    }
+
     INT __stdcall HookDrawTextA(void *font, Sprite *sprite, LPCSTR str, INT count, LPRECT rc, DWORD format, Color color)
     {
-        return CachedDrawText(g_drawTextA, font, sprite, str, count, rc, format, color);
+        return OuterDrawText(g_drawTextA, font, sprite, str, count, rc, format, color);
     }
 
     INT __stdcall HookDrawTextW(void *font, Sprite *sprite, LPCWSTR str, INT count, LPRECT rc, DWORD format, Color color)
     {
-        return CachedDrawText(g_drawTextW, font, sprite, str, count, rc, format, color);
+        return OuterDrawText(g_drawTextW, font, sprite, str, count, rc, format, color);
     }
 
     ULONG __stdcall HookRelease(void *font)
@@ -520,6 +537,21 @@ namespace {
 
     void **g_vtbl;
 
+    using CreateFontAFn = HRESULT(__stdcall *)(void *, INT, UINT, UINT, UINT, BOOL, DWORD, DWORD, DWORD, DWORD, LPCSTR, void **);
+
+    // The vtable of a font the module makes on `device`, if it lies in the module
+    void **FontVtable(uint8_t *base, DWORD size, void *device)
+    {
+        auto create = reinterpret_cast<CreateFontAFn>(GetProcAddress(reinterpret_cast<HMODULE>(base), "D3DXCreateFontA"));
+        void *font = nullptr;
+        if (!create || FAILED(create(device, 12, 0, FW_NORMAL, 1, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH, "Arial", &font)) || !font)
+            return nullptr;
+        auto vtbl = *static_cast<void ***>(font);
+        reinterpret_cast<ReleaseFn>(vtbl[kFontRelease])(font);
+        return InModule(base, size, vtbl) ? vtbl : nullptr;
+    }
+
     void WriteSlots(void **vtbl, void *const *values)
     {
         static const int kSlots[] = { kFontRelease, kFontDrawTextA, kFontDrawTextW, kFontOnLost, kFontOnReset };
@@ -543,20 +575,27 @@ extern "C" {
         uint32_t disabled;
     };
 
-    // 1: hooked (or already). 0: not d3dx9_25 build 0x423B781A. 2: a slot points
+    // 1: hooked (or already). 0: not build 0x423B781A, and no font could be made
+    // on `device` (may be null) to find another build's vtable. 2: a slot points
     // outside the module (another hook): *foreign gets its address.
-    __declspec(dllexport) int __cdecl TextCache_Install(void *d3dxBase, uintptr_t *foreign)
+    __declspec(dllexport) int __cdecl TextCache_Install(void *d3dxBase, void *device, uintptr_t *foreign)
     {
         if (g_vtbl)
             return 1;
         auto base = static_cast<uint8_t *>(d3dxBase);
         auto dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
         auto nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-        if (nt->FileHeader.TimeDateStamp != kD3dxTimestamp)
-            return 0;
-
         const DWORD size = nt->OptionalHeader.SizeOfImage;
-        auto vtbl = reinterpret_cast<void **>(base + kFontVtableRva);
+        void **vtbl = nullptr;
+        uintptr_t ownSprite = 0;
+        if (nt->FileHeader.TimeDateStamp == kD3dxTimestamp) {
+            vtbl = reinterpret_cast<void **>(base + kFontVtableRva);
+            ownSprite = kFontSpriteOffset;
+        } else if (device) {
+            vtbl = FontVtable(base, size, device);
+        }
+        if (!vtbl)
+            return 0;
         for (int i = 0; i < kFontMethods; ++i) {
             if (!InModule(base, size, vtbl[i])) {
                 if (foreign)
@@ -570,6 +609,7 @@ extern "C" {
         g_drawTextW = reinterpret_cast<DrawTextWFn>(vtbl[kFontDrawTextW]);
         g_onLost = reinterpret_cast<DeviceFn>(vtbl[kFontOnLost]);
         g_onReset = reinterpret_cast<DeviceFn>(vtbl[kFontOnReset]);
+        g_ownSprite = ownSprite;
         MemoryBarrier();
 
         void *const hooks[] = {

@@ -1059,6 +1059,23 @@ for _, n in ipairs({'value_550F82_8000', 'patch_550FBA', 'placeableMatrixArraySi
 end
 
 print('\n== the owners the first in-game run found (2026-10-25): named, not refused')
+print('\n== GTA frame delay: SA-MP 0.3.DL\'s 2 ms wait is written over, and given back off')
+put(0x53E94A, 0x83, 0xF8, 0x02, 0x72, 0xE1)
+env.applyGamePatches('early')
+ok(same(get(0x53E94A, 5), {0x83, 0xF8, 0x00, 0x72, 0xE1}), 'ours over DL\'s')
+local delayLine = findPrinted('GTA frame delay')
+ok(delayLine and delayLine:find("applied, 5 byte(s) written over SA-MP 0.3.DL's 2 ms wait", 1, true), 'said so: ' .. tostring(delayLine))
+env.fixesCommand('framecaps off')
+ok(same(get(0x53E94A, 5), {0x83, 0xF8, 0x02, 0x72, 0xE1}), 'off: DL\'s 2 back, not the stock 14')
+env.fixesCommand('framecaps on')
+ok(same(get(0x53E94A, 5), {0x83, 0xF8, 0x00, 0x72, 0xE1}), 'on again: ours')
+env.fixesCommand('framecaps off')
+put(0x53E94A, 0x83, 0xF8, 0x0E, 0x72, 0xE1)
+env.fixesCommand('framecaps on')
+env.fixesCommand('framecaps off')
+ok(same(get(0x53E94A, 5), {0x83, 0xF8, 0x0E, 0x72, 0xE1}), 'from the stock 14 it goes back to 14')
+env.fixesCommand('framecaps on')
+
 stockMta()
 put(0x738F3A, 0xFF, 0x25, 0x00, 0x00, 0x50, 0x40); putU32(0x40500000, 0x13372000)   -- SA-MP's jmp [ptr]
 put(0x7469A0, 0x30, 0xC0, 0x90, 0x90)                                               -- SilentPatch's xor al,al

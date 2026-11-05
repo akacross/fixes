@@ -3,7 +3,8 @@
 # a throwaway prefix, never the game's: text_cache_dll_test.c checks the exports
 # and that replays match the real draw. `--bench` also times DrawText per frame:
 # stock, the DLL, and TextCacheFix.asi when $TEXTCACHEFIX_ASI names one.
-# D3DX9_25 defaults to the game prefix's syswow64 copy (read, never written).
+# D3DX9_25 defaults to the game prefix's syswow64 copy (read, never written);
+# D3DX9_25=builtin tests Wine's own, as a prefix without Microsoft's has it.
 # DXVK_D3D9 (default: Proton's 32-bit DXVK, as the game uses) renders when it
 # exists; wined3d's sprite flush slows down when text is drawn faster, so its
 # whole-frame numbers mislead. Needs wine and i686-w64-mingw32-gcc.
@@ -14,11 +15,12 @@ game="$(cd "$ml/.." && pwd)"
 d3dx="${D3DX9_25:-/mnt/data/Games/Prefixes/samp/1/pfx/drive_c/windows/syswow64/d3dx9_25.dll}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 dxvk="${DXVK_D3D9:-/usr/share/steam/compatibilitytools.d/proton-cachyos-slr/files/lib/wine/dxvk/i386-windows/d3d9.dll}"
-export WINEPREFIX="${WINEPREFIX:-$work/prefix}" WINEDEBUG=-all WINEDLLOVERRIDES="d3dx9_25=n"
-cp -L "$d3dx" "$work/d3dx9_25.dll"
+d3dxmode=n; [ "$d3dx" = builtin ] && d3dxmode=b
+export WINEPREFIX="${WINEPREFIX:-$work/prefix}" WINEDEBUG=-all WINEDLLOVERRIDES="d3dx9_25=$d3dxmode"
+[ "$d3dxmode" = n ] && cp -L "$d3dx" "$work/d3dx9_25.dll"
 if [ -f "$dxvk" ]; then
     cp "$dxvk" "$work/d3d9.dll"
-    export WINEDLLOVERRIDES="d3dx9_25=n;d3d9=n" DXVK_LOG_LEVEL=none
+    export WINEDLLOVERRIDES="d3dx9_25=$d3dxmode;d3d9=n" DXVK_LOG_LEVEL=none
     echo "renderer: DXVK ($dxvk)"
 else
     echo "renderer: wined3d"

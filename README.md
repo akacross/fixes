@@ -99,9 +99,10 @@ want fixes' own.
 
 Speed:
 - SA-MP's text (chat, nametags, labels) is laid out once and replayed, not
-  laid out again every frame: `lib/fixes/text_cache.dll`.
+  laid out again every frame: `lib/fixes/text_cache.dll`. It works with
+  Microsoft's d3dx9_25.dll and with Wine's own (a prefix without Microsoft's).
 - SA-MP's and GTA's frame caps come off while the in-game Frame Limiter is
-  off.
+  off, over 0.3.DL's own 2 ms wait too (given back with `framecaps` off).
 
 Also: every animation block is preloaded and pinned, SA-MP's F1 help dialog
 is disabled, the smoking animation is fixed, and crashes.asi's visual and

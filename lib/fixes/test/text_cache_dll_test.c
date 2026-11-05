@@ -1,7 +1,8 @@
 /* lib/fixes/text_cache.dll against the real d3dx9_25.dll, under Wine.
  *   test.exe check WORKDIR MOONLOADER_DIR          exports, correctness, fixes.lua's declarations
  *   test.exe stock|dll|asi WORKDIR MOONLOADER_DIR [FRAMES]   DrawText time per frame
- * WORKDIR holds d3dx9_25.dll, lua51.dll, text_cache.dll and (for asi) TextCacheFix.asi. */
+ * WORKDIR holds d3dx9_25.dll (or Wine's builtin is used), lua51.dll, text_cache.dll and (for asi)
+ * TextCacheFix.asi. */
 #define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -15,7 +16,7 @@
 typedef HRESULT (WINAPI *CreateFontA_t)(IDirect3DDevice9 *, INT, UINT, UINT, UINT, BOOL, DWORD, DWORD, DWORD, DWORD, LPCSTR, ID3DXFont **);
 typedef HRESULT (WINAPI *CreateSprite_t)(IDirect3DDevice9 *, ID3DXSprite **);
 typedef struct { uint32_t installed, hits, recorded, entries, mismatches, disabled; } Stats;
-typedef int (__cdecl *Install_t)(void *, uintptr_t *);
+typedef int (__cdecl *Install_t)(void *, void *, uintptr_t *);
 typedef int (__cdecl *Uninstall_t)(void);
 typedef void (__cdecl *Stats_t)(Stats *);
 typedef void lua_State;
@@ -118,7 +119,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < 10; ++i) snprintf(labels[i], sizeof(labels[i]), "House for sale #%d - $%d,000", i, 50 + i);
 
     snprintf(path, sizeof(path), "%s\\d3dx9_25.dll", work);
-    HMODULE d3dx = LoadLibraryA(path);
+    HMODULE d3dx = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES ? LoadLibraryA(path) : LoadLibraryA("d3dx9_25.dll");
     if (!d3dx) { fprintf(stderr, "d3dx9_25 load error %lu\n", GetLastError()); return 3; }
     CreateFontA_t createFont = (CreateFontA_t)GetProcAddress(d3dx, "D3DXCreateFontA");
     CreateSprite_t createSprite = (CreateSprite_t)GetProcAddress(d3dx, "D3DXCreateSprite");
@@ -158,15 +159,23 @@ int main(int argc, char **argv)
         Stats st;
         uintptr_t foreign = 0;
 
+        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((uint8_t *)d3dx + ((IMAGE_DOS_HEADER *)d3dx)->e_lfanew);
+        int microsoft = nt->FileHeader.TimeDateStamp == 0x423B781A;
+        printf("   d3dx9_25 build 0x%08lX (%s)\n", nt->FileHeader.TimeDateStamp, microsoft ? "Microsoft's" : "another: Wine's builtin");
+        if (!microsoft) {
+            printf("\n== another build and no device: no font to find its vtable with\n");
+            ok(install(d3dx, NULL, &foreign) == 0, "Install returns 0");
+        }
+
         printf("\n== a slot outside d3dx9_25: stand down, naming the address\n");
         setSlot(vtbl, 14, (void *)0x12345678);
-        ok(install(d3dx, &foreign) == 2 && foreign == 0x12345678, "Install returns 2 and the foreign address");
+        ok(install(d3dx, dev, &foreign) == 2 && foreign == 0x12345678, "Install returns 2 and the foreign address");
         stats(&st);
         ok(!st.installed, "not installed");
         setSlot(vtbl, 14, stock[14]);
 
         printf("\n== install: the five slots point into text_cache.dll, the rest stock\n");
-        ok(install(d3dx, &foreign) == 1, "Install returns 1");
+        ok(install(d3dx, dev, &foreign) == 1, "Install returns 1");
         int ours = 1, rest = 1;
         for (int k = 0; k < 5; ++k) if (!inModule(dll, vtbl[hooked[k]])) ours = 0;
         for (int i = 0; i < 18; ++i) {
@@ -174,13 +183,14 @@ int main(int argc, char **argv)
             if (!h && vtbl[i] != stock[i]) rest = 0;
         }
         ok(ours && rest, "Release, DrawTextA/W, OnLost/OnReset are ours; nothing else moved");
-        ok(install(d3dx, &foreign) == 1, "a second Install is a no-op");
+        ok(install(d3dx, dev, &foreign) == 1, "a second Install is a no-op");
 
         printf("\n== 600 frames: replayed, and every 256th hit matches the real draw\n");
         for (int fr = 0; fr < 600; ++fr) frame(fr, NULL);
         stats(&st);
         printf("   %u layouts, %u replayed, %u recorded, %u mismatches\n", st.entries, st.hits, st.recorded, st.mismatches);
-        ok(st.installed && st.hits > 256 * 100 && st.recorded >= 65 && st.entries >= 65, "hits, recordings, entries");
+        unsigned layouts = microsoft ? 65 : 55;     /* another build: the 10 labels with no sprite are drawn, not cached */
+        ok(st.installed && st.hits > 256 * 100 && st.recorded >= layouts && st.entries >= layouts, "hits, recordings, entries");
         ok(st.mismatches == 0 && !st.disabled, "no mismatch with the real d3dx draw");
 
         printf("\n== uninstall: the stock slots go back; install works again\n");
@@ -190,7 +200,7 @@ int main(int argc, char **argv)
         ok(back, "all 18 slots stock");
         stats(&st);
         ok(!st.installed && st.entries == 0, "not installed, cache empty");
-        ok(install(d3dx, &foreign) == 1 && inModule(dll, vtbl[14]), "installed again");
+        ok(install(d3dx, dev, &foreign) == 1 && inModule(dll, vtbl[14]), "installed again");
 
         printf("\n== a hook on top of ours: uninstall leaves the chain alone\n");
         void *ourDraw = vtbl[14];
@@ -216,13 +226,13 @@ int main(int argc, char **argv)
             "ffi.cdef(decl)\n"
             "local lib = ffi.load([[%s\\text_cache.dll]])\n"
             "local foreign = ffi.new('uintptr_t[1]')\n"
-            "assert(lib.TextCache_Install(ffi.cast('void*', %lu), foreign) == 1, 'install')\n"
+            "assert(lib.TextCache_Install(ffi.cast('void*', %lu), ffi.cast('void*', %lu), foreign) == 1, 'install')\n"
             "local st = ffi.new('FxTextCacheStats')\n"
             "lib.TextCache_Stats(st)\n"
             "assert(st.installed == 1, 'stats')\n"
             "assert(lib.TextCache_Uninstall() == 1, 'uninstall')\n"
             "lib.TextCache_Stats(st)\n"
-            "assert(st.installed == 0, 'stats after')\n", ml, work, (unsigned long)(uintptr_t)d3dx);
+            "assert(st.installed == 0, 'stats after')\n", ml, work, (unsigned long)(uintptr_t)d3dx, (unsigned long)(uintptr_t)dev);
         int err = loadstring(L, code) || pcall(L, 0, 0, 0);
         if (err) printf("   lua: %s\n", tostr(L, -1, NULL));
         ok(!err, "install, stats and uninstall through fixes.lua's cdef");
@@ -234,7 +244,7 @@ int main(int argc, char **argv)
 
     if (!strcmp(mode, "dll")) {
         uintptr_t foreign;
-        if (install(d3dx, &foreign) != 1) { fprintf(stderr, "Install failed\n"); return 8; }
+        if (install(d3dx, dev, &foreign) != 1) { fprintf(stderr, "Install failed\n"); return 8; }
     } else if (!strcmp(mode, "asi")) {
         snprintf(path, sizeof(path), "%s\\TextCacheFix.asi", work);
         if (!LoadLibraryA(path)) { fprintf(stderr, "TextCacheFix.asi load error %lu\n", GetLastError()); return 9; }

@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.24.1")
+script_version("0.24.2")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -844,8 +844,10 @@ gamePatches[#gamePatches + 1] = {name = "CMessages::GetStringLength null string"
 -- `cmp eax, 0Eh` -> `cmp eax, 0`, so its `jb` never spins (MTA's "remove 14ms
 -- wait", crashes.asi's frameSleepOff2; autofps writes the same byte). The
 -- Frame Limiter setting is untouched. Option "framecaps", with SA-MP's.
+-- SA-MP 0.3.DL writes 2 there (samp.dll+0xAA583); ours goes over it.
 gamePatches[#gamePatches + 1] = {name = "GTA frame delay", va = 0x53E94A, from = hexBytes("83 F8 0E 72 E1"),
     to = hexBytes("83 F8 00 72 E1"), option = "framecaps",
+    replaces = {{bytes = hexBytes("83 F8 02 72 E1"), by = "SA-MP 0.3.DL's 2 ms wait"}},
     standDown = function(found) return hookOwner(0x53E94A, found) end}
 
 -- gtasa_crashfix's visual and display switches (its crashes.cfg keys); each
@@ -1065,7 +1067,12 @@ local function applyGamePatch(p)
         if bytesEqual(found, c.bytes) then return "conflict", c.by end
     end
 
-    if not bytesEqual(found, p.from) then
+    -- Another's value at a site this patch writes over (put back on revert).
+    local over
+    for _, r in ipairs(p.replaces or {}) do
+        if bytesEqual(found, r.bytes) then over = r end
+    end
+    if not over and not bytesEqual(found, p.from) then
         return "refused", string.format("found %s, expected %s", bytesToHex(found), bytesToHex(p.from))
     end
 
@@ -1080,7 +1087,8 @@ local function applyGamePatch(p)
     if not bytesEqual(after, p.to) then
         return "refused", string.format("write did not stick (still %s)", bytesToHex(after))
     end
-    return "ok"
+    p.replaced = over
+    return "ok", over and over.by
 end
 
 -- CStreaming::ms_bIsInitialised, set at the end of CStreaming::Init2: after it,
@@ -1113,12 +1121,15 @@ local function revertGamePatch(p)
     if p.revertOnlyOurs and p.state ~= "ok" then return "stock" end
     local found = readBytes(p.va, #p.from)
     if not found then return "refused" end
-    if bytesEqual(found, p.from) then return "stock" end
+    local back = p.replaced and p.replaced.bytes or p.from
+    if bytesEqual(found, back) then return "stock" end
     if not bytesEqual(found, p.to) then return "refused" end
-    for i = 1, #p.from do
-        memory.setuint8(p.va + i - 1, p.from[i], true)
+    for i = 1, #back do
+        memory.setuint8(p.va + i - 1, back[i], true)
     end
-    return bytesEqual(readBytes(p.va, #p.from), p.from) and "reverted" or "refused"
+    if not bytesEqual(readBytes(p.va, #back), back) then return "refused" end
+    p.replaced = nil
+    return "reverted"
 end
 
 --- Switch an option and apply or revert its patches at once. -> sites changed,
@@ -1149,7 +1160,8 @@ end
 -- One line per site, as the other fixes announce themselves.
 local function logGamePatch(p, state, why)
     if state == "ok" then
-        log(string.format("[fixes] 0x%X (%s): applied, %d byte(s) written", p.va, p.name, #p.to), "info")
+        log(string.format("[fixes] 0x%X (%s): applied, %d byte(s) written%s", p.va, p.name, #p.to,
+            why and " over " .. why or ""), "info")
     elseif state == "already" then
         -- named, so a site another mod owns is visible
         log(string.format("[fixes] 0x%X (%s): already in the wanted state", p.va, p.name), "info")
@@ -2629,13 +2641,14 @@ end
 --------------------------------------------------------------------------------
 -- lib/fixes/text_cache.dll (source in lib/fixes/native), TextCacheFix by Софтик
 -- Инквизитор (blast.hk): d3dx9_25's ID3DXFont::DrawText replays strings it has
--- drawn before.
+-- drawn before. Microsoft's build by its known vtable; another (Wine's builtin)
+-- through a font the DLL makes on the game's device.
 -- Option "textcache", on by default. The hooks live in the DLL, which is loaded
 -- with a reference of fixes' own and never freed, so they outlive this script.
 pcall(ffi.cdef, [[ void* LoadLibraryA(const char* name); ]])
 pcall(ffi.cdef, [[
     typedef struct { uint32_t installed, hits, recorded, entries, mismatches, disabled; } FxTextCacheStats;
-    int TextCache_Install(void* d3dx, uintptr_t* foreign);
+    int TextCache_Install(void* d3dx, void* device, uintptr_t* foreign);
     int TextCache_Uninstall(void);
     void TextCache_Stats(FxTextCacheStats* out);
 ]])
@@ -2671,7 +2684,8 @@ function fixTextCache()
         return false
     end
     local foreign = ffi.new("uintptr_t[1]")
-    local result = lib.TextCache_Install(ffi.cast("void*", base), foreign)
+    local okDev, device = pcall(readU32, 0xC97C28)      -- RwD3D9's IDirect3DDevice9
+    local result = lib.TextCache_Install(ffi.cast("void*", base), ffi.cast("void*", okDev and device or 0), foreign)
     if result == 1 then
         textCacheState = {installed = true}
         log("[fixes] text cache: d3dx9_25's DrawText now replays layouts it has drawn before")
@@ -2683,7 +2697,7 @@ function fixTextCache()
         log(string.format("[fixes] text cache: d3dx9_25's font is hooked by %s; standing down", textCacheState.owner))
         return false
     end
-    textCacheState = {why = string.format("d3dx9_25.dll is not build 0x%08X", D3DX_BUILD)}
+    textCacheState = {why = string.format("d3dx9_25.dll is not build 0x%08X and made no font to find its own with", D3DX_BUILD)}
     log("[fixes] refusing the text cache: " .. textCacheState.why)
     return false
 end

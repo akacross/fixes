@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-11-01):** `fixes.lua` 0.24.1. It applies the 128 `gamePatches`
+**Status (2026-11-05):** `fixes.lua` 0.24.2. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -1121,8 +1121,15 @@ loads. The source is `lib/fixes/native/text_cache.cpp` and `build.sh` builds
 it with i686-w64-mingw32-g++, static. It is option `textcache`, on by default.
 `/fixes textcache off` puts the stock slots back at once.
 
-It hooks five slots of d3dx9_25's `CFont` vtable: RVA 0x1580, for the build
-with timestamp 0x423B781A.
+It hooks five slots of d3dx9_25's `CFont` vtable: RVA 0x1580 in Microsoft's
+build (timestamp 0x423B781A). Any other build (Wine's builtin, as a prefix
+without Microsoft's DLL has it: Unity RP's) is found through a font the DLL
+makes on RwD3D9's device (0xC97C28) with the module's own `D3DXCreateFontA`,
+then released; its vtable must lie in the module. Wine's `DrawTextA` calls
+`DrawTextW` back through the vtable, so a draw already inside the cache goes
+straight to the stock one. A sprite-less draw is cached only in Microsoft's
+build, whose font keeps its own sprite at +0xC; Wine's makes a new one per
+call, so there it is drawn as it was.
 
 | slot | method | hook |
 |---|---|---|
@@ -1710,7 +1717,9 @@ uncapped (autofps then paces it, if installed).
 
 SA-MP's sites are per build (R1, R3-1, R5, DL, autofps's verified table, not
 the signature scanner: its pattern covers bytes this hook overwrites), and
-the function's shape is checked first. A hook already at +0Ch is its owner's:
+the function's shape is checked first. SA-MP 0.3.DL writes `cmp eax, 2` at
+0x53E94A (samp.dll+0xAA583, a 2 ms wait); fixes writes its 0 over that and
+puts DL's 2 back when `framecaps` goes off. A hook already at +0Ch is its owner's:
 autofps's stub (the same shape, not in a module) or crashes.asi's; fixes then
 writes only the default sleep and Sleep(0), the same bytes either way, and
 autofps does the same when fixes was first. `/fixes framecaps off` puts the
@@ -1719,7 +1728,8 @@ hook and the timestep store back; the sleeps stay off until a restart.
 **Tests.** `fixes_test.lua` on SA-MP R5's real bytes: the jmp, the stub and
 its two targets, the NOPs, Sleep(0), a reload changing nothing, the option off
 and on, autofps's stub and another hook standing it down (sleeps still set),
-a wrong shape refused; the GTA delay's `from` against the real gta_sa.exe.
+a wrong shape refused; the GTA delay's `from` against the real gta_sa.exe,
+and written over DL's 2, which goes back off.
 
 ## 34. MTA's newer crash fixes
 
