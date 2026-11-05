@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.24.2")
+script_version("0.24.3")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -1510,18 +1510,21 @@ pcall(ffi.cdef, [[ size_t VirtualQuery(const void*, void*, size_t); ]])
 
 -- True when [va, va + size) is committed and readable: R1/R2's packed sections
 -- can be unmapped by now, and a fault in ffi.string is not a Lua error.
-local function readable(va, size)
-    local mbi = ffi.new("uint32_t[7]")          -- MEMORY_BASIC_INFORMATION
-    local at, stop = va, va + size
-    while at < stop do
-        if ffi.C.VirtualQuery(ffi.cast("const void*", at), mbi, 28) == 0 then return false end
-        local protect = tonumber(mbi[5])
-        if tonumber(mbi[4]) ~= 0x1000 or protect % 0x200 >= 0x100 or protect == 0x01 or protect == 0 then
-            return false                        -- not MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS
+local readable
+do
+    local mbi = ffi.new("uint32_t[7]")          -- MEMORY_BASIC_INFORMATION, reused
+    function readable(va, size)
+        local at, stop = va, va + size
+        while at < stop do
+            if ffi.C.VirtualQuery(ffi.cast("const void*", at), mbi, 28) == 0 then return false end
+            local protect = tonumber(mbi[5])
+            if tonumber(mbi[4]) ~= 0x1000 or protect % 0x200 >= 0x100 or protect == 0x01 or protect == 0 then
+                return false                        -- not MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS
+            end
+            at = tonumber(mbi[0]) + tonumber(mbi[3])   -- BaseAddress + RegionSize
         end
-        at = tonumber(mbi[0]) + tonumber(mbi[3])   -- BaseAddress + RegionSize
+        return true
     end
-    return true
 end
 
 -- samp.dll's mapped sections: {va, size, code}.
@@ -3507,13 +3510,20 @@ local DRIFT = {
     EVERY = 30,                    -- seconds between lines
     SLOW = 20,                     -- a frame over this many ms is a hitch
     PAUSE = 1000,                  -- a gap over this many ms (loading, minimized) is a pause, not a frame
+    -- frame times as counts in STEP-ms buckets up to TOP ms (longer ones kept
+    -- exactly): sorting 30 s of frames for the percentiles was a 2 ms hitch
+    STEP = 0.01, TOP = 50,
+    -- SA-MP ids counted SLICE a frame, not 4352 SAMPFUNCS calls at once
+    SWEEPS = {{"labels", "sampIs3dTextDefined", 2048}, {"textdraws", "sampTextdrawIsExists", 2304}},
+    SLICE = 128,
     LOG = getWorkingDirectory() .. "\\logs\\drift.log",
     -- CPools: storage +0, slot flags +4 (0x80 free), size +8
     POOLS = {{"peds", 0xB74490}, {"vehicles", 0xB74494}, {"objects", 0xB7449C}, {"buildings", 0xB74498},
              {"dummies", 0xB744A0}, {"colmodels", 0xB744A4}, {"tasks", 0xB744A8}, {"events", 0xB744AC},
              {"intelligence", 0xB744C0}, {"ptrsingle", 0xB74484}, {"ptrdouble", 0xB74488},
              {"entryinfo", 0xB7448C}, {"txds", 0xC8800C}},
-    on = false, times = {}, n = 0, lost = 0, resets = 0,
+    on = false, hist = {}, over = {}, n = 0, total = 0, worst = 0, slow = 0, paused = 0, lost = 0, resets = 0,
+    swept = {}, sweep = {i = 1, id = 0, count = 0},
 }
 
 -- -> milliseconds, from QueryPerformanceCounter
@@ -3546,16 +3556,57 @@ function DRIFT.pool(at)
     if ok then return used, size end
 end
 
--- How many ids below `n` the SA-MP function `name` says exist, or nil
-function DRIFT.sampCount(name, n)
-    local fn = rawget(_G, name) or getfenv(1)[name]
-    if type(fn) ~= "function" then return nil end
-    local ok, count = pcall(function()
-        local c = 0
-        for id = 0, n - 1 do if fn(id) then c = c + 1 end end
-        return c
-    end)
-    return ok and count or nil
+-- How many of the ids [from, to) `fn` says exist
+function DRIFT.countIds(fn, from, to)
+    local c = 0
+    for id = from, to - 1 do if fn(id) then c = c + 1 end end
+    return c
+end
+
+-- One slice of the current sweep; a finished sweep's count goes to DRIFT.swept
+-- (nil when the SA-MP function is missing or failed), then the next starts.
+function DRIFT.sweepStep()
+    local sw, w = DRIFT.sweep, DRIFT.SWEEPS[DRIFT.sweep.i]
+    local fn = rawget(_G, w[2]) or getfenv(1)[w[2]]
+    local stop = math.min(sw.id + DRIFT.SLICE, w[3])
+    local ok, c = false, nil
+    if type(fn) == "function" then ok, c = pcall(DRIFT.countIds, fn, sw.id, stop) end
+    if ok and sw.count then sw.count, sw.id = sw.count + c, stop else sw.count, sw.id = nil, w[3] end
+    if sw.id >= w[3] then
+        DRIFT.swept[w[1]] = sw.count
+        sw.i, sw.id, sw.count = sw.i % #DRIFT.SWEEPS + 1, 0, 0
+    end
+end
+
+-- One frame's time into the histogram
+function DRIFT.add(ms)
+    if ms > DRIFT.PAUSE then DRIFT.paused = DRIFT.paused + ms; return end
+    DRIFT.n, DRIFT.total = DRIFT.n + 1, DRIFT.total + ms
+    if ms > DRIFT.worst then DRIFT.worst = ms end
+    if ms > DRIFT.SLOW then DRIFT.slow = DRIFT.slow + 1 end
+    if ms >= DRIFT.TOP then DRIFT.over[#DRIFT.over + 1] = ms
+    else
+        local b = math.floor(ms / DRIFT.STEP + 0.5)
+        DRIFT.hist[b] = (DRIFT.hist[b] or 0) + 1
+    end
+end
+
+-- The frame time q of the frames are at or under, to the nearest STEP ms
+function DRIFT.quantile(q)
+    local n = DRIFT.n
+    if n == 0 then return 0 end
+    local want, seen = math.max(1, math.ceil(n * q)), 0
+    for b = 0, math.floor(DRIFT.TOP / DRIFT.STEP + 0.5) do
+        seen = seen + (DRIFT.hist[b] or 0)
+        if seen >= want then return b * DRIFT.STEP end
+    end
+    table.sort(DRIFT.over)
+    return DRIFT.over[want - seen] or DRIFT.worst
+end
+
+function DRIFT.reset()
+    DRIFT.hist, DRIFT.over = {}, {}
+    DRIFT.n, DRIFT.total, DRIFT.worst, DRIFT.slow, DRIFT.paused = 0, 0, 0, 0, 0
 end
 
 -- The counts, as {key = number}; one that can't be read is left out
@@ -3573,8 +3624,7 @@ function DRIFT.counts()
         c.lods = readU32(0xB76840)
         c.fx = readU32(0xA9AE80 + 0x14)                        -- g_fxMan's m_FxSystems count
     end)
-    c.labels = DRIFT.sampCount("sampIs3dTextDefined", 2048)
-    c.textdraws = DRIFT.sampCount("sampTextdrawIsExists", 2304)
+    c.labels, c.textdraws = DRIFT.swept.labels, DRIFT.swept.textdraws
     if refPool and refPool.used then pcall(function() c.refs = readU32(refPool.used) end) end
     pcall(function()
         local me, m = ffi.C.fx_process(), ffi.new("FxProcessMemory")
@@ -3610,20 +3660,12 @@ DRIFT.FIELDS = {
 
 -- The frames since the last line and the counts now -> a sample
 function DRIFT.sample(now)
-    local n, total, sorted, paused = 0, 0, {}, 0
-    for i = 1, DRIFT.n do
-        local ms = DRIFT.times[i]
-        if ms > DRIFT.PAUSE then paused = paused + ms
-        else n = n + 1; total = total + ms; sorted[n] = ms end
-    end
-    table.sort(sorted)
-    local function at(q) return n > 0 and sorted[math.max(1, math.ceil(n * q))] or 0 end
-    local slow = 0
-    for i = 1, n do if sorted[i] > DRIFT.SLOW then slow = slow + 1 end end
+    local n, total, paused, slow = DRIFT.n, DRIFT.total, DRIFT.paused, DRIFT.slow
     local s = DRIFT.counts()
     s.t = (now - DRIFT.began) / 1000
     s.fps = total > 0 and n * 1000 / total or 0
-    s.ms, s.p50, s.p95, s.p99, s.worst, s.slow = n > 0 and total / n or 0, at(0.5), at(0.95), at(0.99), at(1), slow
+    s.ms, s.p50, s.p95, s.p99, s.worst, s.slow = n > 0 and total / n or 0,
+        DRIFT.quantile(0.5), DRIFT.quantile(0.95), DRIFT.quantile(0.99), DRIFT.worst, slow
     s.paused = paused / 1000
     local prev, span = DRIFT.samples[#DRIFT.samples], (now - DRIFT.since) / 1000
     if s.tchits then
@@ -3631,7 +3673,8 @@ function DRIFT.sample(now)
         s["tcnew/s"] = (s.tcnew - (prev and prev.tcnew or 0)) / span
     end
     DRIFT.samples[#DRIFT.samples + 1] = s
-    DRIFT.n, DRIFT.since = 0, now
+    DRIFT.reset()
+    DRIFT.since = now
     local parts = {os.date("%H:%M:%S"), ("+%ds fps=%.0f ms=%.2f p50=%.2f p95=%.2f p99=%.2f worst=%.1f slow=%d%s |"):format(
         s.t, s.fps, s.ms, s.p50, s.p95, s.p99, s.worst, s.slow, paused > 0 and (" paused=%.1fs"):format(s.paused) or "")}
     for _, f in ipairs(DRIFT.FIELDS) do
@@ -3647,11 +3690,9 @@ end
 function driftFrame()
     if not DRIFT.on then return end
     local now = DRIFT.clock()
-    if DRIFT.last then
-        local n = DRIFT.n + 1
-        DRIFT.n, DRIFT.times[n] = n, now - DRIFT.last
-    end
+    if DRIFT.last then DRIFT.add(now - DRIFT.last) end
     DRIFT.last = now
+    DRIFT.sweepStep()
     if now >= DRIFT.due then
         DRIFT.sample(now)
         DRIFT.due = now + DRIFT.EVERY * 1000
@@ -3667,7 +3708,8 @@ function startDrift()
         return false
     end
     DRIFT.on, DRIFT.began, DRIFT.since, DRIFT.due = true, now, now, now + DRIFT.EVERY * 1000
-    DRIFT.last, DRIFT.n, DRIFT.samples = nil, 0, {}
+    DRIFT.last, DRIFT.samples = nil, {}
+    DRIFT.reset()
     DRIFT.write(("== %s fixes drift: a line every %d s"):format(os.date("%Y-%m-%d %H:%M:%S"), DRIFT.EVERY))
     log(("[fixes] drift: a line every %d s in logs\\drift.log"):format(DRIFT.EVERY), "info")
     return true
@@ -3684,12 +3726,8 @@ end
 -- rate since the last line, so what it changed shows on either side
 function driftNote(text)
     if not DRIFT.on then return end
-    local n, total = 0, 0
-    for i = 1, DRIFT.n do
-        if DRIFT.times[i] <= DRIFT.PAUSE then n, total = n + 1, total + DRIFT.times[i] end
-    end
     DRIFT.write(("%s %s (fps since the last line: %.0f)"):format(os.date("%H:%M:%S"), text,
-        total > 0 and n * 1000 / total or 0))
+        DRIFT.total > 0 and DRIFT.n * 1000 / DRIFT.total or 0))
 end
 
 addEventHandler("onD3DDeviceLost", function()
@@ -3854,6 +3892,7 @@ end
     local DEATH = {
         LOG = getWorkingDirectory() .. "\\logs\\death.log",
         KEEP = 3000,                -- ms of history
+        EVERY = 1000 / 60,          -- ms between snapshots (every frame at 350 fps allocated ~0.5 MB/s)
         WAIT = 3000,                -- ms after dying for SA-MP's death report
         TASKS = {[205] = "get up", [207] = "fall", [208] = "fall and get up", [209] = "fall and stay down",
             [212] = "die", [214] = "die in car", [215] = "die in car", [217] = "die", [218] = "dead",
@@ -3875,7 +3914,7 @@ end
             [91] = "SetVehicleVelocity", [154] = "ExitVehicle", [159] = "SetVehiclePos", [166] = "WorldPlayerDeath"},
         WEAPONS = {[0] = "fist", [37] = "flamethrower", [49] = "vehicle", [50] = "helicopter blades", [51] = "explosion",
             [53] = "drowned", [54] = "collision or fall", [255] = "suicide"},
-        on = false, frames = {}, net = {}, sent = {},
+        on = false, frames = {}, net = {}, sent = {}, lastAt = -math.huge,
     }
 
     local function clock() return DRIFT.clock() end
@@ -3918,6 +3957,11 @@ end
         return ("%s (model %d)"):format(kind == 4 and "an object" or kind == 1 and "a building" or "an entity", model)
     end
 
+    -- Made once: LuaJIT never frees a function ctype parsed from a string, and
+    -- one per task per frame filled its type table within seconds ("tasks ?").
+    local TASK_TYPE = ffi.typeof("int(__thiscall*)(uintptr_t)")
+    local TASK_SUB = ffi.typeof("uintptr_t(__thiscall*)(uintptr_t)")
+
     -- The ped's primary tasks, each slot's tree: "0:701>808 3:208>207"
     local function tasks(ped)
         local intel = readU32(ped + 0x47C)
@@ -3927,8 +3971,8 @@ end
             local task, chain = readU32(intel + 4 + slot * 4), {}
             while task ~= 0 and #chain < 8 and readable(task, 12) and readable(readU32(task), 20) do
                 local vt = readU32(task)
-                chain[#chain + 1] = tostring(ffi.cast("int(__thiscall*)(uintptr_t)", readU32(vt + 16))(task))
-                task = tonumber(ffi.cast("uintptr_t", ffi.cast("uintptr_t(__thiscall*)(uintptr_t)", readU32(vt + 8))(task)))
+                chain[#chain + 1] = tostring(ffi.cast(TASK_TYPE, readU32(vt + 16))(task))
+                task = tonumber(ffi.cast("uintptr_t", ffi.cast(TASK_SUB, readU32(vt + 8))(task)))
             end
             if #chain > 0 then slots[#slots + 1] = slot .. ":" .. table.concat(chain, ">") end
         end
@@ -4011,18 +4055,22 @@ end
         if not okP or not ped or ped == 0 or not readable(ped, 0x770) then return end
         local hp, ar = ffi.cast("float*", ped + 0x540)[0], ffi.cast("float*", ped + 0x548)[0]
         local state = readU32(ped + 0x530)
-        local car = ""
-        if readU8(ped + 0x46D) % 2 == 1 and readU32(ped + 0x58C) ~= 0 then car = entity(readU32(ped + 0x58C)) end
-        local okT, tree = pcall(tasks, ped)
-        local okS, speed = pcall(getCharSpeed, PLAYER_PED)
-        local okC, x, y, z = pcall(getCharCoordinates, PLAYER_PED)
+        local dead = hp <= 0 or state == 54 or state == 55
         local frames = DEATH.frames
-        frames[#frames + 1] = {t = now, hp = hp, ar = ar, state = state, car = car, tasks = okT and tree or "?",
-            speed = okS and speed or 0, x = okC and x or 0, y = okC and y or 0, z = okC and z or 0}
+        -- a snapshot at most every EVERY ms, and always the frame it dies in
+        if now - DEATH.lastAt >= DEATH.EVERY or (dead and not DEATH.dead) then
+            DEATH.lastAt = now
+            local car = ""
+            if readU8(ped + 0x46D) % 2 == 1 and readU32(ped + 0x58C) ~= 0 then car = entity(readU32(ped + 0x58C)) end
+            local okT, tree = pcall(tasks, ped)
+            local okS, speed = pcall(getCharSpeed, PLAYER_PED)
+            local okC, x, y, z = pcall(getCharCoordinates, PLAYER_PED)
+            frames[#frames + 1] = {t = now, hp = hp, ar = ar, state = state, car = car, tasks = okT and tree or "?",
+                speed = okS and speed or 0, x = okC and x or 0, y = okC and y or 0, z = okC and z or 0}
+        end
         prune(frames, now)
         prune(DEATH.net, now)
         prune(DEATH.sent, now)
-        local dead = hp <= 0 or state == 54 or state == 55
         if dead and not DEATH.dead and not DEATH.dying then
             local frozen = {}
             for i, f in ipairs(frames) do frozen[i] = f end

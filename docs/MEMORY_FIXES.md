@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-11-05):** `fixes.lua` 0.24.2. It applies the 128 `gamePatches`
+**Status (2026-11-05):** `fixes.lua` 0.24.3. It applies the 128 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -2344,6 +2344,9 @@ weapon (+760h) and entity (+764h), the last collision's intensity (+D8h) and
 entity (+DCh), each named as a SA-MP player or vehicle with its driver. The
 report goes to `logs\death.log` when SA-MP sends RPC 53, or 3 s after
 without one, as one time-ordered timeline. Bitstreams are read and put back.
+The ped is read at most 60 times a second, and always on the frame it dies
+in; the task-call function types are made once (LuaJIT never frees one
+parsed from a string, and one per task per frame overflowed its table).
 
 **Tests.** `fixes_test.lua`: a jacked driver: the car drive task, an
 EnterVehicle RPC and a vehicle sync from player 12, on foot with `823>834`

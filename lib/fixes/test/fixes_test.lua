@@ -49,6 +49,7 @@ local thiscalls = {}   -- {function, this}
 local thiscallReturns  -- function(fn, this) -> what a thiscall returns, if set
 local fakeFfi = {
     cdef = function() end,
+    typeof = function(ctype) return ctype end,   -- cast() reads the declaration
     cast = function(ctype, va)
         va = tonumber(va)
         if ctype == 'uintptr_t' or ctype == 'uint32_t' then return va end
@@ -1058,7 +1059,6 @@ for _, n in ipairs({'value_550F82_8000', 'patch_550FBA', 'placeableMatrixArraySi
     ok(line and line:find('owned by samp.dll', 1, true) and not line:find('refusing', 1, true), 'named, not refused: ' .. tostring(line))
 end
 
-print('\n== the owners the first in-game run found (2026-10-25): named, not refused')
 print('\n== GTA frame delay: SA-MP 0.3.DL\'s 2 ms wait is written over, and given back off')
 put(0x53E94A, 0x83, 0xF8, 0x02, 0x72, 0xE1)
 env.applyGamePatches('early')
@@ -1076,6 +1076,7 @@ env.fixesCommand('framecaps off')
 ok(same(get(0x53E94A, 5), {0x83, 0xF8, 0x0E, 0x72, 0xE1}), 'from the stock 14 it goes back to 14')
 env.fixesCommand('framecaps on')
 
+print('\n== the owners the first in-game run found (2026-10-25): named, not refused')
 stockMta()
 put(0x738F3A, 0xFF, 0x25, 0x00, 0x00, 0x50, 0x40); putU32(0x40500000, 0x13372000)   -- SA-MP's jmp [ptr]
 put(0x7469A0, 0x30, 0xC0, 0x90, 0x90)                                               -- SilentPatch's xor al,al
@@ -2347,6 +2348,60 @@ for i = 1, #arg do
         f:close()
         print(('\nwrote the store (%d bytes) to %s'):format(#bytes, arg[i + 1]))
     end
+end
+
+local function eq(a, b, why) ok(a == b, ('%s (got %s, want %s)'):format(why, tostring(a), tostring(b))) end
+
+print('\n== drift: percentiles from the histogram, SA-MP ids counted a slice a frame')
+do
+    local DR = upvalue(env.driftFrame, 'DRIFT')
+    local now, lines = 0, {}
+    DR.clock = function() return now end
+    DR.write = function(line) lines[#lines + 1] = line end
+    env.sampIs3dTextDefined = function(id) return id < 10 end
+    env.sampTextdrawIsExists = function(id) return id % 100 == 0 end
+    local calls = 0
+    local labels = env.sampIs3dTextDefined
+    env.sampIs3dTextDefined = function(id) calls = calls + 1; return labels(id) end
+    env.stopDrift()                            -- an earlier section may have left it on
+    DR.EVERY = 30
+    ok(env.startDrift(), 'drift starts')
+    env.driftFrame()
+    local most = 0
+    for i = 1, 98 do
+        local before = calls
+        now = now + 2.0; env.driftFrame()
+        most = math.max(most, calls - before)
+    end
+    now = now + 30; env.driftFrame()          -- a hitch, in a bucket
+    now = now + 80; env.driftFrame()          -- over TOP: kept exactly
+    now = now + 5000; env.driftFrame()        -- a pause, not a frame
+    ok(most <= DR.SLICE, 'never more than one slice of SAMPFUNCS calls a frame: ' .. most)
+    eq(DR.swept.labels, 10, '3D labels counted over the frames')
+    eq(DR.swept.textdraws, 24, 'textdraws counted over the frames')
+    now = DR.due; env.driftFrame()
+    local line = lines[#lines] or ''
+    ok(line:find('p50=2.00', 1, true) and line:find('worst=80.0', 1, true) and line:find('slow=2', 1, true)
+        and line:find('p99=30.00', 1, true) and line:find('paused=', 1, true), 'the line: ' .. line)
+    ok(line:find('labels=10', 1, true) and line:find('textdraws=24', 1, true), 'with the counts: ' .. line)
+    eq(DR.n, 0, 'the next line starts from nothing')
+    eq(DR.quantile(0.99), 0, 'an empty histogram reads 0')
+    for _ = 1, 100 do DR.add(2.0) end
+    DR.add(60); DR.add(70)
+    eq(DR.quantile(0.99), 60, 'a percentile past TOP comes from the exact list')
+    env.stopDrift()
+end
+
+print('\n== no function ctype is parsed per call (LuaJIT never frees one: "table overflow")')
+do
+    local src = assert(io.open(root .. 'fixes.lua')):read('*a')
+    local bad = {}
+    for line in src:gmatch('[^\n]+') do
+        if line:find('ffi%.cast%(%s*"[^"]*%(%s*[%w_]*%s*%*%s*%)') and not line:find('pruneReferences or ffi.cast', 1, true) then
+            bad[#bad + 1] = line:match('^%s*(.-)%s*$')
+        end
+    end
+    eq(#bad, 0, 'function types are made once with ffi.typeof: ' .. table.concat(bad, ' | '))
 end
 
 print('\n== the log: logs\\fixes.log, a timed line each')
