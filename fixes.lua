@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.24.3")
+script_version("0.25.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -84,7 +84,9 @@ local sampFallback = {
     -- The removed-building table's two sites (fixRemovedBuildings()): the store's
     -- `mov ecx,[count]` and the imm32 of the lookup's `mov esi, table`.
     RemoveBuildingStore  = {['DLR1'] = 0x9D22F, ['R1'] = 0x98D8F, ['R3'] = 0x9CCDF, ['R5'] = 0x9D3EF},
-    RemoveBuildingLookup = {['DLR1'] = 0x9CAF8, ['R1'] = 0x98A08, ['R3'] = 0x9C958, ['R5'] = 0x9D068}
+    RemoveBuildingLookup = {['DLR1'] = 0x9CAF8, ['R1'] = 0x98A08, ['R3'] = 0x9C958, ['R5'] = 0x9D068},
+    -- The scrollbar thumb drag's first division (fixDialogScrollbar()).
+    ScrollbarDragDivide  = {['DLR1'] = 0x8848B, ['R1'] = 0x843EB, ['R3'] = 0x882FB, ['R5'] = 0x88A0B}
 }
 
 local F1_BLOCK_SIZE = 28    -- the VK_F1 polling block
@@ -865,6 +867,13 @@ for _, v in ipairs({
     {0x74872D, "Alt+Enter windowed mode", "E8 AE E1 FF FF 85 C0 75 0F", "90 90 90 90 90 90 90 90 90", "windowed"},
     {0x53E9B3, "keep running in the background (unpaused)", "0F 85 60 01 00 00", "75 44 90 90 90 90", "background"},
     {0x561AF6, "keep running in the pause menu", "01", "00", "background"},
+    -- SA-MixSets (Junior_Djjr, MIT): the shadows' and headlight glows' 0.4 / 0.1 snap
+    {0x70C6A9, "a car's headlight glow on the ground moves smoothly", "CD CC CC 3E", "00 00 00 00", "smoothshadows"},
+    {0x70C2D6, "a car's shadow moves smoothly", "CD CC CC 3D", "00 00 00 00", "smoothshadows"},
+    -- the weapon icon's 58 wide against 47 high: 47 (the float beside it) both ways
+    {0x58D94D, "the HUD fist icon square", "50 6C 86 00", "4C 6C 86 00", "weaponicon"},
+    {0x58D896, "the HUD weapon icon square", "50 6C 86 00", "4C 6C 86 00", "weaponicon"},
+    {0x60B4FA, "the mouse wheel does not cancel a reload", "89 88 A8 05 00 00", "90 90 90 90 90 90", "scrollreload"},
 }) do
     local va, from = v[1], hexBytes(v[3])
     gamePatches[#gamePatches + 1] = {name = v[2], va = va, from = from, to = hexBytes(v[4]), option = v[5],
@@ -921,6 +930,8 @@ local OPTIONS = {
             if on then return fixFrameCap() and 1 or 0, 0 end
             return stopFrameCap() and 1 or 0, 0
         end},
+    anisotropic = {default = true, label = "anisotropic texture filtering, 16x or the most the device offers",
+        apply = function(on) return fixAnisotropic(on) and 1 or 0, 0 end},
     mtapatches = {default = true, label = "MTA's multiplayer patches (73 sites, as crashes.asi applies them with SA-MP)"},
     wheelfps = {default = true, label = "the coasting slow-down off the throttle is the same at any fps (cars stop dead at high fps)",
         apply = function(on)
@@ -941,13 +952,13 @@ local OPTIONS = {
     -- MTA's frame-rate fixes, in crashfix.dll
     turnfps = {default = true, label = "a spinning car or object slows its spin as fast at any fps (MTA)",
         apply = function() return fixCrashes("game"), 0 end},
-    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA)",
+    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke and the fight stance last as long at any fps",
         apply = function() return fixCrashes("game"), 0 end},
     vehiclefps = {default = true,
-        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante)",
+        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a burning vehicle and an alarm last as long at any fps",
         apply = function() return fixCrashes("game"), 0 end},
     effectsfps = {default = true,
-        label = "particles, rain, splashes and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA)",
+        label = "particles, rain, splashes, explosion fuel and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA)",
         apply = function() return fixCrashes("game"), 0 end},
     pushfps = {default = true, label = "walking into a parked car pushes it as at 30 fps, not away (MTA)",
         apply = function() return fixCrashes("game"), 0 end},
@@ -962,6 +973,20 @@ local OPTIONS = {
         apply = function(on)
             if on then return startDeathTrace() and 1 or 0, 0 end
             return stopDeathTrace() and 1 or 0, 0
+        end},
+    faultlog = {default = true,
+        label = "each crash-type exception with its stack in logs\\faults.log as it happens (SA-MP swallows them)",
+        apply = function(on)
+            if on then return startFaultLog() and 1 or 0, 0 end
+            return stopFaultLog() and 1 or 0, 0
+        end},
+    streamtime = {default = false,
+        label = "model loading on the game's thread timed into logs\\stream.log, and on drift's lines (/fixes streamtime report)",
+        apply = function(on)
+            if on then startStreamTimer(); return fixCrashes("game"), 0 end
+            local c = fixCrashes("game")
+            stopStreamTimer()
+            return c, 0
         end},
     chutefps = {default = true, label = "the parachute turns, rolls and speeds up as at 30 fps (it spun at high fps)",
         apply = function() chuteTick(); return 0, 0 end},
@@ -1003,6 +1028,14 @@ local OPTIONS = {
         label = "the Frame Limiter and loading screens do not reset the device for vsync (a failed reset crashed at 0x7F9A3C)"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
+    smoothshadows = {default = true, label = "car shadows and headlight glows move smoothly on the ground (MixSets)"},
+    weaponicon = {default = true, label = "the HUD weapon icon square, not stretched (MixSets)"},
+    scrollreload = {default = false, label = "the mouse wheel does not cancel a reload (MixSets; changes weapon switching)"},
+    doubleskid = {default = true, label = "trucks with double rear wheels leave both skidmarks (MixSets)"},
+    boatradio = {default = true, label = "a boat's driver keeps the boat pose when the radio changes (MixSets)"},
+    boatfoam = {default = true, label = "a boat's wake dims at night with the water's light (MixSets)"},
+    unfocused = {default = false, label = "the game keeps running while another window has focus (borderless or windowed)",
+        apply = function(on) return fixUnfocused(on) and 1 or 0, 0 end},
     keepcars = {default = true, label = "a car marked no longer needed (opcode 01C3) is kept, not deleted with its parts left behind"},
     focusmenu = {default = false, label = "the pause menu opens when the window gets focus back (SA-MP turns this off)"},
     floatclock = {default = true,
@@ -1758,6 +1791,257 @@ function stopFrameCap()
     return true
 end
 
+--------------------------------------------------------------------------------
+-- Dialog scrollbar thumb drag
+--------------------------------------------------------------------------------
+-- DXUT's CDXUTScrollBar, dragging the thumb:
+--
+--   pos = start + (thumbTop - trackTop + maxThumb / (maxFirst * 2)) * maxFirst / maxThumb
+--
+-- maxFirst = end - start - pageSize is 0 for a list that fits its page, and
+-- maxThumb = track height - thumb height can be: a press where the hidden
+-- thumb was and a mouse move divide by zero inside the window procedure, and
+-- the game spins on the fault. A stub tests both divisors and leaves the
+-- position alone when either is 0.
+--
+--   8B C1          mov  eax, ecx          ; maxThumb        <- hooked, 8 bytes
+--   99             cdq
+--   8D 2C 3F       lea  ebp, [edi+edi]    ; maxFirst * 2
+--   F7 FD          idiv ebp
+--   ...                                   ; +0x19: idiv ecx
+--   5F             pop  edi               ; +0x1B
+--   03 C3          add  eax, ebx          ; + start
+--   89 86 8E..     mov  [esi+8Eh], eax    ; position
+do   -- a block: the chunk is at Lua's 200 locals
+local SB = {
+    SHAPE = "8B C1 99 8D 2C 3F F7 FD 8B 6E 72 8B 96 82 00 00 00 2B C5 03 C2 0F AF C7 99 F7 F9 5F 03 C3 89 86 8E 00 00 00",
+    HOOK_LEN = 8, RESUME = 8, STORE = 0x1B,
+    applied = nil,   -- {stub, va}
+}
+
+function SB.stubCode(stub, va)
+    local code = {
+        0x85, 0xFF,                                 -- test edi, edi
+        0x74, 0x11,                                 -- jz   keep
+        0x85, 0xC9,                                 -- test ecx, ecx
+        0x74, 0x0D,                                 -- jz   keep
+        0x8B, 0xC1, 0x99, 0x8D, 0x2C, 0x3F, 0xF7, 0xFD,
+        0xE9, 0, 0, 0, 0,                           -- jmp  va + RESUME
+        -- keep: eax + ebx is the position as it stands
+        0x8B, 0x86, 0x8E, 0x00, 0x00, 0x00,         -- mov  eax, [esi+8Eh]
+        0x2B, 0xC3,                                 -- sub  eax, ebx
+        0xE9, 0, 0, 0, 0,                           -- jmp  va + STORE
+    }
+    for i, b in ipairs(u32bytes(va + SB.RESUME - (stub + 21))) do code[17 + i] = b end
+    for i, b in ipairs(u32bytes(va + SB.STORE - (stub + 34))) do code[30 + i] = b end
+    return code
+end
+
+function fixDialogScrollbar()
+    if SB.applied then return true end
+    local va, how, why = resolveSamp("ScrollbarDragDivide")
+    if not va then
+        log("[fixes] the dialog scrollbar fix is not supported: " .. tostring(why))
+        return false
+    end
+    local want = hexBytes(SB.SHAPE)
+    local okRead, found = pcall(readBytes, va, #want)
+    if not okRead then
+        log(string.format("[fixes] cannot read the scrollbar drag at 0x%X; not patching", va))
+        return false
+    end
+    if found[1] == 0xE9 then
+        log(string.format("[fixes] the scrollbar drag at 0x%X is already hooked; left alone", va))
+        return false
+    end
+    if not bytesEqual(found, want) then
+        log(string.format("[fixes] refusing the dialog scrollbar fix via %s: 0x%X is %s", how, va, bytesToHex(found)))
+        return false
+    end
+    local p = ffi.C.VirtualAlloc(nil, 0x40, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if p == nil then
+        log("[fixes] refusing the dialog scrollbar fix: VirtualAlloc failed")
+        return false
+    end
+    local stub = tonumber(ffi.cast("uintptr_t", p))
+    poke(stub, SB.stubCode(stub, va))
+    writeCode(va, {0xE9, unpack(u32bytes(stub - (va + 5)))})
+    writeCode(va + 5, nops(SB.HOOK_LEN - 5))
+    local verified = readU8(va) == 0xE9
+    if verified then SB.applied = {stub = stub, va = va} end
+    log(string.format("[fixes] dialog scrollbar drag on SAMP %s via %s: 0x%X (rva 0x%X) tests its divisors (stub 0x%X) -- %s",
+        getSampVersion(), how, va, va - getModuleHandle("samp.dll"), stub,
+        verified and "no divide by zero on a list that does not scroll" or "WRITE DID NOT STICK"),
+        verified and "info" or "warn")
+    return verified
+end
+end
+
+--------------------------------------------------------------------------------
+-- Anisotropic filtering
+--------------------------------------------------------------------------------
+-- The game attaches RenderWare's RpAnisot plugin (0x748F70) and never uses
+-- it: one byte a texture, at the offset in 0xC92478, set to 1 by its
+-- constructor (0x749020: mov byte [ecx+eax], 1). RwD3D9SetTexture (0x7FDF15)
+-- reads that byte: over 1 it sets D3DSAMP_MAXANISOTROPY and the anisotropic
+-- filter with linear mips. The option writes the level into the
+-- constructor's operand, for every texture made from then on, and into each
+-- texture of each loaded dictionary (CTxdStore's pool, 0xC8800C; a
+-- dictionary's textures hang off the list at +8, a texture's link at +8).
+do   -- a block: the chunk is at Lua's 200 locals
+local AF = {
+    OFFSET = 0xC92478, CTOR = 0x74902A, POOL = 0xC8800C,
+    CAPS_MAX = 0xC9BF6C,    -- D3DCAPS9.MaxAnisotropy in RwD3D9's caps (0xC9BF00)
+    LEVEL = 16,
+}
+
+-- -> how many textures took the level
+function AF.sweep(level)
+    local offset, pool = readU32(AF.OFFSET), readU32(AF.POOL)
+    if offset == 0 or offset >= 0x1000 or pool == 0 then return 0 end
+    local defs, flags, size = readU32(pool), readU32(pool + 4), readU32(pool + 8)
+    local n = 0
+    for i = 0, size - 1 do
+        local dict = readU8(flags + i) < 0x80 and readU32(defs + i * 12) or 0
+        if dict ~= 0 then
+            local head = dict + 8
+            local node, walked = readU32(head), 0
+            while node ~= head and node ~= 0 and walked < 4096 do
+                ffi.cast("uint8_t*", node - 8 + offset)[0] = level
+                n, walked = n + 1, walked + 1
+                node = readU32(node)
+            end
+        end
+    end
+    return n
+end
+
+function fixAnisotropic(on)
+    local okRead, found = pcall(readBytes, AF.CTOR, 4)
+    if not okRead or found[1] ~= 0xC6 or found[2] ~= 0x04 or found[3] ~= 0x01 then
+        log(string.format("[fixes] refusing anisotropic filtering: 0x%X is %s", AF.CTOR,
+            okRead and bytesToHex(found) or "unreadable"))
+        return false
+    end
+    local level = 1
+    if on then
+        local max = readU32(AF.CAPS_MAX)
+        if max < 2 or max > 64 then
+            log(string.format("[fixes] anisotropic filtering: the device offers none (its most is %d)", max))
+            return false
+        end
+        level = math.min(AF.LEVEL, max)
+    end
+    writeCode(AF.CTOR + 3, {level})
+    local okSweep, count = pcall(AF.sweep, level)
+    local verified = readU8(AF.CTOR + 3) == level
+    log(string.format("[fixes] anisotropic filtering %s: 0x%X gives a new texture %d, %s loaded texture(s) set -- %s",
+        on and (level .. "x") or "off", AF.CTOR, level, okSweep and tostring(count) or "no",
+        verified and "in place" or "WRITE DID NOT STICK"), verified and "info" or "warn")
+    return verified
+end
+end
+
+--------------------------------------------------------------------------------
+-- Running unfocused (option unfocused)
+--------------------------------------------------------------------------------
+-- WinMain sleeps 100 ms a pass while ForegroundApp (0x8D621C) is 0, so the game
+-- freezes behind another window. The option points WndProc's three writes to it
+-- at a flag of ours, so it stays 1. Idle centres the cursor every frame
+-- (psMouseSetPos's SetCursorPos); that call goes through a stub that skips it
+-- while our flag is 0. Sound still pauses on WM_ACTIVATE.
+do
+local UF = {
+    FOREGROUND = 0x8D621C,
+    SITES = {                         -- mov dword [ForegroundApp], imm32
+        {va = 0x747FB0, value = 0},   -- WM_ACTIVATE, deactivating
+        {va = 0x748054, value = 0},   -- WM_KILLFOCUS
+        {va = 0x748068, value = 1},   -- WM_SETFOCUS
+    },
+    CURSOR = 0x74542B,                -- push eax; push ecx; call [SetCursorPos]
+    CURSOR_STOCK = hexBytes("50 51 FF 15 00 83 85 00"),
+    MAGIC = 0x67467846,               -- "FxFg"; then the flag, the stub at +0x10
+    STUB = 0x10,
+}
+
+function UF.mov(target, value)
+    local t = {0xC7, 0x05}
+    for _, b in ipairs(u32bytes(target)) do t[#t + 1] = b end
+    for _, b in ipairs(u32bytes(value)) do t[#t + 1] = b end
+    return t
+end
+
+function UF.callStub(base)
+    local t = {0xE8}
+    for _, b in ipairs(u32bytes(base + UF.STUB - (UF.CURSOR + 5))) do t[#t + 1] = b end
+    for _ = 1, 3 do t[#t + 1] = 0x90 end
+    return t
+end
+
+-- Ours from an earlier run (site 1 names our flag), else a new block.
+function UF.block()
+    if UF.base then return UF.base end
+    local b = readBytes(UF.SITES[1].va, 6)
+    local flag = b and b[1] == 0xC7 and b[2] == 0x05 and bytesU32({b[3], b[4], b[5], b[6]})
+    if flag and flag ~= UF.FOREGROUND then
+        local h = readBytes(flag - 4, 4)
+        if h and bytesU32(h) == UF.MAGIC then UF.base = flag - 4; return UF.base end
+        return nil, string.format("0x%X writes 0x%X, which is not this script's", UF.SITES[1].va, flag)
+    end
+    local p = ffi.C.VirtualAlloc(nil, 0x40, 0x3000, 0x40)   -- MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    if p == nil then return nil, "VirtualAlloc failed" end
+    local base = tonumber(ffi.cast("uintptr_t", p))
+    flag = base + 4
+    poke(base, u32bytes(UF.MAGIC))
+    poke(flag, u32bytes(1))
+    local stub = {0x80, 0x3D}                                -- cmp byte [flag], 0
+    for _, v in ipairs(u32bytes(flag)) do stub[#stub + 1] = v end
+    for _, v in ipairs({0x00, 0x74, 0x08,                    -- je ret
+                        0x50, 0x51, 0xFF, 0x15, 0x00, 0x83, 0x85, 0x00, 0xC3}) do
+        stub[#stub + 1] = v
+    end
+    poke(base + UF.STUB, stub)
+    UF.base = base
+    return base
+end
+
+function fixUnfocused(on)
+    local base, why = UF.block()
+    if not base then
+        log("[fixes] refusing running unfocused: " .. why, "warn")
+        return false
+    end
+    local flag = base + 4
+    local sites = {}
+    for _, s in ipairs(UF.SITES) do
+        sites[#sites + 1] = {va = s.va, stock = UF.mov(UF.FOREGROUND, s.value), ours = UF.mov(flag, s.value)}
+    end
+    sites[#sites + 1] = {va = UF.CURSOR, stock = UF.CURSOR_STOCK, ours = UF.callStub(base)}
+    for _, s in ipairs(sites) do
+        local found = readBytes(s.va, #s.stock)
+        if not bytesEqual(found, s.stock) and not bytesEqual(found, s.ours) then
+            log(string.format("[fixes] refusing running unfocused: 0x%X is %s", s.va, bytesToHex(found)), "warn")
+            return false
+        end
+    end
+    if on then
+        ffi.cast("uint32_t*", flag)[0] = 1                   -- the command was typed in the game
+        ffi.cast("uint8_t*", UF.FOREGROUND)[0] = 1
+    end
+    local verified = true
+    for _, s in ipairs(sites) do
+        local want = on and s.ours or s.stock
+        writeCode(s.va, want)
+        verified = verified and bytesEqual(readBytes(s.va, #want), want)
+    end
+    log(string.format("[fixes] running unfocused %s: WndProc's focus writes go to %s (0x%X), the cursor centring at 0x%X %s -- %s",
+        on and "on" or "off", on and "our flag" or "ForegroundApp", on and flag or UF.FOREGROUND, UF.CURSOR,
+        on and "skips while unfocused" or "is stock", verified and "in place" or "WRITE DID NOT STICK"),
+        verified and "info" or "warn")
+    return verified
+end
+end
+
 -- A line when SA-MP has swallowed more exceptions; from the main loop.
 local function exceptionFilterTick()
     if not exceptionFilter or not exceptionFilter.count then return end
@@ -1765,7 +2049,7 @@ local function exceptionFilterTick()
     if n == exceptionFilter.seen then return end
     exceptionFilter.seen = n
     log(string.format("[fixes] SA-MP has swallowed %d exception(s) so far (stock crashes on the 11th); the first %d " ..
-        "printed as warnings in chat", n, EF_SHOWN), "warn")
+        "printed as warnings in chat%s", n, EF_SHOWN, faultLogOn() and ", each with its stack in logs\\faults.log" or ""), "warn")
 end
 
 --------------------------------------------------------------------------------
@@ -2784,13 +3068,14 @@ local function crashFixOption(lib, i)
     return ok and p ~= nil and ffi.string(p) or "crashfix"
 end
 
--- What a hook is by its option: "crash", "glass", "ped", "sky" or "frame" (the frame-rate fixes)
+-- What a hook is by its option: "crash", "glass", "ped", "sky", "stream" or "frame" (the frame-rate fixes)
 local crashFixKind
 do
-    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky"}
+    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky", streamtime = "stream"}
     function crashFixKind(option) return kinds[option] or "frame" end
 end
-local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix", sky = "sky fix"}
+local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix", sky = "sky fix",
+    stream = "stream timer"}
 
 -- part: "game" (gta_sa.exe, from the start) or "samp" (samp.dll's helper,
 -- once SA-MP is up). -> hooks installed or removed now.
@@ -2873,7 +3158,7 @@ end
 -- The state of the hooks of `kind` (as crashFixCounts) as one of
 -- otherFixes' ("in place", "left to X", "off ...", "not in place")
 local CRASHFIX_OFF = {crash = "off (option crashfix)", glass = "off (option glasslist)", ped = "off (option pedmatrix)",
-    sky = "off (option skygrad)",
+    sky = "off (option skygrad)", stream = "off (option streamtime)",
     frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps)"}
 function crashFixState(kind)
     kind = kind or "crash"
@@ -2881,6 +3166,7 @@ function crashFixState(kind)
     if not crashFixLib then
         local wanted = kind == "crash" and options.crashfix ~= false or kind == "glass" and options.glasslist
             or kind == "ped" and options.pedmatrix or kind == "sky" and options.skygrad
+            or kind == "stream" and options.streamtime
         return wanted and "not in place" or off
     end
     local n, owners, seen = crashFixCounts(kind), {}, {}
@@ -2925,6 +3211,135 @@ local function crashFixTick(now)
                     ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "warn")
             end
         end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Fault log (lib/fixes/crashfix.dll, faults.c)
+--------------------------------------------------------------------------------
+-- Every crash-type exception, first chance, with the return addresses on its
+-- stack, appended to logs\faults.log by the DLL's own thread. SA-MP swallows
+-- the ones in CGame::Process and its opcodes (and the filter fix above, every
+-- one), which can stop the world and every script with no dump; this only
+-- watches. Option "faultlog". docs/MEMORY_FIXES.md 48.
+pcall(ffi.cdef, [[
+    int CrashFix_FaultsStart(const char* path);
+    int CrashFix_FaultsStop(void);
+    void CrashFix_FaultsFlush(void);
+    uint32_t CrashFix_FaultsSeen(void);
+]])
+do
+    local FAULT_LOG = "logs\\faults.log"
+    local watching                 -- true while the DLL watches
+
+    function startFaultLog()
+        if watching then return true end
+        local lib, why = loadCrashFix()
+        if not lib then
+            log("[fixes] refusing the fault log: " .. why, "warn")
+            return false
+        end
+        local ok, started = pcall(function()
+            return lib.CrashFix_FaultsStart(getWorkingDirectory() .. "\\" .. FAULT_LOG) == 1
+        end)
+        if not ok then
+            log("[fixes] the fault log needs a newer lib\\fixes\\crashfix.dll", "warn")
+            return false
+        end
+        watching = started
+        log(string.format("[fixes] fault log: crash-type exceptions go to %s with their stacks as they happen -- %s",
+            FAULT_LOG, started and "watching" or "COULD NOT START"), started and "info" or "warn")
+        return started
+    end
+
+    function stopFaultLog()
+        if not watching then return true end
+        pcall(function() crashFixLib.CrashFix_FaultsStop() end)
+        watching = nil
+        return true
+    end
+
+    function faultLogOn() return watching == true end
+end
+
+--------------------------------------------------------------------------------
+-- Stream timer (lib/fixes/crashfix.dll, stream.c)
+--------------------------------------------------------------------------------
+-- A diagnostic, not a fix: CStreaming's ConvertBufferToObject,
+-- FinishLoadingLargeFile and LoadAllRequestedModels timed on the game's
+-- thread, a line each in logs\stream.log, and their sums on drift's lines.
+-- Option "streamtime", off by default. docs/MEMORY_FIXES.md 53.
+pcall(ffi.cdef, [[
+    int CrashFix_StreamStart(const char* path);
+    int CrashFix_StreamStop(void);
+    void CrashFix_StreamFlush(void);
+    const char* CrashFix_StreamSummary(void);
+    double CrashFix_StreamStat(int which);
+    void CrashFix_StreamResetWorst(void);
+]])
+do
+    local STREAM_LOG = "logs\\stream.log"
+    local timing                   -- true while the DLL writes the log
+    local last = {0, 0, 0, 0}      -- the sums at the last read
+
+    function startStreamTimer()
+        if timing then return true end
+        local lib, why = loadCrashFix()
+        if not lib then
+            log("[fixes] refusing the stream timer: " .. why, "warn")
+            return false
+        end
+        local ok, started = pcall(function()
+            local on = lib.CrashFix_StreamStart(getWorkingDirectory() .. "\\" .. STREAM_LOG) == 1
+            for i = 1, 4 do last[i] = tonumber(lib.CrashFix_StreamStat(i - 1)) end
+            lib.CrashFix_StreamResetWorst()
+            return on
+        end)
+        if not ok then
+            log("[fixes] the stream timer needs a newer lib\\fixes\\crashfix.dll", "warn")
+            return false
+        end
+        timing = started
+        log(string.format("[fixes] stream timer: each model converted on the game's thread is a line in %s -- %s",
+            STREAM_LOG, started and "timing" or "COULD NOT START"), started and "info" or "warn")
+        return started
+    end
+
+    function stopStreamTimer()
+        if not timing then return true end
+        pcall(function() crashFixLib.CrashFix_StreamStop() end)
+        timing = nil
+        return true
+    end
+
+    function streamTimerFlush()
+        if timing then pcall(function() crashFixLib.CrashFix_StreamFlush() end) end
+    end
+
+    -- Since the last call -> ms converting, files, ms in drains, drains, the
+    -- longest file's ms and its id; nothing while it is off
+    function streamTimerRead()
+        if not timing then return end
+        local ok, ms, n, allMs, alls, worst, id = pcall(function()
+            local lib, now = crashFixLib, {}
+            for i = 1, 6 do now[i] = tonumber(lib.CrashFix_StreamStat(i - 1)) end
+            lib.CrashFix_StreamResetWorst()
+            local d = {}
+            for i = 1, 4 do d[i], last[i] = now[i] - last[i], now[i] end
+            return d[1], d[2], d[3], d[4], now[5], now[6]
+        end)
+        if ok then return ms, n, allMs, alls, worst, id end
+    end
+
+    -- -> lines: by kind and type, the drains, the models that took longest
+    function streamTimerReport()
+        if not timing then return {"streamtime is off: /fixes streamtime on, then drive, teleport and enter interiors"} end
+        local ok, text = pcall(function() return ffi.string(crashFixLib.CrashFix_StreamSummary()) end)
+        local lines = {}
+        if ok then for line in text:gmatch("[^\r\n]+") do lines[#lines + 1] = line end end
+        if #lines == 0 then lines[1] = "streamtime: nothing timed yet" end
+        lines[#lines + 1] = "every file: " .. STREAM_LOG
+        return lines
     end
 end
 
@@ -3181,7 +3596,12 @@ end
     }
     local HEAD = {0xA4, 0x03, 0x09, 0x50, 0x4C, 0x43, 0x48, 0x55, 0x54, 0x45}   -- script_name 'PLCHUTE'
     local SIZE = 0x1800
+    local NAME = {("plchute"):byte(1, 7)}
+    -- with no PLCHUTE running, the script list is walked this often (game ms)
+    local LOOK_EVERY = 100
     local found                 -- {base = va, sites = {{at = va of the float, kind}}} for the code last seen
+    local failed, failedWhy     -- the base whose code did not match: not scanned again
+    local running, lookedAt = false, nil
     local told, listed, since
 
     -- `op 00 03 <local> 00 06 <float>`: the kinds' sites in the code at base, or nil and why
@@ -3212,16 +3632,38 @@ end
         return {base = base, sites = sites}
     end
 
-    -- The running PLCHUTE's sites, or nil and why
+    -- m_szName is PLCHUTE, either case, with no table or string per script
+    local function isChute(script)
+        for j = 1, 7 do
+            local c = readU8(script + 7 + j)
+            if c ~= NAME[j] and c ~= NAME[j] - 32 then return false end
+        end
+        return true
+    end
+
+    -- The running PLCHUTE's sites, or nil and why. Every frame while it runs
+    -- (its code goes when it ends), else every LOOK_EVERY.
     local function code()
+        if not running then
+            local now = readU32(0xB7CB84)                           -- CTimer::m_snTimeInMilliseconds
+            -- (a timer that went back, a new game, looks at once)
+            if lookedAt and now >= lookedAt and now - lookedAt < LOOK_EVERY then
+                return nil, "no PLCHUTE running"
+            end
+            lookedAt = now
+        end
+        running = false
         local script, guard = readU32(0xA8B42C), 0                  -- CTheScripts::pActiveScripts
         while script ~= 0 and guard < 1000 and readable(script, 0x18) do
             guard = guard + 1
-            if string.char(unpack(readBytes(script + 8, 7) or {})):lower() == "plchute" then
+            if isChute(script) then
+                running = true
                 local base = readU32(script + 0x10)
                 if found and found.base == base then return found end
+                if base == failed then return nil, failedWhy end
                 local sites, why = scan(base)
                 found = sites
+                if not sites then failed, failedWhy = base, why end
                 return sites, why
             end
             script = readU32(script)
@@ -3482,6 +3924,7 @@ function reportStartup()
         (refused > 0 or #missing > 0) and "warn" or "info")
 end
 
+--------------------------------------------------------------------------------
 --- /fixes - the options and their state; /fixes patches - every patch;
 --- /fixes <option> on|off - switch one.
 --------------------------------------------------------------------------------
@@ -3513,9 +3956,9 @@ local DRIFT = {
     -- frame times as counts in STEP-ms buckets up to TOP ms (longer ones kept
     -- exactly): sorting 30 s of frames for the percentiles was a 2 ms hitch
     STEP = 0.01, TOP = 50,
-    -- SA-MP ids counted SLICE a frame, not 4352 SAMPFUNCS calls at once
+    -- SA-MP ids counted SLICE a frame, one pass starting LEAD ms before each line
     SWEEPS = {{"labels", "sampIs3dTextDefined", 2048}, {"textdraws", "sampTextdrawIsExists", 2304}},
-    SLICE = 128,
+    SLICE = 128, LEAD = 2000,
     LOG = getWorkingDirectory() .. "\\logs\\drift.log",
     -- CPools: storage +0, slot flags +4 (0x80 free), size +8
     POOLS = {{"peds", 0xB74490}, {"vehicles", 0xB74494}, {"objects", 0xB7449C}, {"buildings", 0xB74498},
@@ -3523,7 +3966,7 @@ local DRIFT = {
              {"intelligence", 0xB744C0}, {"ptrsingle", 0xB74484}, {"ptrdouble", 0xB74488},
              {"entryinfo", 0xB7448C}, {"txds", 0xC8800C}},
     on = false, hist = {}, over = {}, n = 0, total = 0, worst = 0, slow = 0, paused = 0, lost = 0, resets = 0,
-    swept = {}, sweep = {i = 1, id = 0, count = 0},
+    swept = {}, sweep = {i = 1, id = 0, count = 0, running = false, done = false},
 }
 
 -- -> milliseconds, from QueryPerformanceCounter
@@ -3574,6 +4017,7 @@ function DRIFT.sweepStep()
     if ok and sw.count then sw.count, sw.id = sw.count + c, stop else sw.count, sw.id = nil, w[3] end
     if sw.id >= w[3] then
         DRIFT.swept[w[1]] = sw.count
+        if sw.i == #DRIFT.SWEEPS then sw.running, sw.done = false, true end
         sw.i, sw.id, sw.count = sw.i % #DRIFT.SWEEPS + 1, 0, 0
     end
 end
@@ -3625,6 +4069,11 @@ function DRIFT.counts()
         c.fx = readU32(0xA9AE80 + 0x14)                        -- g_fxMan's m_FxSystems count
     end)
     c.labels, c.textdraws = DRIFT.swept.labels, DRIFT.swept.textdraws
+    local streamed, files, allMs, alls, worst, id = streamTimerRead()
+    if streamed then
+        c.streamtotal, c.streamn, c.loadallms, c.loadalls = streamed, files, allMs, alls
+        if id >= 0 then c.streamworst, c.streamworstid = worst, id end
+    end
     if refPool and refPool.used then pcall(function() c.refs = readU32(refPool.used) end) end
     pcall(function()
         local me, m = ffi.C.fx_process(), ffi.new("FxProcessMemory")
@@ -3653,7 +4102,8 @@ DRIFT.FIELDS = {
     {"peds", "pool"}, {"vehicles", "pool"}, {"objects", "pool"}, {"buildings", "pool"}, {"dummies", "pool"},
     {"colmodels", "pool"}, {"tasks", "pool"}, {"events", "pool"}, {"intelligence", "pool"}, {"ptrsingle", "pool"},
     {"ptrdouble", "pool"}, {"entryinfo", "pool"}, {"txds", "pool"},
-    {"streamMB", "%.0f"}, {"visible", "%d"}, {"lods", "%d"}, {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
+    {"streamMB", "%.0f"}, {"streamms", "%.3f"}, {"streamn", "%d"}, {"streamworst", "%.1f"}, {"streamworstid", "%d"},
+    {"loadalls", "%d"}, {"loadallms", "%.1f"}, {"visible", "%d"}, {"lods", "%d"}, {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
     {"refs", "%d"}, {"workingMB", "%.0f"}, {"privateMB", "%.0f"}, {"addressMB", "%.0f"}, {"handles", "%d"},
     {"gdi", "%d"}, {"user", "%d"}, {"luaKB", "%.0f"}, {"lost", "%d"}, {"resets", "%d"},
 }
@@ -3667,6 +4117,7 @@ function DRIFT.sample(now)
     s.ms, s.p50, s.p95, s.p99, s.worst, s.slow = n > 0 and total / n or 0,
         DRIFT.quantile(0.5), DRIFT.quantile(0.95), DRIFT.quantile(0.99), DRIFT.worst, slow
     s.paused = paused / 1000
+    if s.streamtotal then s.streamms = n > 0 and s.streamtotal / n or 0 end     -- ms a frame
     local prev, span = DRIFT.samples[#DRIFT.samples], (now - DRIFT.since) / 1000
     if s.tchits then
         s["tchits/s"] = (s.tchits - (prev and prev.tchits or 0)) / span
@@ -3692,10 +4143,13 @@ function driftFrame()
     local now = DRIFT.clock()
     if DRIFT.last then DRIFT.add(now - DRIFT.last) end
     DRIFT.last = now
-    DRIFT.sweepStep()
+    local sw = DRIFT.sweep
+    if not sw.running and not sw.done and DRIFT.due - now <= DRIFT.LEAD then sw.running = true end
+    if sw.running then DRIFT.sweepStep() end
     if now >= DRIFT.due then
         DRIFT.sample(now)
         DRIFT.due = now + DRIFT.EVERY * 1000
+        sw.done = false
         DRIFT.last = DRIFT.clock()                 -- the sample's own time is not a frame's
     end
 end
@@ -3709,7 +4163,9 @@ function startDrift()
     end
     DRIFT.on, DRIFT.began, DRIFT.since, DRIFT.due = true, now, now, now + DRIFT.EVERY * 1000
     DRIFT.last, DRIFT.samples = nil, {}
+    DRIFT.sweep = {i = 1, id = 0, count = 0, running = false, done = false}
     DRIFT.reset()
+    streamTimerRead()                              -- its sums start with the first line
     DRIFT.write(("== %s fixes drift: a line every %d s"):format(os.date("%Y-%m-%d %H:%M:%S"), DRIFT.EVERY))
     log(("[fixes] drift: a line every %d s in logs\\drift.log"):format(DRIFT.EVERY), "info")
     return true
@@ -3772,6 +4228,10 @@ function fixesCommand(params)
         for _, line in ipairs(driftReport()) do say(line) end
         return
     end
+    if key == "streamtime" and value == "report" then
+        for _, line in ipairs(streamTimerReport()) do say(line) end
+        return
+    end
     if key == "patches" then
         say(patchSummary())
         local groups, order = {}, {}       -- a group is one line: its sites' states, counted
@@ -3796,7 +4256,8 @@ function fixesCommand(params)
         local cf = crashFixCounts()
         say(("crash fixes (%d hooks): %d hooked, %d owned elsewhere, %d refused, %d off"):format(
             cf.ok + cf.owned + cf.refused + cf.off, cf.ok, cf.owned, cf.refused, cf.off))
-        for _, k in ipairs({{"frame", "frame-rate fixes"}, {"ped", "ped fixes"}, {"glass", "glass list"}, {"sky", "sky fix"}}) do
+        for _, k in ipairs({{"frame", "frame-rate fixes"}, {"ped", "ped fixes"}, {"glass", "glass list"}, {"sky", "sky fix"},
+                {"stream", "stream timer"}}) do
             local fr = crashFixCounts(k[1])
             if fr.ok + fr.owned + fr.refused + fr.off > 0 then
                 say(("%s (%d sites): %d in place, %d owned elsewhere, %d refused, %d off"):format(
@@ -4167,6 +4628,8 @@ function main()
     noteFix("animation wipes", worked, animWipe and animWipe.owner)
     worked = fixReferencePool()
     noteFix("entity references", worked, refPool and refPool.owner)
+    if options.faultlog then startFaultLog() end
+    if options.streamtime then startStreamTimer() end
     fixCrashes("game")                           -- gta_sa.exe code, before the game runs much of it
     if options.fogrestore then
         worked = fixFogRestore()
@@ -4235,6 +4698,17 @@ function main()
 
     noteFix("F1 help dialog off", disableF1KeyAndDialog())   -- samp.dll
     noteFix("smoking animation", fixSmokingAnimation())
+    noteFix("dialog scrollbar drag", fixDialogScrollbar())
+    if options.anisotropic then
+        noteFix("anisotropic filtering", fixAnisotropic(true))
+    else
+        otherFixes[#otherFixes + 1] = {"anisotropic filtering", "off (option anisotropic)"}
+    end
+    if options.unfocused then
+        noteFix("running unfocused", fixUnfocused(true))
+    else
+        otherFixes[#otherFixes + 1] = {"running unfocused", "off (option unfocused)"}
+    end
     --forceRadarVisible(true)
     --blankDebugEntityLabels()
     if sigscanOk then pcall(sigscan.flush) end   -- remember the offsets for next launch
@@ -4254,6 +4728,6 @@ function main()
         deathFrame()
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
-        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now) end
+        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now); streamTimerFlush() end
     end
 end

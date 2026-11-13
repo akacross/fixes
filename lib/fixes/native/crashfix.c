@@ -26,7 +26,9 @@
  * A crash averted is one `lock inc` on the hook's counter; fixes reads them.
  * MTA's frame-rate fixes are in framerate.c and FramerateVigilante's in
  * vigilante.c, each switched by its own option; MTA's ped matrix checks are in
- * pedmatrix.c, the vehicle glass list in glasslist.c, the dithered sky in sky.c.
+ * pedmatrix.c, the vehicle glass list in glasslist.c, the dithered sky in sky.c,
+ * the first-chance crash records (option faultlog) in faults.c, and the model
+ * loading timer (option streamtime) in stream.c.
  *
  *   ./build.sh            -> ../crashfix.dll
  */
@@ -146,8 +148,8 @@
     H(frame, "CClumpModelInfo::GetFrameFromId: a neighbour for a missing frame", 0x4C53C0, 7, -1, \
         "\x83\xEC\x08\x8B\x44\x24\x10") \
     H(fxquality, "GetFxQuality: blob shadows for peds and five vehicles", 0x49EA50, 5, -1, "\x8B\x41\x54\xC3\x90") \
-    H(shadow, "CShadows::StoreShadowForVehicle: the asking vehicle", 0x70BDA0, 9, -1, \
-        "\x83\xEC\x44\x53\xE8\x07\x3C\x00\x00") \
+    H(shadow, "CShadows::StoreShadowForVehicle: the asking vehicle", 0x70BD9B, 9, -1, \
+        "\x90\x90\x90\x90\x90\x83\xEC\x44\x53") \
     H(impact, "Fx_c::AddBulletImpact: sand and dust once per 500 ms", 0x49F3E8, 5, -1, "\xA1\x3C\xF0\xB6\x00") \
     H(mouse, "no SetCursorPos while the game is in the background", 0x745423, 8, -1, \
         "\x8B\x44\x24\x08\x8B\x4C\x24\x04") \
@@ -1506,16 +1508,15 @@ __asm__(
 "    mov eax, dword ptr [_cf_fx_quality]\n"
 "    ret\n"
 
-/* CShadows::StoreShadowForVehicle: which vehicle asks */
+/* CShadows::StoreShadowForVehicle: which vehicle asks. Back in time for the
+ * call at 0x70BDA4, which ProperShaders replaces. */
 "HOOK shadow\n"
 "    mov eax, dword ptr [esp+4]\n"
 "    mov ax, word ptr [eax+0x22]\n"
 "    mov word ptr [_cf_shadow_model], ax\n"
 "    sub esp, 0x44\n"
 "    push ebx\n"
-"    mov eax, 0x70F9B0\n"           /* CVolumetricShadowMgr::IsAvailable */
-"    call eax\n"
-"    GO 0x70BDA9\n"
+"    GO 0x70BDA4\n"
 
 /* Fx_c::AddBulletImpact: the impact type (esi) rate-limited */
 "HOOK impact\n"
@@ -1601,9 +1602,12 @@ __asm__(
 
 #include "framerate.c"
 #include "vigilante.c"
+#include "mixsets.c"
 #include "pedmatrix.c"
 #include "glasslist.c"
 #include "sky.c"
+#include "faults.c"
+#include "stream.c"
 
 /* ------------------------------------------------------------------------ */
 /* The table                                                                */
@@ -1630,7 +1634,7 @@ typedef struct {
 #define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k, "crashfix"},
 #define FROW(k, option, name, va, len, stock) {#k, name, va, len, -1, stock, cf_hook_##k, &cf_n_##k, option},
 #define PROW(k, option, kind, name, va, len, stock, to) {#k, name, va, len, -1, stock, NULL, &cf_n_##k, option, kind, to},
-static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) };
+static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) STREAM(FROW) };
 #define HOOK_COUNT ((int)(sizeof hooks / sizeof hooks[0]))
 
 static int samp_hook(void)
@@ -1724,7 +1728,12 @@ static void ours(const Hook *h, uint8_t *code)
 {
     memset(code, 0x90, MAX_LEN);
     switch (h->kind) {
-    case KIND_JMP:  code[0] = 0xE9; *(uint32_t *)(code + 1) = (uint32_t)h->hook - (h->va + 5); break;
+    case KIND_JMP:
+        code[0] = 0xE9;
+        *(uint32_t *)(code + 1) = (uint32_t)h->hook - (h->va + 5);
+        /* the jump sits in the padding; the function's entry hops back to it */
+        if (!strcmp(h->key, "shadow")) code[5] = 0xEB, code[6] = 0xF9;
+        break;
     case KIND_CALL: code[0] = 0xE8; *(uint32_t *)(code + 1) = (uint32_t)h->to - (h->va + 5); break;
     case KIND_PTR:  *(uint32_t *)code = (uint32_t)h->to; break;
     }
@@ -1774,6 +1783,7 @@ __declspec(dllexport) int __cdecl CrashFix_Uninstall(int i)
     if (!write_code(h->va, h->saved, h->len)) return 0;
     h->installed = 0;
     if (!strcmp(h->key, "tick")) cf_frame_due = 1;       /* the gates pass again */
+    if (!strcmp(h->key, "boatfoam")) cf_boat_foam_stock();
     return 1;
 }
 

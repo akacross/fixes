@@ -22,6 +22,10 @@
  *     the climb aborted and pushed the ped back.
  *   - every swinging part's angle scales, not the chassis's alone, as
  *     FramerateVigilante's does; its dampings are in vigilante.c.
+ *   - fallstep and the other *step rows are ours: the timers counted whole ms
+ *     a frame, so they ran long at high fps and stopped above 1000. Each takes
+ *     cf_ms_step, the frame's whole ms with the fraction carried.
+ *   - jumpout, enginedrain and fuelfx are ours too.
  */
 
 /* ------------------------------------------------------------------------ */
@@ -30,6 +34,10 @@
 /* ------------------------------------------------------------------------ */
 #define TS "\x5C\xCB\xB7\x00"                    /* &CTimer::ms_fTimeStep */
 #define STILL "\x4C\x8B\x85\x00"                 /* &0.005f */
+/* fld ms_fTimeStep; fmul 0.02; fmul 1000, then a call to _ftol (rel32) */
+#define MS "\xD9\x05\x5C\xCB\xB7\x00\xD8\x0D\x38\x8B\x85\x00\xD8\x0D\x4C\x8C\x85\x00"
+#define MS_FTOL(rel) MS "\xE8" rel
+#define DAMP90 "\x20\x8C\x85\x00"                /* &0.9f */
 #define FRAMERATE(FJ, FP) \
     FJ(turndamping, "turnfps", "CPhysical::ApplyAirResistance: the turn speed's 0.99 per step", 0x544D29, 5, \
         "\xD9\x46\x50\xD8\x0D") \
@@ -39,6 +47,36 @@
         "\xD8\x15\x1C\x8B\x85\x00") \
     FP(aimreset, "pedfps", KIND_NOP, "CTaskSimpleUseGun::SetMoveAnim: the move command kept", 0x61E5E4, 6, \
         "\x89\x58\x14\x89\x58\x18", NULL) \
+    FJ(fallstep, "pedfps", "CTaskSimpleFall::ProcessPed: the down time keeps each frame's fraction of a ms", 0x67FB35, \
+        23, MS_FTOL("\xF4\x1F\x1A\x00")) \
+    FP(chokestep, "pedfps", KIND_CALL, "CTaskSimpleChoking::ProcessPed: the choke's time left by the carried step", 0x620520, \
+        23, MS_FTOL("\x09\x16\x20\x00"), cf_step_call) \
+    FP(climbstep, "pedfps", KIND_CALL, "CTaskSimpleClimb::ProcessPed: the get-to-position timer by the carried step", \
+        0x681319, 23, MS_FTOL("\x10\x08\x1A\x00"), cf_step_call) \
+    FP(fightstep, "pedfps", KIND_CALL, "CTaskSimpleFight::ProcessPed: the idle counter by the carried step", 0x6299A4, 23, \
+        MS_FTOL("\x85\x81\x1F\x00"), cf_step_call) \
+    FP(stancestep, "pedfps", KIND_CALL, "CTaskSimplePlayerOnFoot::PlayerControlFighter: the stance timer by the carried step", \
+        0x6878F8, 23, MS_FTOL("\x31\xA2\x19\x00"), cf_step_call) \
+    FP(carburn, "vehiclefps", KIND_CALL, "CAutomobile::ProcessCarOnFireAndExplode: a car's burn timer by the carried step", \
+        0x6A7126, 23, MS_FTOL("\x03\xAA\x17\x00"), cf_step_call) \
+    FP(heliburn, "vehiclefps", KIND_CALL, "CAutomobile::ProcessCarOnFireAndExplode: an aircraft's burn timer by the carried step", \
+        0x6A723E, 23, MS_FTOL("\xEB\xA8\x17\x00"), cf_step_call) \
+    FP(rcburn, "vehiclefps", KIND_CALL, "CAutomobile::ProcessCarOnFireAndExplode: an aircraft's slow burn by the carried step", \
+        0x6A726F, 23, MS_FTOL("\xBA\xA8\x17\x00"), cf_step_call) \
+    FP(bikeburn, "vehiclefps", KIND_CALL, "CBike::ProcessControl: the burn timer by the carried step", 0x6BBD04, 23, \
+        MS_FTOL("\x25\x5E\x16\x00"), cf_step_call) \
+    FP(boatburn, "vehiclefps", KIND_CALL, "CBoat::ProcessControl: the burn timer by the carried step", 0x6F1E88, 23, \
+        MS_FTOL("\xA1\xFC\x12\x00"), cf_step_call) \
+    FJ(alarmstep, "vehiclefps", "CVehicle::ProcessCarAlarm: the alarm's time left by the carried step", 0x6D2207, 18, MS) \
+    FJ(enginedrain, "vehiclefps", "CAutomobile::ProcessCarOnFireAndExplode: a wrecked engine's 2 health a frame scaled", \
+        0x6A761F, 6, "\xD8\x25\xA0\x8C\x85\x00") \
+    FJ(jumpout1, "vehiclefps", "CVehicle::CanPedJumpOutCar: the slowing to let a ped out, pow(0.9, timestep / 1.6667)", \
+        0x6D2110, 9, "\xD9\x46\x50\xD8\x0D" DAMP90) \
+    FP(jumpout2, "vehiclefps", KIND_PTR, "CVehicle::CanPedJumpOutCar: the turn speed's 0.9 scaled", 0x6D2121, 4, DAMP90, &cf_jump_damp) \
+    FP(jumpout3, "vehiclefps", KIND_PTR, "CVehicle::CanPedJumpOutCar: the turn speed's 0.9 scaled", 0x6D212D, 4, DAMP90, &cf_jump_damp) \
+    FP(jumpout4, "vehiclefps", KIND_PTR, "CVehicle::CanPedJumpOutCar: the move speed's 0.9 scaled", 0x6D217F, 4, DAMP90, &cf_jump_damp) \
+    FP(jumpout5, "vehiclefps", KIND_PTR, "CVehicle::CanPedJumpOutCar: the move speed's 0.9 scaled", 0x6D218B, 4, DAMP90, &cf_jump_damp) \
+    FP(jumpout6, "vehiclefps", KIND_PTR, "CVehicle::CanPedJumpOutCar: the move speed's 0.9 scaled", 0x6D2197, 4, DAMP90, &cf_jump_damp) \
     FP(boatcontrol, "vehiclefps", KIND_PTR, "CVehicle::ProcessBoatControl: its timestep a constant", 0x6DC23F, 4, TS, &cf_k30) \
     FJ(boatwater, "vehiclefps", "CVehicle::ApplyBoatWaterResistance scaled", 0x6D2771, 6, "\xD8\x0D\xDC\x1D\x87\x00") \
     FJ(heli1, "vehiclefps", "CHeli::ProcessFlyingCarStuff: the takeoff rate scaled", 0x6C4F29, 6, "\xD8\x05\xDC\x8C\x85\x00") \
@@ -59,6 +97,18 @@
         "\xC6\x44\x24\x27\x01", NULL) \
     FP(carfall, "vehiclefps", KIND_NOP, "CAutomobile: the still damping keeps the fall speed", 0x6B361C, 3, "\x89\x43\x08", NULL) \
     FP(bikefall, "vehiclefps", KIND_NOP, "CBike: the still damping keeps the fall speed", 0x6BC18F, 3, "\x89\x42\x08", NULL) \
+    FJ(bikestill, "vehiclefps", "CBike: a ridden bike at rest stops rolling too; rolling, it keeps its speed", 0x6BC15D, 9, \
+        "\x8B\xD7\xC7\x46\x58\x00\x00\x00\x00") \
+    FJ(gearstep, "vehiclefps", "cTransmission::CalculateDriveAcceleration: this frame's 30 fps scale", 0x6D05E0, 6, \
+        "\x8B\x44\x24\x10\x8B\x10") \
+    FJ(gearinertia, "vehiclefps", "cTransmission::CalculateDriveAcceleration: the engine inertia's step per 30 fps frame", \
+        0x6D0880, 5, "\xD8\x65\x00\x75\x08") \
+    FP(gearsmooth1, "vehiclefps", KIND_PTR, "cTransmission::CalculateDriveAcceleration: the inertia smoothing per 30 fps frame", \
+        0x6D08F0, 4, "\x7C\x34\x8D\x00", &cf_gear_smooth) \
+    FP(gearsmooth2, "vehiclefps", KIND_PTR, "cTransmission::CalculateDriveAcceleration: the inertia smoothing per 30 fps frame", \
+        0x6D08F8, 4, "\x7C\x34\x8D\x00", &cf_gear_smooth) \
+    FJ(wheelskid, "vehiclefps", "CVehicle::ProcessWheel: a tyre skids on a 30 fps frame's slip", 0x6D6F5E, 6, \
+        "\x83\x7D\x00\x03\x74\x52") \
     FP(still1, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B33F8, 4, STILL, &cf_still) \
     FP(still2, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B340E, 4, STILL, &cf_still) \
     FP(still3, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B3424, 4, STILL, &cf_still) \
@@ -96,6 +146,10 @@
     FJ(swimfx, "effectsfps", "CTaskSimpleSwim::ProcessEffects on the tick", 0x68AD3B, 6, "\x8B\x47\x14\x83\xC0\x10") \
     FJ(bubbles, "effectsfps", "CTaskSimpleSwim::ProcessEffects: bubbles on the tick", 0x68AC31, 7, \
         "\x8B\xCF\xBE\x05\x00\x00\x00") \
+    FJ(fuelstep, "effectsfps", "CExplosion::Update: the fuel timer by the carried step", 0x7379F7, 23, \
+        "\xD9\x05\x5C\xCB\xB7\x00\xD8\x0D\x38\x8B\x85\x00\xD8\x0D\x48\x99\x85\x00\xE8\x32\xA1\x0E\x00") \
+    FJ(fuelfx, "effectsfps", "CExplosion::Update: a vehicle's burning fuel on the tick", 0x737A31, 12, \
+        "\x81\xF9\xC8\x00\x00\x00\x0F\x87\xC0\x00\x00\x00") \
     FP(push1, "pushfps", KIND_CALL, "CPhysical::ApplyCollision: a ped's push on a parked car capped", 0x54BDB2, 5, \
         "\xE8\xC9\xC8\xFF\xFF", cf_apply_collision) \
     FP(push2, "pushfps", KIND_CALL, "CPhysical::ApplyCollision: a ped's push capped", 0x54BF78, 5, "\xE8\x03\xC7\xFF\xFF", \
@@ -117,6 +171,9 @@
     FP(pushalt2, "pushfps", KIND_CALL, "CPhysical::ApplyCollision (the other one): a ped's push capped", 0x54CAC2, 5, \
         "\xE8\x89\x82\xFF\xFF", cf_apply_collision_alt)
 
+void cf_step_call(void);
+extern float cf_jump_damp;
+extern float cf_gear_smooth;
 #define FDECLARE_J(k, option, name, va, len, stock) void cf_hook_##k(void); volatile LONG cf_n_##k;
 #define FDECLARE_P(k, option, kind, name, va, len, stock, to) volatile LONG cf_n_##k;
 FRAMERATE(FDECLARE_J, FDECLARE_P)
@@ -132,6 +189,21 @@ float cf_still = 0.005f;                /* the stillness threshold, scaled */
 volatile int cf_frame_due = 1;          /* a 30 Hz frame: the effects run (1 without the tick) */
 uint32_t cf_frame30;                    /* 30 Hz frames counted */
 static uint32_t frame30_at;
+
+/* A ridden bike under the still damping: is it rolling or pitching? The
+ * damping zeroes the move speed and the yaw alone, every frame the bike is
+ * slow with no throttle. A roll about the wheels needs that move speed, so
+ * the upright spring swung the bike about its centre undamped and the swing
+ * grew until the move speed passed the threshold (seen at 300 fps: 0.5 s a
+ * swing, growing for 3 s). The limit is a turn speed one frame's torque can
+ * reach, scaled like the threshold. */
+float cf_roll_still = 0.001f;
+int __cdecl cf_bike_rolling(const float *turn)
+{
+    float t = TIMESTEP;
+    float limit = cf_roll_still * ((t > 0.0001f ? t : cf_k30) / cf_k30);
+    return fabsf(turn[0]) >= limit || fabsf(turn[1]) >= limit;
+}
 
 /* From CTimer::Update, once a frame */
 void cf_tick(void)
@@ -162,6 +234,46 @@ void cf_turn_damping(float *turn)
 {
     float f = powf(*(const float *)0x862CD0, TIMESTEP / cf_k30);
     turn[0] *= f, turn[1] *= f, turn[2] *= f;
+}
+
+/* The step a timer takes off this frame: its whole ms, the fraction carried
+ * to the next frame, the same for every timer that frame */
+static uint32_t step_frame = 0xFFFFFFFF, step_ms;
+static float step_carry;
+
+uint32_t cf_ms_step(void)
+{
+    uint32_t frame = *(const uint32_t *)0xB7CB4C;   /* CTimer::m_FrameCounter */
+    if (frame != step_frame) {
+        float ms = TIMESTEP * 20.0f + step_carry;
+        if (!(ms >= 0.0f && ms < 1000.0f)) ms = 0.0f;
+        step_frame = frame;
+        step_ms = (uint32_t)ms;
+        step_carry = ms - (float)step_ms;
+    }
+    return step_ms;
+}
+
+/* cTransmission::CalculateDriveAcceleration, at its start: the inertia's
+ * change since the last frame counts per 30 fps frame (cf_gear_k), and its
+ * 0.85 smoothing is pow(0.85, timestep / 1.6667) */
+float cf_gear_k = 1.0f;
+float cf_gear_smooth = 0.85f;
+
+void cf_gear_step(void)
+{
+    float t = TIMESTEP;
+    if (!(t > 0.0001f)) t = cf_k30;
+    cf_gear_k = cf_k30 / t;
+    cf_gear_smooth = powf(*(const float *)0x8D347C, t / cf_k30);
+}
+
+/* CVehicle::CanPedJumpOutCar's 0.9 a frame, as at 30 fps */
+float cf_jump_damp = 0.9f;
+
+void cf_jump_damping(void)
+{
+    cf_jump_damp = powf(*(const float *)0x858C20, TIMESTEP / cf_k30);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -291,6 +403,56 @@ __asm__(
 "    fcom dword ptr [aim_threshold]\n"
 "    GO 0x61E4F8\n"
 
+/* CTaskSimpleFall::ProcessPed: the step in eax, as _ftol left it */
+"HOOK fallstep\n"
+"    call _cf_ms_step\n"
+"    GO 0x67FB4C\n"
+
+/* called in place of the fld/fmul/fmul/_ftol: the step in eax, ecx kept */
+".globl _cf_step_call\n"
+"_cf_step_call:\n"
+"    push ecx\n"
+"    call _cf_ms_step\n"
+"    pop ecx\n"
+"    ret\n"
+
+/* CVehicle::ProcessCarAlarm: the step on the x87 stack, for its two _ftol */
+"HOOK alarmstep\n"
+"    push ecx\n"
+"    push edx\n"
+"    call _cf_ms_step\n"
+"    pop edx\n"
+"    pop ecx\n"
+"    push eax\n"
+"    fild dword ptr [esp]\n"
+"    add esp, 4\n"
+"    GO 0x6D2219\n"
+
+/* CExplosion::Update: the fuel timer's step, negated (it subtracts) */
+"HOOK fuelstep\n"
+"    push ecx\n"
+"    call _cf_ms_step\n"
+"    pop ecx\n"
+"    neg eax\n"
+"    GO 0x737A0E\n"
+
+/* CAutomobile::ProcessCarOnFireAndExplode: health (st0) less 2 scaled */
+"HOOK enginedrain\n"
+"    fld dword ptr ds:0x858CA0\n"
+"    SCALED\n"
+"    fchs\n"
+"    faddp st(1), st\n"
+"    GO 0x6A7625\n"
+
+/* CVehicle::CanPedJumpOutCar (this in esi): the damping, then the turn speed's x */
+"HOOK jumpout1\n"
+"    pushad\n"
+"    call _cf_jump_damping\n"
+"    popad\n"
+"    fld dword ptr [esi+0x50]\n"
+"    fmul dword ptr [_cf_jump_damp]\n"
+"    GO 0x6D2119\n"
+
 /* CVehicle::ApplyBoatWaterResistance */
 "HOOK boatwater\n"
 "    fmul dword ptr ds:0x871DDC\n"
@@ -360,6 +522,86 @@ __asm__(
 "    jbe 2f\n"
 "1:  mov byte ptr [esi+0xB8], al\n"
 "2:  GO 0x6B99D5\n"
+
+/* the still damping, esi the bike, edi its move speed. With a driver: at
+ * rest in roll and pitch too, they are zeroed with the rest; rolling, nothing
+ * is. Without one, stock. */
+/* cTransmission::CalculateDriveAcceleration: FPU empty at its start */
+"HOOK gearstep\n"
+"    pushad\n"
+"    call _cf_gear_step\n"
+"    popad\n"
+"    mov eax, dword ptr [esp+0x10]\n"
+"    mov edx, dword ptr [eax]\n"
+"    GO 0x6D05E6\n"
+/* ratio - last frame's ratio (st0), times the 30 fps scale; the flags are
+ * cmp bl, 1's (handling cheat) */
+"HOOK gearinertia\n"
+"    fsub dword ptr [ebp]\n"
+"    fmul dword ptr [_cf_gear_k]\n"
+"    jne gearinertia_cheat\n"
+"    GO 0x6D0885\n"
+"gearinertia_cheat:\n"
+"    GO 0x6D088D\n"
+/* CVehicle::ProcessWheel, the slip over the frame's adhesion: st0 the
+ * sideways slip, [esp+10h] the one along the tyre, [esp+70h] the thrust,
+ * [esp+74h] the brake, [esp+78h] the adhesion (all three timestep-scaled),
+ * [ebp] the wheel state. The test again as a 30 fps frame sees it: speeds
+ * (the sideways slip; along the tyre, a rolling or unclamped braking wheel's)
+ * times timestep / 1.6667, pushes (the thrust, a braking wheel at its brake)
+ * as they are. Fitting, the force is still held to this frame's adhesion but
+ * the tyre neither skids nor loses traction; otherwise GTA's own test. */
+"HOOK wheelskid\n"
+"    cmp dword ptr [ebp], 3\n"
+"    je wheelskid_fixed\n"
+"    fld st(0)\n"
+"    fmul dword ptr ds:0xB7CB5C\n"
+"    fdiv dword ptr [_cf_k30]\n"
+"    fmul st, st(0)\n"
+"    fld dword ptr [esp+0x10]\n"
+"    cmp byte ptr ds:0xC1CDAD, 0\n"            /* driving: the thrust */
+"    jne wheelskid_push\n"
+"    cmp byte ptr ds:0xC1CDAE, 0\n"            /* rolling: a speed */
+"    je wheelskid_speed\n"
+"    fld st(0)\n"
+"    fabs\n"
+"    fcomp dword ptr [esp+0x74]\n"
+"    fnstsw ax\n"
+"    test ah, 0x01\n"                          /* under the brake: a speed */
+"    jz wheelskid_push\n"
+"wheelskid_speed:\n"
+"    fmul dword ptr ds:0xB7CB5C\n"
+"    fdiv dword ptr [_cf_k30]\n"
+"wheelskid_push:\n"
+"    fmul st, st(0)\n"
+"    faddp st(1), st\n"
+"    fld dword ptr [esp+0x78]\n"
+"    fmul st, st(0)\n"
+"    fcompp\n"
+"    fnstsw ax\n"
+"    test ah, 0x01\n"
+"    jnz wheelskid_skids\n"
+"    fld1\n"
+"    GO 0x6D6FFF\n"
+"wheelskid_skids:\n"
+"    GO 0x6D6F64\n"
+"wheelskid_fixed:\n"
+"    GO 0x6D6FB6\n"
+"HOOK bikestill\n"
+"    cmp dword ptr [esi+0x460], 0\n"
+"    je 1f\n"
+"    lea eax, [esi+0x50]\n"
+"    push eax\n"
+"    call _cf_bike_rolling\n"
+"    add esp, 4\n"
+"    test eax, eax\n"
+"    jnz 2f\n"
+"    mov dword ptr [esi+0x50], 0\n"
+"    mov dword ptr [esi+0x54], 0\n"
+"1:  mov edx, edi\n"
+"    mov dword ptr [esi+0x58], 0\n"
+"    GO 0x6BC166\n"
+"2:  GO 0x6BC192\n"
 
 /* CTimer::Update: the frame counter as stock, then the 30 Hz tick */
 "HOOK tick\n"
@@ -578,4 +820,14 @@ __asm__(
 "    GO 0x68AC38\n"
 "9:  popfd\n"
 "    GO 0x68AD36\n"
+
+/* fuel at or under 200 ms on a due frame, else past it */
+"HOOK fuelfx\n"
+"    DUE\n"
+"    cmp ecx, 0xC8\n"
+"    ja 1f\n"
+"    GO 0x737A3D\n"
+"1:  GO 0x737AFD\n"
+"9:  popfd\n"
+"    GO 0x737AFD\n"
 ".att_syntax\n");

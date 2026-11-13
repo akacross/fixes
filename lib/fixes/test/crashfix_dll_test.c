@@ -73,6 +73,10 @@ static uint32_t averted(const char *key) { return CrashFix_Averted(find(key)); }
 
 static uint32_t hook_of(const char *key) { return (uint32_t)hooks[find(key)].hook; }
 
+/* What a mod puts at 0x70BDA4: nonzero leaves the function early */
+static uint16_t shadow_seen;
+static char __cdecl shadow_replacement(void) { shadow_seen = cf_shadow_model; return 1; }
+
 /* A hook's way back into the game, made a ret so it returns here */
 static uint8_t patched;
 static void ret_at(uint32_t va) { patched = *(uint8_t *)va; *(uint8_t *)va = 0xC3; }
@@ -103,6 +107,24 @@ __attribute__((noinline)) static float call_fpu(uint32_t entry, float x, int tak
  * fpu_out if it left one (left 1). */
 uint32_t site_eax, site_ret, site_flags, site_stack[64];
 int site_takes, site_left;
+typedef uint8_t (__attribute__((thiscall)) *FallFn)(void *task, void *ped);
+static uint8_t fall_ped[0x600] = {[0x46C] = 1};         /* standing */
+
+/* Frames until the game's own CTaskSimpleFall::ProcessPed ends a 500 ms down
+ * time at `fps`, or 0 after 4000 */
+static int fall_frames(float fps)
+{
+    uint8_t task[0x20] = {0};
+    task[8] = 1;                                        /* the fall anim finished */
+    *(uint32_t *)(task + 0x1C) = 500;
+    *(float *)0xB7CB5C = 50.0f / fps;
+    for (int n = 1; n <= 4000; n++) {
+        ++*(uint32_t *)0xB7CB4C;
+        if (((FallFn)0x67FAF0)(task, fall_ped)) return n;
+    }
+    return 0;
+}
+
 __attribute__((noinline)) static void call_site(uint32_t entry, uint32_t eax, float x, int takes, int left)
 {
     fpu_target = entry, fpu_in = x, site_eax = eax, site_takes = takes, site_left = left;
@@ -286,6 +308,312 @@ static void sky_measure(const uint32_t *p, int top, int bottom, int shift, doubl
     }
 }
 
+/* cTransmission::CalculateDriveAcceleration over a 4 s launch, at a frame
+ * time of `ts`: the speed it reaches (each step's drive added as it is) */
+typedef float (__attribute__((thiscall)) *DriveFn)(void *t, const float *gas, uint8_t *gear, float *count, float *v,
+                                                   float *a6, float *a7, uint8_t wheels, uint8_t cheat);
+static float launch(float ts)
+{
+    static uint8_t tr[0x68];
+    memset(tr, 0, sizeof tr);
+    tr[0x4A] = 4;                                   /* the Savanna: 4 gears, 160 km/h, 24, inertia 5 */
+    *(float *)(tr + 0x50) = 24.0f * 0.0004f * 0.25f;
+    *(float *)(tr + 0x54) = 5.0f;
+    *(float *)(tr + 0x58) = 160.0f / 180.0f;
+    *(float *)(tr + 0x60) = -0.2f;
+    ((void (__attribute__((thiscall)) *)(void *))0x6D0460)(tr);   /* InitGearRatios */
+    *(float *)0xB7CB5C = ts;
+    float gas = 1.0f, count = 0.0f, v = 0.0f, a6 = 0.0f, a7 = 0.0f;
+    uint8_t gear = 1;
+    for (float t = 0; t < 200.0f; t += ts) v += ((DriveFn)0x6D05E0)(tr, &gas, &gear, &count, &v, &a6, &a7, 4, 0);
+    return v;
+}
+
+/* SA-MixSets' rows */
+static int skid_calls;
+static float skid_point[2][3], skid_from[2][3];
+static int32_t skid_wheel[2];
+static void __attribute__((thiscall)) skid_recorder(void *veh, int32_t state, uint32_t colour, float a, float b,
+                                                     void *colpoint, float *from, int32_t id, int32_t wheel,
+                                                     int32_t skid, void *blood, uint32_t flags)
+{
+    (void)veh; (void)state; (void)colour; (void)a; (void)b; (void)id; (void)skid; (void)blood; (void)flags;
+    if (skid_calls < 2) {
+        memcpy(skid_point[skid_calls], colpoint, 12);
+        memcpy(skid_from[skid_calls], from, 12);
+        skid_wheel[skid_calls] = wheel;
+    }
+    skid_calls++;
+}
+
+static void mixsets_test(void)
+{
+    printf("== SA-MixSets: the wake's light, the second rear wheel's skidmark\n");
+    float *water = (float *)0xB7C508, *mult = (float *)0x8D390C, keep[4];
+    uint32_t *frame = (uint32_t *)0xB7CB4C;
+    memcpy(keep, water, sizeof keep);
+    water[0] = 90, water[1] = 170, water[2] = 170, water[3] = 240;      /* timecyc's noon water */
+    (*frame)++;
+    cf_boat_foam();
+    ok(mult[0] == 0.4f && mult[1] == 1.0f && mult[2] == 0.2f && mult[3] == 1.0f && mult[4] == 0.4f,
+       "boatfoam: day water, the stock wake");
+    water[0] = 67, water[1] = 67, water[2] = 62, water[3] = 240;        /* 22:00 */
+    (*frame)++;
+    cf_boat_foam();
+    ok(mult[1] > 0.5f && mult[1] < 0.6f && fabsf(mult[0] - 0.4f * mult[1]) < 1e-6f && mult[2] == 0.2f,
+       "boatfoam: night water, about half");
+    cf_boat_foam_stock();
+    ok(mult[0] == 0.4f && mult[1] == 1.0f && mult[3] == 1.0f && mult[4] == 0.4f, "boatfoam: put back when it goes");
+    memcpy(water, keep, sizeof keep);
+
+    uint8_t keepcode[5], jmp[5] = {0xE9};
+    memcpy(keepcode, (void *)0x6DE880, 5);
+    *(uint32_t *)(jmp + 1) = (uint32_t)skid_recorder - (0x6DE880 + 5);
+    write_code(0x6DE880, jmp, 5);
+    static uint8_t veh[0x400], handling[0x100];
+    static float m[18];
+    memset(veh, 0, sizeof veh);
+    memset(handling, 0, sizeof handling);
+    memset(m, 0, sizeof m);
+    m[0] = 0.6f, m[1] = 0.8f;                                           /* right */
+    *(float **)(veh + 0x14) = m;
+    *(void **)(veh + 0x384) = handling;
+    float point[11] = {10, 20, 30}, from[3] = {1, 2, 3};
+    skid_calls = 0;
+    cf_double_skid(veh, 0, 0, 0, 0, point, from, 7, 1, 0, NULL, 0);
+    ok(skid_calls == 1, "doubleskid: a car without double rear wheels, one skidmark");
+    *(uint32_t *)(handling + 0xCC) = 0x20000000;
+    skid_calls = 0;
+    cf_double_skid(veh, 0, 0, 0, 0, point, from, 7, 2, 0, NULL, 0);
+    ok(skid_calls == 1, "doubleskid: a front wheel, one");
+    skid_calls = 0;
+    cf_double_skid(veh, 0, 0, 0, 0, point, from, 7, 1, 0, NULL, 0);
+    ok(skid_calls == 2 && skid_wheel[1] == 1 + 69696969, "doubleskid: a rear wheel of a truck, two");
+    ok(fabsf(skid_point[1][0] - (10 + 0.6f * 0.45f)) < 1e-5f && fabsf(skid_from[1][1] - (2 + 0.8f * 0.45f)) < 1e-5f,
+       "doubleskid: the second 0.45 along the car's right");
+    skid_calls = 0;
+    cf_double_skid(veh, 0, 0, 0, 0, point, from, 7, 3, 0, NULL, 0);
+    ok(skid_calls == 2 && fabsf(skid_point[1][0] - (10 - 0.6f * 0.45f)) < 1e-5f, "doubleskid: the right side's to the right");
+    write_code(0x6DE880, keepcode, 5);
+}
+
+/* The stream timer's stand-ins for the game's functions */
+static int stream_calls;
+static uint32_t __cdecl stream_game(void *buffer, int32_t id)
+{
+    (void)buffer;
+    stream_calls++;
+    Sleep(id == 20005 ? 4 : 1);
+    return 0xAB000001;                                                  /* al 1: converted */
+}
+
+typedef uint32_t (__cdecl *StreamFn)(void *buffer, int32_t id);
+static void __cdecl stream_drain(uint32_t priority)
+{
+    (void)priority;
+    ((StreamFn)0x40C6B0)(NULL, 25001);
+    ((StreamFn)0x408CB0)(NULL, 300);
+}
+
+/* fn(NULL, id) with esi, edi and ebx set: -> they come back */
+static int stream_keeps(uint32_t fn, int32_t id, uint32_t *eax)
+{
+    uint32_t esi, edi, ebx;
+    __asm__ volatile("mov $0x51515151, %%esi\n mov $0xD1D1D1D1, %%edi\n mov $0xB1B1B1B1, %%ebx\n"
+                     "push %%ecx\n push $0\n call *%%eax\n add $8, %%esp"
+                     : "=a"(*eax), "=S"(esi), "=D"(edi), "=b"(ebx) : "a"(fn), "c"(id) : "edx", "memory", "cc");
+    return esi == 0x51515151 && edi == 0xD1D1D1D1 && ebx == 0xB1B1B1B1;
+}
+
+static void stream_test(const char *exe)
+{
+    printf("== the stream timer (streamtime): the three functions timed, by id and type, into stream.log\n");
+    static const char *const keys[3] = {"streamconvert", "streamfinish", "streamall"};
+    int was[3];
+    for (int i = 0; i < 3; i++) {
+        was[i] = CrashFix_Installed(find(keys[i]));
+        CrashFix_Install(find(keys[i]), NULL);
+    }
+    const Hook *convert = &hooks[find("streamconvert")], *txd = &hooks[find("txdconvert")];
+    ok(convert->va == 0x40C6B0 && convert->va + convert->len <= txd->va && CrashFix_Installed(find("txdconvert"))
+       && CrashFix_Installed(find("streamconvert")), "the entry's hook ends before txdconvert's site; both in");
+    ok(cf_stream_type(0) == ST_DFF && cf_stream_type(19999) == ST_DFF && cf_stream_type(20000) == ST_TXD
+       && cf_stream_type(24999) == ST_TXD && cf_stream_type(25000) == ST_COL && cf_stream_type(25254) == ST_COL
+       && cf_stream_type(25255) == ST_OTHER && cf_stream_type(25575) == ST_IFP && cf_stream_type(25754) == ST_IFP
+       && cf_stream_type(25755) == ST_OTHER && cf_stream_type(-1) == ST_OTHER, "an id's type, by the game's ranges");
+
+    /* the game's bodies past the hooks: back to the entry's stack, then the stand-ins */
+    uint8_t keep[3][9], body[9];
+    memcpy(keep[0], (void *)0x40C6B7, 8);
+    memcpy(keep[1], (void *)0x408CB8, 9);
+    memcpy(keep[2], (void *)0x40A45E, 5);
+    memcpy(body, "\x83\xC4\x20\xE9", 4);                                 /* add esp, 0x20; jmp */
+    *(uint32_t *)(body + 4) = (uint32_t)stream_game - (0x40C6B7 + 8);
+    write_code(0x40C6B7, body, 8);
+    memcpy(body, "\x5E\x83\xC4\x08\xE9", 5);                             /* pop esi; add esp, 8; jmp */
+    *(uint32_t *)(body + 5) = (uint32_t)stream_game - (0x408CB8 + 9);
+    write_code(0x408CB8, body, 9);
+    body[0] = 0xE9;
+    *(uint32_t *)(body + 1) = (uint32_t)stream_drain - (0x40A45E + 5);
+    write_code(0x40A45E, body, 5);
+
+    char log[MAX_PATH];
+    strcpy(log, exe);
+    strcpy(strrchr(log, '\\') + 1, "stream.log");
+    DeleteFileA(log);
+    uint32_t *sectors = (uint32_t *)(0x8E4CC0 + 20 * 100 + 0xC), keep_sectors = *sectors;
+    *sectors = 48;
+    double ms0 = CrashFix_StreamStat(0), n0 = CrashFix_StreamStat(1), all0 = CrashFix_StreamStat(2), alls0 = CrashFix_StreamStat(3);
+    ok(CrashFix_StreamStart(log) == 1 && CrashFix_StreamStart(log) == 1, "started; a second start keeps the first");
+    CrashFix_StreamResetWorst();
+    ok(CrashFix_StreamStat(5) == -1, "nothing yet: no worst file");
+
+    stream_calls = 0;
+    uint32_t r1, r2, r3;
+    int kept = stream_keeps(0x40C6B0, 100, &r1) & stream_keeps(0x40C6B0, 20005, &r2) & stream_keeps(0x408CB0, 300, &r3);
+    ok(stream_calls == 3 && r1 == 0xAB000001 && r2 == r1 && r3 == r1, "through the hooks: the game's functions run, eax comes back whole");
+    ok(kept, "esi, edi and ebx come back");
+    double ms = CrashFix_StreamStat(0) - ms0;
+    ok(CrashFix_StreamStat(1) - n0 == 3 && ms >= 4.0 && ms < 500.0, "three files, their time summed");
+    printf("  3 files: %.3f ms, the longest %.3f ms (id %d)\n", ms, CrashFix_StreamStat(4), (int)CrashFix_StreamStat(5));
+    ok(CrashFix_StreamStat(5) == 20005 && CrashFix_StreamStat(4) >= 3.0 && CrashFix_StreamStat(4) < ms, "the longest: the 4 ms texture dictionary");
+    CrashFix_StreamResetWorst();
+    ok(CrashFix_StreamStat(5) == -1 && CrashFix_StreamStat(4) == 0, "the longest starts again when asked");
+
+    ((void (__cdecl *)(uint32_t))0x40EA10)(1);
+    double all = CrashFix_StreamStat(2) - all0;
+    ok(stream_calls == 5 && CrashFix_StreamStat(3) - alls0 == 1 && CrashFix_StreamStat(1) - n0 == 5 && all >= 1.5 && all < 500.0,
+       "a drain: counted once, timed whole, its two files counted too");
+    ok(CrashFix_StreamStat(0) - ms0 <= ms + all, "the drain's files are no longer than the drain");
+
+    const char *sum = CrashFix_StreamSummary();
+    ok(strstr(sum, "convert dff: 1 in ") && strstr(sum, "convert txd: 1 in ") && strstr(sum, "convert col: 1 in ")
+       && strstr(sum, "finish dff: 2 in ") && strstr(sum, "loadall: 1 in ") && strstr(sum, "txd 20005: 1 load(s), ")
+       && strstr(sum, "dff 100: 1 load(s), "), "the summary: by kind and type, the drains, the models");
+    ok(strstr(sum, "txd 20005") < strstr(sum, "dff 100: "), "the model that took longest first");
+    ok(CrashFix_StreamStop() == 1, "stopped");
+    ((StreamFn)0x40C6B0)(NULL, 101);
+    CrashFix_StreamFlush();
+    ok(CrashFix_StreamStat(1) - n0 == 6, "stopped: still counted");
+
+    static char text[16384];
+    FILE *f = fopen(log, "rb");
+    size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+    if (f) fclose(f);
+    text[n] = 0;
+    const char *head = strstr(text, " fixes streamtime: ");
+    const char *dff = head ? strstr(head, " convert dff 100 ") : NULL;
+    const char *tex = dff ? strstr(dff, " convert txd 20005 ") : NULL;
+    const char *fin = tex ? strstr(tex, " finish dff 300 ") : NULL;
+    const char *col = fin ? strstr(fin, " convert col 25001 ") : NULL;
+    const char *drain = col ? strstr(col, " loadall ") : NULL;
+    ok(head && text[0] == '=' && text[1] == '=', "stream.log: a header");
+    ok(dff && tex && fin && col, "a line for each file, in order, with its kind, type and id");
+    ok(dff && strstr(dff, " ms 96 KB\r\n") && strstr(dff, " ms 96 KB\r\n") < tex, "and its size in the IMG");
+    ok(dff && tex && !memchr(dff, 'l', tex - dff), "outside a drain: not marked");
+    ok(col && drain && strstr(col, " KB in loadall\r\n") && strstr(col, " KB in loadall\r\n") < drain, "inside one: marked");
+    ok(drain && strstr(drain, " ms, 2 file(s) ") && strstr(drain, " ms, from crashfix_dll_test.dll+0x"),
+       "the drain's line: its time, its files, who called it");
+    ok(drain && strstr(drain, "-- summary at +") && strstr(drain, "convert txd: 1 in "), "the summary at the stop");
+    ok(!strstr(text, " convert dff 101 "), "nothing written after the stop");
+    if (!drain) printf("%s\n", text);
+
+    *sectors = keep_sectors;
+    write_code(0x40C6B7, keep[0], 8);
+    write_code(0x408CB8, keep[1], 9);
+    write_code(0x40A45E, keep[2], 5);
+    int out = 1;
+    for (int i = 0; i < 3; i++) {
+        const Hook *h = &hooks[find(keys[i])];
+        out &= CrashFix_Uninstall(find(keys[i])) == 1 && !memcmp((void *)h->va, file_at(h->va), 16);
+        if (was[i]) CrashFix_Install(find(keys[i]), NULL);
+    }
+    ok(out, "out again: the three entries stock");
+}
+
+static void gear_test(void)
+{
+    printf("== the gearbox's engine inertia per 30 fps frame (gearstep, gearinertia, gearsmooth1, 2)\n");
+    const char *keys[] = {"gearstep", "gearinertia", "gearsmooth1", "gearsmooth2"};
+    float keep = *(float *)0xB7CB5C;
+    int was[4];
+    for (int i = 0; i < 4; i++) { was[i] = CrashFix_Installed(find(keys[i])); CrashFix_Uninstall(find(keys[i])); }
+    float s30 = launch(50.0f / 30.0f), s850 = launch(50.0f / 850.0f);
+    ok(s850 > s30 * 1.03f, "stock: 850 fps reaches a higher speed than 30 fps");
+    printf("  stock: %.4f at 30 fps, %.4f at 850 fps\n", s30, s850);
+    int in = 1;
+    for (int i = 0; i < 4; i++) in &= CrashFix_Install(find(keys[i]), NULL) == 1;
+    ok(in, "the four rows in");
+    float f30 = launch(50.0f / 30.0f), f850 = launch(50.0f / 850.0f), f144 = launch(50.0f / 144.0f);
+    printf("  fixed: %.4f at 30 fps, %.4f at 144, %.4f at 850\n", f30, f144, f850);
+    ok(fabsf(f30 - s30) < s30 * 0.001f, "30 fps as before");
+    ok(fabsf(f850 - f30) < f30 * 0.015f && fabsf(f144 - f30) < f30 * 0.015f, "144 and 850 fps within 1.5% of 30");
+    for (int i = 0; i < 4; i++) if (!was[i]) CrashFix_Uninstall(find(keys[i]));
+    *(float *)0xB7CB5C = keep;
+}
+
+/* CVehicle::ProcessWheel for a free-rolling wheel sliding sideways 0.02 a step
+ * (1 m/s) at a frame time of `ts`: the wheel state it leaves */
+typedef void (__attribute__((thiscall)) *WheelFn)(void *veh, float *fwd, float *right, float *speed, float *point,
+                                                  int32_t wheels, float thrust, float brake, float adhesion,
+                                                  int8_t id, float *wspeed, int32_t *state, uint16_t status);
+static float slide_brake, slide_along;
+static int32_t slide(float ts, float *sideways)
+{
+    static uint8_t veh[0x1000], handling[0x100];
+    static float matrix[18];
+    memset(veh, 0, sizeof veh);
+    memset(handling, 0, sizeof handling);
+    memset(matrix, 0, sizeof matrix);
+    matrix[0] = matrix[5] = matrix[10] = 1.0f;
+    *(float **)(veh + 0x14) = matrix;
+    *(float *)(veh + 0x8C) = 1500.0f;               /* mass, turn mass */
+    *(float *)(veh + 0x90) = 2500.0f;
+    *(void **)(veh + 0x384) = handling;
+    *(float *)(handling + 0xA4) = 0.8f;             /* traction loss */
+    *(uint8_t *)0xC1CDAC = 0;                       /* bAlreadySkidding */
+    *(float *)0xB7CB5C = ts;
+    float fwd[3] = {0, 1, 0}, right[3] = {1, 0, 0}, speed[3] = {0.02f, 0, 0}, point[3] = {1, 1, 0}, wspeed = 0;
+    int32_t state = 0;
+    if (slide_brake > 0) speed[0] = 0, speed[1] = slide_along;    /* a braked wheel creeping along */
+    ((WheelFn)0x6D6C00)(veh, fwd, right, speed, point, 4, 0.0f, slide_brake * ts, 0.004f, 0, &wspeed, &state, 0);
+    if (sideways) *sideways = *(float *)(veh + 0x44);
+    return state;
+}
+
+static void wheel_test(void)
+{
+    printf("== a tyre skids on a 30 fps frame's sideways slip (wheelskid)\n");
+    float keep = *(float *)0xB7CB5C, v30s, v850s, v30f, v850f;
+    int was = CrashFix_Installed(find("wheelskid"));
+    CrashFix_Uninstall(find("wheelskid"));
+    ok(slide(50.0f / 30.0f, &v30s) == 0, "stock, 30 fps: 1 m/s sideways is held, no skid");
+    ok(slide(50.0f / 850.0f, &v850s) == 2, "stock, 850 fps: the same slip skids");
+    ok(CrashFix_Install(find("wheelskid"), NULL) == 1, "wheelskid in");
+    ok(slide(50.0f / 30.0f, &v30f) == 0 && v30f == v30s, "fixed, 30 fps: as before");
+    ok(slide(50.0f / 850.0f, &v850f) == 0, "fixed, 850 fps: no skid");
+    {
+        float adh = 0.004f * 50.0f / 850.0f;
+        ok(fabsf(v850s + 0.8f * adh) < adh * 1e-3f, "stock: the push is 0.8 of the frame's adhesion (the traction loss)");
+        ok(fabsf(v850f + adh) < adh * 1e-3f, "fixed: the frame's whole adhesion, no more");
+    }
+    ok(slide(50.0f / 850.0f, NULL) == 0 && slide(50.0f / 30.0f, NULL) == 0, "again");
+    /* a car on its brake, a wheel creeping 0.002 a step (0.1 m/s): held at 30 fps */
+    slide_brake = 0.012f, slide_along = 0.002f;
+    CrashFix_Uninstall(find("wheelskid"));
+    int stock30 = slide(50.0f / 30.0f, NULL), stock850 = slide(50.0f / 850.0f, NULL);
+    CrashFix_Install(find("wheelskid"), NULL);
+    int fixed30 = slide(50.0f / 30.0f, NULL), fixed850 = slide(50.0f / 850.0f, NULL);
+    printf("  braked and creeping: stock %d at 30 fps, %d at 850; fixed %d, %d\n", stock30, stock850, fixed30, fixed850);
+    ok(stock30 == 0 && stock850 != 0, "stock: the creep skids at 850 fps only");
+    ok(fixed30 == 0 && fixed850 == 0, "fixed: held at both");
+    slide_brake = 0.0004f, slide_along = 0.02f;            /* braking hard while moving: the brake's push */
+    ok(slide(50.0f / 850.0f, NULL) == slide(50.0f / 30.0f, NULL), "a wheel braking at its brake limit: the same state at both");
+    slide_brake = 0;
+    if (!was) CrashFix_Uninstall(find("wheelskid"));
+    *(float *)0xB7CB5C = keep;
+}
+
 static void sky_test(void)
 {
     int k = find("skydither");
@@ -343,6 +671,109 @@ static void sky_test(void)
     ok(CrashFix_Uninstall(k) == 1 && !memcmp((void *)0x7154A8, "\xE9\xA3\xCC\x00\x00", 5), "out again: the stock jump");
 }
 
+/* ------------------------------------------------------------------------ */
+/* faults.c: a fault in the game's own code, written down with its callers   */
+/* ------------------------------------------------------------------------ */
+/* guarded_call(fn, ecx) -> 0 when fn returned, 1 when it faulted (recover_fault
+ * puts esp back and lands on guarded_landing) */
+int __cdecl guarded_call(uint32_t fn, uint32_t ecx);
+extern char guarded_landing[];
+uint32_t guard_esp;
+__asm__(
+".intel_syntax noprefix\n"
+".globl _guarded_call\n"
+"_guarded_call:\n"
+"    push ebx\n"
+"    push esi\n"
+"    push edi\n"
+"    push ebp\n"
+"    mov dword ptr [_guard_esp], esp\n"
+"    mov ecx, dword ptr [esp+24]\n"
+"    mov eax, dword ptr [esp+20]\n"
+"    call eax\n"
+"    xor eax, eax\n"
+"    jmp 1f\n"
+".globl _guarded_landing\n"
+"_guarded_landing:\n"
+"    mov eax, 1\n"
+"1:  pop ebp\n"
+"    pop edi\n"
+"    pop esi\n"
+"    pop ebx\n"
+"    ret\n"
+".att_syntax\n");
+static volatile LONG guarding;
+
+static LONG CALLBACK recover_fault(EXCEPTION_POINTERS *e)
+{
+    if (e->ExceptionRecord->ExceptionCode == 0xE0000001) return EXCEPTION_CONTINUE_EXECUTION;   /* raised below */
+    if (!guarding || e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    guarding = 0;
+    e->ContextRecord->Esp = guard_esp;
+    e->ContextRecord->Eip = (DWORD)(uintptr_t)guarded_landing;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static void faults_test(const char *exe)
+{
+    char log[MAX_PATH];
+    strcpy(log, exe);
+    strcpy(strrchr(log, '\\') + 1, "faults.log");
+    DeleteFileA(log);
+    ok(CrashFix_FaultsStart(log) == 1, "started");
+    ok(CrashFix_FaultsStart(log) == 1, "a second start keeps the first (one handler)");
+    void *recover = AddVectoredExceptionHandler(0, recover_fault);   /* after ours */
+
+    /* CAtomicModelInfo::CreateInstance (0x4C4530) on a model with a bad atomic:
+     * with no RenderWare engine RpAtomicClone faults one call in, in
+     * RpAtomicCreate (0x749C5D, reading address 0). AddRef gets a texture
+     * dictionary pool of one. */
+    static uint8_t model[0x40], objects[16], flags[4];
+    static uint32_t pool[2];
+    volatile uint32_t *txd = (uint32_t *)0xC8800C, *engine = (uint32_t *)0xC97B24, *plugin = (uint32_t *)0xC924AC;
+    uint32_t keep_txd = *txd, keep_engine = *engine, keep_plugin = *plugin;
+    pool[0] = (uint32_t)(uintptr_t)objects, pool[1] = (uint32_t)(uintptr_t)flags;
+    *txd = (uint32_t)(uintptr_t)pool, *engine = 0, *plugin = 0;
+    *(uint32_t *)(model + 0x1C) = 0xDEAD0000;
+    uint32_t seen = CrashFix_FaultsSeen();
+    guarding = 1;
+    int first = guarded_call(0x4C4530, (uint32_t)(uintptr_t)model);
+    guarding = 1;
+    int second = guarded_call(0x4C4530, (uint32_t)(uintptr_t)model);
+    RaiseException(0xE0000001, 0, 0, NULL);
+    *txd = keep_txd, *engine = keep_engine, *plugin = keep_plugin;
+    ok(first == 1 && second == 1, "the game's code faulted, twice");
+    ok(CrashFix_FaultsSeen() - seen == 2, "both seen; a software exception is not a crash");
+    CrashFix_FaultsFlush();
+
+    static char text[16384];
+    FILE *f = fopen(log, "rb");
+    size_t n = f ? fread(text, 1, sizeof text - 1, f) : 0;
+    if (f) fclose(f);
+    text[n] = 0;
+    const char *at = strstr(text, "fault 1: access violation reading 0x00000000 at gta_sa.exe+0x349C5D (0x749C5D)");
+    const char *clone = at ? strstr(at, "gta_sa.exe+0x349E66 (0x749E66)") : NULL;
+    const char *create = clone ? strstr(clone, "gta_sa.exe+0xC454F (0x4C454F)") : NULL;
+    const char *ours_ = create ? strstr(create, "crashfix_dll_test.dll+") : NULL;
+    ok(at != NULL, "the fault: what it read, where, as module+offset");
+    ok(strstr(text, "== ") == text && strstr(text, "  eax=") != NULL, "a header, then the registers");
+    ok(clone && create, "called from RpAtomicClone, called from CAtomicModelInfo::CreateInstance, in order");
+    ok(ours_ != NULL, "and from the test's call");
+    ok(strstr(text, "fault 1 again 1 time(s) at gta_sa.exe+0x349C5D (0x749C5D), 2 in all") != NULL,
+       "the same address again is counted, not copied");
+    ok(strstr(text, "fault 2") == NULL, "one record");
+    if (!at || !create || !strstr(text, " again ")) printf("%s", text);
+
+    ok(CrashFix_FaultsStop() == 1, "stopped");
+    seen = CrashFix_FaultsSeen();
+    *txd = (uint32_t)(uintptr_t)pool, *engine = 0, *plugin = 0;
+    guarding = 1;
+    guarded_call(0x4C4530, (uint32_t)(uintptr_t)model);
+    *txd = keep_txd, *engine = keep_engine, *plugin = keep_plugin;
+    ok(CrashFix_FaultsSeen() == seen, "stopped: not watched");
+    RemoveVectoredExceptionHandler(recover);
+}
+
 __declspec(dllexport) int __cdecl run(void)
 {
     char path[MAX_PATH];
@@ -373,6 +804,28 @@ __declspec(dllexport) int __cdecl run(void)
         }
     }
     ok(all_out, "each one back to the exe's bytes");
+
+    printf("== shadow leaves the call at 0x70BDA4 to whoever replaces it (ProperShaders)\n");
+    {
+        int k = find("shadow");
+        ok(CrashFix_Install(k, NULL) == 1, "shadow in");
+        const uint8_t *entry = (const uint8_t *)0x70BDA0;
+        ok(entry[0] == 0xEB && 0x70BDA2 + (int8_t)entry[1] == 0x70BD9B, "the entry hops back to the jump");
+        ok(!memcmp(entry + 4, file_at(0x70BDA4), 5), "the call is as the exe has it");
+        uint8_t was[5], call[5] = {0xE8};
+        memcpy(was, entry + 4, 5);
+        *(uint32_t *)(call + 1) = (uint32_t)shadow_replacement - 0x70BDA9;
+        write_code(0x70BDA4, call, 5);
+        uint8_t vehicle[0x100] = {0};
+        *(uint16_t *)(vehicle + 0x22) = 411;
+        shadow_seen = 0;
+        ((void (__cdecl *)(void *, int))0x70BDA0)(vehicle, 1);
+        ok(shadow_seen == 411, "the replaced call runs, with the vehicle already known");
+        ok(*(uint8_t *)0x70BD9B == 0xE9, "our jump is intact");
+        write_code(0x70BDA4, was, 5);
+        cf_shadow_model = 0;
+        ok(CrashFix_Uninstall(k) == 1 && !memcmp((void *)0x70BD9B, file_at(0x70BD9B), 9), "out again, stock");
+    }
 
     printf("== ms_modelInfoPtrs moved (as SA-MP R5 does): the sites are still stock\n");
     {
@@ -932,6 +1385,154 @@ __declspec(dllexport) int __cdecl run(void)
         *ts = k;
     }
 
+    printf("== a knocked-down ped's down time at any fps (fallstep)\n");
+    {
+        uint8_t *ped = fall_ped, task[0x20], task2[0x20];
+        float *ts = (float *)0xB7CB5C;
+        uint32_t *frames = (uint32_t *)0xB7CB4C;
+        int was = CrashFix_Uninstall(find("fallstep")) == 1;
+        int stock60 = fall_frames(60), stock600 = fall_frames(600), stock2000 = fall_frames(2000);
+        ok(stock60 == 32 && stock600 == 500 && stock2000 == 0,
+           "stock: 32 frames at 60 fps (16 ms each), 500 at 600 (1 ms), never at 2000 (0 ms)");
+        ok(CrashFix_Install(find("fallstep"), NULL) == 1, "fallstep in");
+        int ours60 = fall_frames(60), ours600 = fall_frames(600), ours2000 = fall_frames(2000);
+        printf("   frames: stock %d %d %d, ours %d %d %d\n", stock60, stock600, stock2000, ours60, ours600, ours2000);
+        ok(abs(ours60 - 30) <= 1 && abs(ours600 - 300) <= 1 && abs(ours2000 - 1000) <= 1,
+           "ours: 30, 300 and 1000 frames (each within 1), 500 ms at each");
+        *ts = 50.0f / 600.0f;
+        memset(task, 0, sizeof task), memset(task2, 0, sizeof task2);
+        task[8] = task2[8] = 1;
+        *(uint32_t *)(task + 0x1C) = *(uint32_t *)(task2 + 0x1C) = 500;
+        int same = 1;
+        for (int n = 0; n < 50; n++) {
+            ++*frames;
+            ((FallFn)0x67FAF0)(task, ped);
+            ((FallFn)0x67FAF0)(task2, ped);
+            same &= *(uint32_t *)(task + 0x1C) == *(uint32_t *)(task2 + 0x1C);
+        }
+        ok(same, "two peds down the same frame: the same step off each");
+        *ts = __builtin_nanf("");
+        ++*frames;
+        uint32_t before = *(uint32_t *)(task + 0x1C);
+        ((FallFn)0x67FAF0)(task, ped);
+        ok(*(uint32_t *)(task + 0x1C) == before, "a NaN timestep: nothing off");
+        ok(CrashFix_Uninstall(find("fallstep")) == 1 && !memcmp((void *)0x67FB35, "\xD9\x05\x5C\xCB\xB7\x00", 6), "and out");
+        if (was) CrashFix_Install(find("fallstep"), NULL);
+        *ts = 50.0f / 30.0f;
+    }
+
+    printf("== timers by the carried step, the jump-out damping, the engine drain, the fuel\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        uint32_t *frames = (uint32_t *)0xB7CB4C;
+        static const char *calls[] = {"chokestep", "climbstep", "fightstep", "stancestep", "carburn", "heliburn", "rcburn",
+                                      "bikeburn", "boatburn"};
+        int called = 1;
+        for (int i = 0; i < 9; i++) {
+            const Hook *h = &hooks[find(calls[i])];
+            const uint8_t *site = (const uint8_t *)h->va;
+            called &= h->installed && site[0] == 0xE8 && h->va + 5 + *(const uint32_t *)(site + 1) == (uint32_t)cf_step_call
+                      && site[5] == 0x90 && site[22] == 0x90;
+        }
+        ok(called, "the nine sites call cf_step_call, the rest NOPs");
+        *ts = 50.0f / 600.0f;
+        uint32_t va = hooks[find("carburn")].va, sum = 0;
+        ret_at(va + 5);
+        for (int n = 0; n < 600; n++) {
+            ++*frames;
+            call_site(va, 0, 0, 0, 0);
+            sum += site_ret;
+        }
+        unret(va + 5);
+        ok(sum >= 999 && sum <= 1000, "a burn timer at 600 fps: 1000 ms in 600 frames");
+
+        /* the game's own CVehicle::ProcessCarAlarm: a 1000 ms alarm */
+        typedef void (__attribute__((thiscall)) *AlarmFn)(void *vehicle);
+        static uint8_t car[0x600];
+        int alarm[2][3], fps[3] = {60, 600, 2000};
+        int was = CrashFix_Uninstall(find("alarmstep")) == 1;
+        for (int k = 0; k < 2; k++) {
+            if (k) ok(CrashFix_Install(find("alarmstep"), NULL) == 1, "alarmstep in");
+            for (int f = 0; f < 3; f++) {
+                *ts = 50.0f / fps[f];
+                *(uint16_t *)(car + 0x45C) = 1000;
+                alarm[k][f] = 0;
+                for (int n = 1; n <= 5000 && !alarm[k][f]; n++) {
+                    ++*frames;
+                    ((AlarmFn)0x6D21F0)(car);
+                    if (!*(uint16_t *)(car + 0x45C)) alarm[k][f] = n;
+                }
+            }
+        }
+        printf("   alarm frames: stock %d %d %d, ours %d %d %d\n", alarm[0][0], alarm[0][1], alarm[0][2], alarm[1][0],
+               alarm[1][1], alarm[1][2]);
+        ok(alarm[0][0] == 63 && alarm[0][1] == 1000 && alarm[0][2] == 0, "stock: 63 frames at 60 fps, 1000 at 600, never at 2000");
+        ok(abs(alarm[1][0] - 60) <= 1 && abs(alarm[1][1] - 600) <= 1 && abs(alarm[1][2] - 2000) <= 1,
+           "ours: 60, 600 and 2000 frames (each within 1), 1000 ms at each");
+        if (!was) CrashFix_Uninstall(find("alarmstep"));
+
+        *ts = 50.0f / 300.0f;
+        ++*frames;
+        ret_at(0x737A0E);
+        call_site(hook_of("fuelstep"), 0, 0, 0, 0);
+        unret(0x737A0E);
+        ok(site_ret == (uint32_t)-(int32_t)cf_ms_step(), "fuelstep: the step negated, for the timer's sub");
+        cf_frame_due = 0;
+        ret_at(0x737AFD);
+        call_site(hook_of("fuelfx"), 0, 0, 0, 0);
+        unret(0x737AFD);
+        cf_frame_due = 1;
+        ret_at(0x737A3D);
+        call_site(hook_of("fuelfx"), 0, 0, 0, 0);
+        unret(0x737A3D);
+        ok(1, "fuelfx: past the fuel on a frame not due, to it on a due one at 64 ms");
+
+        ret_at(0x6A7625);
+        float health = call_fpu(hook_of("enginedrain"), 500.0f, 1);
+        unret(0x6A7625);
+        ok(fabsf(health - (500.0f - 2.0f * (*ts / cf_k30))) < 1e-3f, "enginedrain: 2 health scaled by timestep / 1.6667");
+
+        static float veh[0x20];
+        veh[0x50 / 4] = 1.0f;
+        reg_esi = (uint32_t)veh;
+        ret_at(0x6D2119);
+        call_regs(hook_of("jumpout1"), 0, 0, 1);
+        unret(0x6D2119);
+        float turn_out = fpu_out, want = powf(0.9f, *ts / cf_k30);
+        ok(fabsf(turn_out - want) < 1e-5f && fabsf(cf_jump_damp - want) < 1e-6f, "jumpout1: the turn speed by pow(0.9, timestep / 1.6667)");
+        int ptrs = 1;
+        for (int i = 2; i <= 6; i++) {
+            char key[16];
+            snprintf(key, sizeof key, "jumpout%d", i);
+            ptrs &= *(float **)hooks[find(key)].va == &cf_jump_damp;
+        }
+        ok(ptrs, "jumpout2-6: the other five 0.9s read it");
+        *ts = 50.0f / 30.0f;
+
+        /* bikestill: both ways back are rets; what the bike's speeds hold after */
+        static uint32_t bike[0x470 / 4];
+        float *bturn = (float *)bike + 0x50 / 4, speed[3];
+        uint8_t keep166 = *(uint8_t *)0x6BC166, keep192 = *(uint8_t *)0x6BC192;
+        *(uint8_t *)0x6BC166 = *(uint8_t *)0x6BC192 = 0xC3;
+        reg_esi = (uint32_t)bike, reg_edi = (uint32_t)speed;
+        #define BIKESTILL(driver, tx, ty) (bike[0x460 / 4] = (driver), bturn[0] = (tx), bturn[1] = (ty), bturn[2] = 0.5f, \
+            call_regs(hook_of("bikestill"), 0, 0, 0))
+        float pass30 = 0.0005f, over30 = 0.002f;
+        BIKESTILL(0, pass30, pass30);
+        ok(bturn[0] == pass30 && bturn[1] == pass30 && bturn[2] == 0.0f, "bikestill: no driver, the yaw alone is zeroed, stock");
+        BIKESTILL(1, pass30, -pass30);
+        ok(bturn[0] == 0.0f && bturn[1] == 0.0f && bturn[2] == 0.0f, "a driver, at rest in roll and pitch: all three zeroed");
+        BIKESTILL(1, pass30, -over30);
+        ok(bturn[0] == pass30 && bturn[1] == -over30 && bturn[2] == 0.5f, "a driver, rolling: nothing is zeroed");
+        *ts = 50.0f / 300.0f;
+        BIKESTILL(1, pass30, 0.0f);
+        ok(bturn[0] == pass30 && bturn[2] == 0.5f, "300 fps: the limit is a tenth, 0.0005 is rolling");
+        BIKESTILL(1, 0.00005f, 0.00005f);
+        ok(bturn[0] == 0.0f && bturn[1] == 0.0f && bturn[2] == 0.0f, "300 fps: 0.00005 is at rest");
+        *(uint8_t *)0x6BC166 = keep166, *(uint8_t *)0x6BC192 = keep192;
+        *ts = 50.0f / 30.0f;
+    }
+
     printf("== FramerateVigilante's: swinging parts, the burnout, swimming\n");
     {
         float *ts = (float *)0xB7CB5C;
@@ -963,13 +1564,31 @@ __declspec(dllexport) int __cdecl run(void)
         ok(fabsf(call_fpu(hook_of("doordamp4"), 0, 0) - sqrtf(*(float *)0x87230C)) < 1e-6f && ((fpu_sw >> 11) & 7) == 7,
            "doordamp4: any other part's 0.97, one value left");
         unret(0x6F43D8);
-        static float frame[0x50];
-        frame[0] = -0.002f * 2500.0f;                      /* [ebp-130h] */
-        reg_ebp = (uint32_t)&frame[0x130 / 4];
-        ret_at(0x6A5009);
-        call_regs(hook_of("burnout"), 1.0f, 1, 1);
-        unret(0x6A5009);
-        ok(fabsf(fpu_out - (-5.0f * 0.5f)) < 1e-5f, "burnout: min(1, 3000 / 2500) times -0.002 * 2500, then scaled");
+        {   /* the burnout's ApplyTurnForce(contact point, no steering): the twist about the
+             * centre of mass, all of it scaled */
+            typedef struct { float x, y, z; } V3;
+            typedef void (__attribute__((thiscall)) *TurnFn)(void *self, V3 force, V3 point);
+            static uint8_t car[0x100];
+            static float m[18];
+            memset(car, 0, sizeof car);
+            memset(m, 0, sizeof m);
+            m[0] = m[5] = m[10] = 1.0f;
+            *(float **)(car + 0x14) = m;
+            *(float *)(car + 0x90) = 2500.0f;                /* turn mass */
+            *(float *)(car + 0xA8) = -0.6f;                  /* centre of mass y */
+            V3 contact = {-0.8f, -1.3f, -0.5f}, none = {0, 0, 0};
+            float keep = *(float *)0xB7CB5C;
+            *(float *)0xB7CB5C = 50.0f / 850.0f;
+            ((TurnFn)0x542A50)(car, contact, none);
+            float stock = *(float *)(car + 0x58);
+            memset(car + 0x50, 0, 12);
+            ((TurnFn)(uintptr_t)hooks[find("burnout")].to)(car, contact, none);
+            float fixed = *(float *)(car + 0x58);
+            *(float *)0xB7CB5C = keep;
+            ok(stock != 0, "burnout: with no steering the game still twists the car (the centre of mass)");
+            ok(fabsf(fixed - stock * (50.0f / 850.0f) / (50.0f / 30.0f)) < fabsf(stock) * 1e-5f,
+               "burnout: all of that twist scaled to a 30 fps step");
+        }
         static float task[0x10];
         task[0x34 / 4] = 2.0f;                              /* m_fStateChanger, the pitch rate */
         reg_edi = (uint32_t)task;
@@ -1096,6 +1715,9 @@ __declspec(dllexport) int __cdecl run(void)
     }
 
     printf("== the dithered sky (skydither) on a D3D9 device, through the game's RwD3D9\n");
+    mixsets_test();
+    gear_test();
+    wheel_test();
     sky_test();
 
     printf("== fixes.lua's fog routine through RwD3D9SetRenderState\n");
@@ -1130,6 +1752,11 @@ __declspec(dllexport) int __cdecl run(void)
             ok(*count == 4, "again before a flush: already queued, not twice");
         }
     }
+
+    printf("== faults.c: a fault in the game's code, with its callers, in faults.log\n");
+    faults_test(path);
+
+    stream_test(path);
 
     printf("crashfix: %d passed, %d failed\n", passed, failed);
     fflush(stdout);

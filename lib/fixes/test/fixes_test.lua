@@ -172,7 +172,7 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, chutefps on, crashfix on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
+    ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, boatfoam on, boatradio on, chutefps on, crashfix on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
         and all:find('turnfps on', 1, true) and all:find('vehiclefps on', 1, true) and all:find('chutefps on', 1, true) and all:find('pedfps on', 1, true) and all:find('pushfps on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
@@ -291,6 +291,54 @@ for _, base in ipairs({0x10000000, 0x02B20000}) do
     ok(allocs == 1, tag .. ': no second block')
     ok(unchanged(before, snapshot(0x01000000, 0x7FFFFFFF)), tag .. ': not a byte changed')
     ok(printed[#printed]:find('already moved', 1, true), tag .. ': and said so: ' .. tostring(printed[#printed]))
+end
+
+print('\n== dialog scrollbar drag, SA-MP R5: the first division jumps to a stub that tests both divisors')
+do
+    local base = 0x02B20000
+    local va = base + 0x88A0B
+    local SHAPE = hex('8B C1 99 8D 2C 3F F7 FD 8B 6E 72 8B 96 82 00 00 00 2B C5 03 C2 0F AF C7 99 F7 F9 5F 03 C3 89 86 8E 00 00 00')
+    local function target(at) return (at + 4 + getU32(at)) % 0x100000000 end
+    put(va, unpack(SHAPE)); mem[va + 3] = 0x90
+    allocs = 0
+    ok(env.fixDialogScrollbar() == false and allocs == 0, 'another shape there: refused, nothing allocated')
+    put(va, unpack(SHAPE))
+    ok(env.fixDialogScrollbar() == true and allocs == 1, 'applied, one block')
+    local stub = nextBlock - 0x100000
+    ok(mem[va] == 0xE9 and target(va + 1) == stub and same(get(va + 5, 3), {0x90, 0x90, 0x90}),
+        'the division is a jmp to the stub and three NOPs')
+    ok(same(get(va + 8, 3), {0x8B, 0x6E, 0x72}) and mem[va + 0x1B] == 0x5F, 'the rest is untouched')
+    ok(same(get(stub, 16), {0x85, 0xFF, 0x74, 0x11, 0x85, 0xC9, 0x74, 0x0D, 0x8B, 0xC1, 0x99, 0x8D, 0x2C, 0x3F, 0xF7, 0xFD}),
+        'stub: test edi, test ecx, then the stock division')
+    ok(mem[stub + 16] == 0xE9 and target(stub + 17) == va + 8, 'and back after the hooked bytes')
+    ok(same(get(stub + 21, 8), {0x8B, 0x86, 0x8E, 0, 0, 0, 0x2B, 0xC3}) and mem[stub + 29] == 0xE9
+        and target(stub + 30) == va + 0x1B, 'a zero divisor: the position as it stands, to the store')
+    ok(env.fixDialogScrollbar() == true and allocs == 1, 'asked again: in place, no second block')
+end
+
+print('\n== anisotropic filtering: the plugin\'s default and every loaded texture take the level')
+do
+    local CTOR, OFFSET, POOL, CAPS = 0x74902A, 0xC92478, 0xC8800C, 0xC9BF6C
+    put(CTOR, 0xC6, 0x04, 0x01, 0x01)
+    putU32(OFFSET, 0x58)
+    -- a pool of 3 slots: a dictionary with two textures, a free slot, an empty slot
+    local pool, defs, flags, dict, texA, texB = 0x05000000, 0x05001000, 0x05002000, 0x05003000, 0x05004000, 0x05005000
+    putU32(POOL, pool); putU32(pool, defs); putU32(pool + 4, flags); putU32(pool + 8, 3)
+    put(flags, 0x00, 0x80, 0x00)
+    putU32(defs, dict); putU32(defs + 12, dict); putU32(defs + 24, 0)
+    putU32(dict + 8, texA + 8); putU32(texA + 8, texB + 8); putU32(texB + 8, dict + 8)
+    mem[texA + 0x58], mem[texB + 0x58] = 1, 1
+    putU32(CAPS, 1)
+    ok(env.fixAnisotropic(true) == false and mem[CTOR + 3] == 1, 'a device with none: refused, nothing written')
+    putU32(CAPS, 8)
+    ok(env.fixAnisotropic(true) == true and mem[CTOR + 3] == 8, 'a device with 8: the constructor gives 8')
+    ok(mem[texA + 0x58] == 8 and mem[texB + 0x58] == 8, 'both loaded textures set, the free slot skipped')
+    putU32(CAPS, 16)
+    ok(env.fixAnisotropic(true) == true and mem[CTOR + 3] == 16 and mem[texA + 0x58] == 16, 'a device with 16: 16')
+    ok(env.fixAnisotropic(false) == true and mem[CTOR + 3] == 1 and mem[texB + 0x58] == 1, 'off: 1 again, the textures too')
+    mem[CTOR + 1] = 0x05
+    ok(env.fixAnisotropic(true) == false and mem[CTOR + 3] == 1, 'another instruction there: refused')
+    put(CTOR, 0xC6, 0x04, 0x01, 0x01)
 end
 
 print('\n== /fixes shows how many are stored')
@@ -887,6 +935,7 @@ do
     env.chuteTick()
     ok(#printed == before, 'holding the parachute, PLCHUTE not named yet: nothing told')
     put(SCRIPT + 8, ('plchute'):byte(1, -1))
+    putU32(0xB7CB84, 4100)   -- none running: the list is looked at every 100 ms of game time
     env.chuteTick()
     put(SCRIPT + 8, ('noname\0'):byte(1, -1))
     putU32(0xB7CB84, 5000)
@@ -898,6 +947,22 @@ do
     env.chuteTick()
     ok(#printed == before + 1 and printed[#printed]:find('no PLCHUTE running', 1, true),
         'missing 3 s: told once: ' .. tostring(printed[#printed]))
+    -- none running: the list is walked every 100 ms of game time, not every frame
+    putU32(0xB7CB84, 8200)
+    env.chuteTick()
+    put(SCRIPT + 8, ('plchute'):byte(1, -1))
+    mem[TS] = 50 / 150
+    mem[BASE + 1029 + 6] = 0
+    putU32(0xB7CB84, 8250)
+    env.chuteTick()
+    ok(at(1029) == 0, 'a PLCHUTE that started 50 ms after the last look: not seen yet')
+    putU32(0xB7CB84, 8300)
+    env.chuteTick()
+    ok(math.abs(at(1029) - 25) < 1e-9, '100 ms on: a PLCHUTE that started is found and fixed')
+    mem[BASE + 1029 + 6] = 0
+    putU32(0xB7CB84, 8301)
+    env.chuteTick()
+    ok(math.abs(at(1029) - 25) < 1e-9, 'and while it runs, every frame')
     env.getCurrentCharWeapon = nil
     putU32(0xA8B42C, 0)
 end
@@ -1125,6 +1190,48 @@ do
     ok(same(get(SITE, 5), CALL), 'a call SA-MP left in place is not NOPed by off')
 end
 
+print('\n== unfocused: the game runs behind another window, off by default')
+do
+    local FG = {0x1C, 0x62, 0x8D, 0x00}
+    local SITES = {{0x747FB0, 0}, {0x748054, 0}, {0x748068, 1}}
+    local CURSOR, CURSOR_STOCK = 0x74542B, {0x50, 0x51, 0xFF, 0x15, 0x00, 0x83, 0x85, 0x00}
+    for _, s in ipairs(SITES) do put(s[1], 0xC7, 0x05, FG[1], FG[2], FG[3], FG[4], s[2], 0, 0, 0) end
+    put(CURSOR, unpack(CURSOR_STOCK))
+    local function stock()
+        for _, s in ipairs(SITES) do
+            if not same(get(s[1], 10), {0xC7, 0x05, FG[1], FG[2], FG[3], FG[4], s[2], 0, 0, 0}) then return false end
+        end
+        return same(get(CURSOR, 8), CURSOR_STOCK)
+    end
+    ok(stock(), 'off by default: the stock writes and SetCursorPos call')
+    put(0x8D621C, 0)
+    env.fixesCommand('unfocused on')
+    local flag = getU32(0x747FB2)
+    ok(flag ~= 0x8D621C and getU32(flag - 4) == 0x67467846 and getU32(flag) == 1, 'on: site 1 writes our flag, set to 1')
+    ok(get(0x8D621C, 1)[1] == 1, 'ForegroundApp set to 1')
+    local all = true
+    for _, s in ipairs(SITES) do
+        all = all and getU32(s[1] + 2) == flag and getU32(s[1] + 6) == s[2] and same(get(s[1], 2), {0xC7, 0x05})
+    end
+    ok(all, 'all three focus writes go to our flag with their values')
+    local stub = (CURSOR + 5 + getU32(CURSOR + 1)) % 0x100000000
+    ok(get(CURSOR, 1)[1] == 0xE8 and same(get(CURSOR + 5, 3), {0x90, 0x90, 0x90}) and stub == flag - 4 + 0x10,
+        'the cursor call goes to the stub')
+    ok(same(get(stub, 2), {0x80, 0x3D}) and getU32(stub + 2) == flag and same(get(stub + 6, 3), {0x00, 0x74, 0x08})
+        and same(get(stub + 9, 8), CURSOR_STOCK) and get(stub + 17, 1)[1] == 0xC3,
+        'the stub skips SetCursorPos while the flag is 0')
+    env.fixesCommand('unfocused off')
+    ok(stock(), 'off: all four sites stock')
+    env.fixesCommand('unfocused on')
+    ok(getU32(0x747FB2) == flag, 'on again reuses the block')
+    env.fixesCommand('unfocused off')
+    put(CURSOR, 0xE9, 0, 0, 0, 0)                            -- another mod's hook
+    env.fixesCommand('unfocused on')
+    ok(getU32(0x747FB2) == 0x8D621C and get(CURSOR, 1)[1] == 0xE9, 'another hook at the cursor call: nothing written')
+    env.fixesCommand('unfocused off')
+    put(CURSOR, unpack(CURSOR_STOCK))
+end
+
 print('\n== keepcars: 01C3 keeps the car, on by default')
 do
     local SITE, CALL, NOPS = 0x47D775, {0xE8, 0xF6, 0x8E, 0x00, 0x00}, {0x90, 0x90, 0x90, 0x90, 0x90}
@@ -1293,6 +1400,7 @@ do
             {key = 'swimpitch1', name = 'dive pitch', va = 0x68A6BD, result = 1, option = 'swimfps'},
             {key = 'skydither', name = 'sky', va = 0x7154A8, result = 1, option = 'skygrad'},
             {key = 'camnan', name = 'NaN camera', va = 0x526FC0, result = 1},
+            {key = 'streamconvert', name = 'ConvertBufferToObject, timed', va = 0x40C6B0, result = 1, option = 'streamtime'},
             {key = 'samp', name = 'SA-MP helper', va = 0, result = 1},
         },
         installs = {}, uninstalls = {}, shadows = nil, sampSite = nil,
@@ -1463,6 +1571,103 @@ do
     for i = fromChat + 1, #chat do if chat[i]:find('crash fixes: ', 1, true) then status = chat[i] end end
     ok(status and status:find('; 11 crash(es) averted', 1, true),
         'the glass list\'s growth and the peds left out are not counted as crashes: ' .. tostring(status))
+
+    print('\n== fault log: the DLL watches from the start, into logs\\faults.log')
+    local faults = {}
+    lib.CrashFix_FaultsStart = function(path) faults[#faults + 1] = 'start ' .. path; return 1 end
+    lib.CrashFix_FaultsStop = function() faults[#faults + 1] = 'stop'; return 1 end
+    local n1 = #printed
+    ok(env.startFaultLog() == true and faults[1] and faults[1]:find('\\logs\\faults.log', 1, true),
+        'started with the log beside the others: ' .. tostring(faults[1]))
+    ok(printed[#printed]:find('fault log: crash-type exceptions go to logs\\faults.log', 1, true)
+        and printed[#printed]:find('watching', 1, true), 'said: ' .. tostring(printed[#printed]))
+    ok(env.startFaultLog() == true and #faults == 1 and #printed == n1 + 1, 'a second start: already watching, nothing said')
+    local filterTick = upvalue(env.main, 'exceptionFilterTick')
+    for i = 1, math.huge do
+        local name = debug.getupvalue(filterTick, i)
+        if not name then break end
+        if name == 'exceptionFilter' then debug.setupvalue(filterTick, i, {count = 0x02B20000 + EF_COUNT_RVA, seen = 12}) end
+    end
+    putU32(0x02B20000 + EF_COUNT_RVA, 13)
+    filterTick()
+    ok(printed[#printed]:find('swallowed 13 exception(s) so far', 1, true)
+        and printed[#printed]:find('each with its stack in logs\\faults.log', 1, true),
+        'the swallowed count points at the log: ' .. tostring(printed[#printed]))
+    env.fixesCommand('faultlog off')
+    ok(faults[#faults] == 'stop', '/fixes faultlog off stops it')
+    env.fixesCommand('faultlog on')
+    ok(faults[#faults]:find('^start '), 'and on starts it again')
+    lib.CrashFix_FaultsStart = function() error('missing export') end
+    env.fixesCommand('faultlog off')
+    env.fixesCommand('faultlog on')
+    ok(printed[#printed]:find('needs a newer lib\\fixes\\crashfix.dll', 1, true),
+        'an older DLL without it: said, nothing else: ' .. tostring(printed[#printed]))
+
+    print('\n== stream timer: off by default; on, model loading is timed into logs\\stream.log and onto drift\'s lines')
+    local stream = {calls = {}, stat = {[0] = 5, 2, 0, 0, 0, -1}, resets = 0}
+    lib.CrashFix_StreamStart = function(path) stream.calls[#stream.calls + 1] = 'start ' .. path; return 1 end
+    lib.CrashFix_StreamStop = function() stream.calls[#stream.calls + 1] = 'stop'; return 1 end
+    lib.CrashFix_StreamFlush = function() stream.calls[#stream.calls + 1] = 'flush' end
+    lib.CrashFix_StreamSummary = function()
+        return 'convert dff: 2 in 3.000 ms, mean 1.500, worst 2.000\r\nloadall: 1 in 9.000 ms, 3.000 ms of it converting\r\n'
+    end
+    lib.CrashFix_StreamStat = function(i) return stream.stat[i] end
+    lib.CrashFix_StreamResetWorst = function() stream.resets = stream.resets + 1; stream.stat[4], stream.stat[5] = 0, -1 end
+    env.fixesCommand('streamtime')
+    ok(chat[#chat]:find('streamtime: off - ', 1, true), 'off by default: ' .. tostring(chat[#chat]))
+    env.fixesCommand('streamtime report')
+    ok(chat[#chat]:find('streamtime is off', 1, true), 'off: the report says how to start it: ' .. tostring(chat[#chat]))
+    ok(env.streamTimerRead() == nil and #stream.calls == 0, 'off: nothing read, the DLL not asked')
+    local s1, i1 = #printed, #cf.installs
+    env.fixesCommand('streamtime on')
+    ok(stream.calls[1] and stream.calls[1]:find('^start ') and stream.calls[1]:find('\\logs\\stream.log', 1, true),
+        'on: started with the log beside the others: ' .. tostring(stream.calls[1]))
+    ok(cf.installs[#cf.installs] == 'streamconvert' and #cf.installs > i1, 'and its hook installed')
+    ok(lineAfter(s1, 'streamconvert') and lineAfter(s1, 'streamconvert'):find(
+        '0x40C6B0 stream timer streamconvert (ConvertBufferToObject, timed): hooked', 1, true),
+        'its line names it a stream timer: ' .. tostring(lineAfter(s1, 'streamconvert')))
+    ok(env.crashFixState('stream') == 'in place' and env.crashFixState('frame') == 'in place', 'counted apart from the frame-rate fixes')
+    stream.stat = {[0] = 17, 32, 9, 1, 4.5, 1234}
+    local ms, n, allMs, alls, worst, id = env.streamTimerRead()
+    ok(ms == 12 and n == 30 and allMs == 9 and alls == 1 and worst == 4.5 and id == 1234 and stream.resets == 2,
+        'a read: the sums since the start, the longest file, which starts again')
+    ms, n, allMs, alls, worst, id = env.streamTimerRead()
+    ok(ms == 0 and n == 0 and alls == 0 and id == -1, 'again at once: nothing since')
+
+    local D = upvalue(env.driftFrame, 'DRIFT')
+    local keepClock, keepWrite, keepEvery, now, lines = D.clock, D.write, D.EVERY, 0, {}
+    D.clock, D.write, D.EVERY = function() return now end, function(line) lines[#lines + 1] = line end, 1
+    stream.stat = {[0] = 20, 40, 9, 1, 2, 7}
+    ok(env.startDrift(), 'drift on beside it')
+    stream.stat = {[0] = 120, 90, 39, 3, 7.3, 20005}
+    env.driftFrame()
+    while #lines < 2 do now = now + 4; env.driftFrame() end
+    ok(lines[2]:find('streamMB=', 1, true) and lines[2]:find(' streamms=0.400 streamn=50 streamworst=7.3 streamworstid=20005 loadalls=2 loadallms=30.0 ', 1, true),
+        'drift\'s line: ms a frame over its 250 frames, the files, the longest and its id, the drains: ' .. lines[2])
+    while #lines < 3 do now = now + 4; env.driftFrame() end
+    ok(lines[3]:find(' streamms=0.000 streamn=0 loadalls=0 loadallms=0.0 ', 1, true) and not lines[3]:find('streamworst', 1, true),
+        'a line with nothing loaded: zeros, no longest file: ' .. lines[3])
+    env.stopDrift()
+    D.clock, D.write, D.EVERY, D.samples = keepClock, keepWrite, keepEvery, nil
+
+    local c1 = #chat
+    env.fixesCommand('streamtime report')
+    ok(#chat == c1 + 3 and chat[c1 + 1]:find('convert dff: 2 in 3.000 ms, mean 1.500, worst 2.000', 1, true)
+        and chat[c1 + 2]:find('loadall: 1 in ', 1, true) and chat[#chat]:find('every file: logs\\stream.log', 1, true), 'the report: the DLL\'s summary a line each, then the log: ' .. tostring(chat[c1 + 1]))
+    env.streamTimerFlush()
+    ok(stream.calls[#stream.calls] == 'flush', 'the log is flushed when asked (once a second from the loop)')
+    local u1 = #cf.uninstalls
+    env.fixesCommand('streamtime off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'streamconvert' and #cf.uninstalls == u1 + 1 and stream.calls[#stream.calls] == 'stop',
+        'off: its hook out, then the log stopped (the summary at its end)')
+    ok(env.streamTimerRead() == nil, 'and nothing read')
+    lib.CrashFix_StreamStart = function() error('missing export') end
+    local s2 = #printed
+    env.fixesCommand('streamtime on')
+    ok(lineAfter(s2, 'the stream timer needs a newer lib\\fixes\\crashfix.dll'),
+        'an older DLL without it: said: ' .. tostring(printed[s2 + 1]))
+    env.fixesCommand('streamtime off')
+
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString
 end
@@ -2352,7 +2557,7 @@ end
 
 local function eq(a, b, why) ok(a == b, ('%s (got %s, want %s)'):format(why, tostring(a), tostring(b))) end
 
-print('\n== drift: percentiles from the histogram, SA-MP ids counted a slice a frame')
+print('\n== drift: percentiles from the histogram, SA-MP ids counted a slice a frame before each line')
 do
     local DR = upvalue(env.driftFrame, 'DRIFT')
     local now, lines = 0, {}
@@ -2376,7 +2581,16 @@ do
     now = now + 30; env.driftFrame()          -- a hitch, in a bucket
     now = now + 80; env.driftFrame()          -- over TOP: kept exactly
     now = now + 5000; env.driftFrame()        -- a pause, not a frame
-    ok(most <= DR.SLICE, 'never more than one slice of SAMPFUNCS calls a frame: ' .. most)
+    eq(calls, 0, 'no SAMPFUNCS call until a line is near')
+    now = DR.due - DR.LEAD                     -- the pass: a slice a frame from here
+    for i = 1, 60 do
+        local before = calls
+        now = now + 2.0; env.driftFrame()
+        most = math.max(most, calls - before)
+    end
+    local counted = calls
+    ok(most > 0 and most <= DR.SLICE, 'never more than one slice of SAMPFUNCS calls a frame: ' .. most)
+    eq(counted, 2048, 'each id asked once a line')
     eq(DR.swept.labels, 10, '3D labels counted over the frames')
     eq(DR.swept.textdraws, 24, 'textdraws counted over the frames')
     now = DR.due; env.driftFrame()

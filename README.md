@@ -45,6 +45,8 @@ Crashes:
 - A vehicle or object shadow mesh over 2048 vertices (with volumetric
   shadows on) and an IK chain through a bone the ped's skin lacks (San
   Andreas Online's fixes).
+- Dragging the scrollbar of a SA-MP list dialog that fits on one page
+  divided by zero and froze the game (samp.dll): the divisors are tested.
 
 Game bugs:
 - Tail light damage reads the wrong light.
@@ -74,6 +76,22 @@ Game bugs:
 - Switching the Frame Limiter on could crash: the game reset the graphics
   device to turn vsync on, and a failed reset crashed it. The device is no
   longer reset for that; the Frame Limiter still caps the frame rate.
+- An unfocused window pauses the game: with `unfocused` on it keeps running
+  behind another window, and the cursor stays where you put it.
+- Textures are filtered anisotropically, 16x or the most the device offers.
+
+From SA-MixSets (Junior_Djjr), the fixes fixes did not have and SA-MP allows:
+- A car's shadow and its headlight glow on the ground move in steps: they
+  follow the car smoothly (`smoothshadows`).
+- The HUD fist and weapon icons are stretched, 58 wide against 47 high: they
+  are drawn square (`weaponicon`).
+- The mouse wheel cancels a reload (`scrollreload`, off by default: it
+  changes weapon switching).
+- A truck with double rear wheels lays one skidmark and one dust trail per
+  side: each rear wheel gets its pair's too (`doubleskid`).
+- Changing the radio breaks a boat driver's pose (`boatradio`).
+- A boat's wake is as bright at night as by day: it dims with the water's
+  light (`boatfoam`).
 
 Frame rate (each as at 30 fps, the rate the game was tuned for):
 - Off the throttle a car stops dead at high fps and rolls at low: the
@@ -90,6 +108,15 @@ Frame rate (each as at 30 fps, the rate the game was tuned for):
   when swimming; a quick horn tap switches the siren at any fps.
 - The parachute: turning, rolling and speeding up as at 30 fps instead of
   spinning at high fps (its script's per-frame values follow the timestep).
+- Timers that count whole milliseconds a frame: a knock-down, a burning car,
+  plane, bike or boat, the car alarm, a choke, the climb, fight and stance
+  timers and an explosion's fuel last as long at any fps (they ran long at
+  144 fps and never ended above 1000).
+- Cars are quicker at high fps and tyres skid sooner (12% quicker to 20 m/s
+  at 850 fps, donuts turning twice as far): the gearbox's engine inertia and
+  the tyre's skid test are taken per 30 fps frame, and a burnout's whole turn
+  is scaled, not only its steering.
+- A ridden bike at rest no longer rocks at high fps.
 
 If Car Speed FPS Fix (CLEO) is running, fixes leaves it and its file alone,
 turns its own coasting fix off so nothing is applied twice, and asks in chat
@@ -151,6 +178,17 @@ that averted a crash says so.
 - `/fixes deathtrace on` writes the last 3 s before each death to
   `moonloader/logs/death.log`: health, vehicle, what the game blamed, what
   came in from the network and what SA-MP reported.
+- Every crash-type exception goes to `moonloader/logs/faults.log` as it
+  happens, with its registers, the return addresses on its stack and, inside
+  Lua, the Lua frames (`faultlog`, on by default). SA-MP swallows crashes in
+  the game's update, which can freeze the world with nothing logged; this
+  only watches, from a thread of its own.
+- `/fixes streamtime on` times model loading on the game's thread into
+  `moonloader/logs/stream.log`: a line per file converted (type, id, ms, size)
+  and per `LoadAllRequestedModels` drain with who called it. `/fixes
+  streamtime report` prints a summary, and with `drift` on each drift line
+  shows the ms a frame. A diagnostic for
+  [docs/ASYNC_STREAMING_PLAN.md](docs/ASYNC_STREAMING_PLAN.md), not a fix.
 - `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
   session and uses fixes' own, `keep` keeps it and turns `wheelfps` off,
   `remove` explains first, and only `/fixes cleo remove yes` within 30
@@ -186,6 +224,12 @@ that averted a crash says so.
 | `glasslist` | on | a car's see-through parts drawn in order past 20 |
 | `skygrad` | on | the sky drawn dithered, without colour bands |
 | `novsyncreset` | on | the Frame Limiter and loading screens do not reset the graphics device for vsync |
+| `anisotropic` | on | anisotropic texture filtering, 16x or the device's most |
+| `unfocused` | off | the game keeps running while another window has focus |
+| `smoothshadows`, `weaponicon`, `doubleskid`, `boatradio`, `boatfoam` | on | SA-MixSets' fixes above |
+| `scrollreload` | off | the mouse wheel does not cancel a reload (changes weapon switching) |
+| `faultlog` | on | the fault log above |
+| `streamtime` | off | the model loading timer above |
 | `drift` | off | the frame-rate log above |
 | `deathtrace` | off | the death log above |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |
@@ -220,6 +264,9 @@ against gta_sa.exe's own code, and `position_guard_test.sh` and
   buoyancy fixes follow Swim FPS Fix.asi; the GXT fix follows gxt_crash_fix.
 - The door, burnout, swim and siren frame-rate fixes are from
   FramerateVigilante by [Junior_Djjr](https://github.com/JuniorDjjr) (MIT).
+- The shadow, weapon icon, reload, skidmark, boat radio and wake fixes are
+  from [SA-MixSets](https://github.com/CanerKaraca23/SA-MixSets) by
+  **Junior_Djjr** (MIT).
 - The dithered sky follows skygrad.asi by **FraGae**; the code and shaders
   are fixes' own.
 - The shadow-mesh and IK-chain crash fixes and the glass list are from

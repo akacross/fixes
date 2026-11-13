@@ -3,8 +3,10 @@
  * after framerate.c, so its SCALED and cf_k30 are here, each switched by its
  * own fixes option. Where they differ from FramerateVigilante's:
  *   - each damping is pow(rate, timestep / 1.6667), not a linear step.
- *   - the burnout's turn is scaled after the game's min(1, 3000 / turn mass),
- *     so cars under 3000 scale too.
+ *   - the burnout's whole turn is scaled: its ApplyTurnForce passes the
+ *     wheel's contact point as the force, which twists a car about its
+ *     centre of mass every frame even with no steering, and FramerateVigilante
+ *     scaled only the steering part.
  *   - the third dive-pitch damping is the fmul at 0x68A7C0 (its 0x68A7BD is
  *     the fld before it, and its code goes on inside the fmul).
  *   - the siren keeps a press time per vehicle: SA-MP runs it for other
@@ -17,6 +19,8 @@
 /* ------------------------------------------------------------------------ */
 /* The rows: key, option, what, site, bytes, stock                          */
 /* ------------------------------------------------------------------------ */
+void cf_burnout_turn(void);
+
 #define VIGILANTE(FJ, FP) \
     FJ(doordamp1, "vehiclefps", "CDoor::Process: a boat's part settles per 30 fps step", 0x6F4391, 6, \
         "\xD9\x05\x10\x23\x87\x00") \
@@ -25,8 +29,8 @@
     FJ(doordamp3, "vehiclefps", "CDoor::Process: a bonnet settles per 30 fps step", 0x6F43CA, 6, "\xD9\x05\x18\x23\x87\x00") \
     FJ(doordamp4, "vehiclefps", "CDoor::Process: a door or boot settles per 30 fps step", 0x6F43D2, 6, \
         "\xD9\x05\x0C\x23\x87\x00") \
-    FJ(burnout, "vehiclefps", "CAutomobile::ProcessCarWheelPair: the burnout's turn scaled", 0x6A5003, 6, \
-        "\xD8\x8D\xD0\xFE\xFF\xFF") \
+    FP(burnout, "vehiclefps", KIND_CALL, "CAutomobile::ProcessCarWheelPair: the burnout's turn, all of it, per 30 fps step", \
+        0x6A5073, 5, "\xE8\xD8\xD9\xE9\xFF", cf_burnout_turn) \
     FJ(swimpitch1, "swimfps", "CTaskSimpleSwim::ProcessSwimmingResistance: the dive pitch settles per 30 fps step", \
         0x68A6BD, 6, "\xD8\x0D\xF0\x8E\x85\x00") \
     FJ(swimpitch2, "swimfps", "CTaskSimpleSwim::ProcessSwimmingResistance: the dive pitch settles per 30 fps step", \
@@ -114,10 +118,21 @@ __asm__(
 
 /* CAutomobile::ProcessCarWheelPair: min(1, 3000 / turn mass) times
  * -0.002 * turn mass */
-"HOOK burnout\n"
-"    fmul dword ptr [ebp-0x130]\n"
+/* CAutomobile::ProcessCarWheelPair's call of CPhysical::ApplyTurnForce(force,
+ * point) in a burnout: the turn is point x force, so the force (on the stack
+ * past the return address) scales all of it */
+".globl _cf_burnout_turn\n"
+"_cf_burnout_turn:\n"
+"    fld dword ptr [esp+4]\n"
 "    SCALED\n"
-"    GO 0x6A5009\n"
+"    fstp dword ptr [esp+4]\n"
+"    fld dword ptr [esp+8]\n"
+"    SCALED\n"
+"    fstp dword ptr [esp+8]\n"
+"    fld dword ptr [esp+12]\n"
+"    SCALED\n"
+"    fstp dword ptr [esp+12]\n"
+"    GO 0x542A50\n"
 
 /* CTaskSimpleSwim::ProcessSwimmingResistance: st0 is the pitch rate at
  * [edi+34h], times 0.95 */

@@ -360,6 +360,19 @@ M.common.SmokeAnimBlend = {
     size     = 4,
 }
 
+-- CDXUTScrollBar's thumb drag: `mov eax,ecx; cdq; lea ebp,[edi+edi]; idiv ebp`
+-- through the store of the position. edi (end - start - pageSize) and ecx
+-- (track - thumb height) can be 0; fixes.lua:fixDialogScrollbar() hooks the
+-- first 8 bytes. No relocation in it; unique in .text on all four DLLs.
+M.common.ScrollbarDragDivide = {
+    pattern  = '8B C1 99 8D 2C 3F F7 FD 8B 6E 72 8B 96 82 00 00 00 2B C5 03 C2 0F AF C7 99 F7 F9 5F 03 C3 89 86 8E 00 00 00',
+    sections = { '.text' },
+    offset   = 0,
+    expect   = { DLR1 = 0x8848B, R1 = 0x843EB, R3 = 0x882FB, R5 = 0x88A0B },
+    note     = 'scrollbar thumb drag: the first of two divisions that can be by zero',
+    size     = 8,
+}
+
 -- RemoveBuildingForPlayer's table: 1000 entries of {model, x, y, z, radius}
 -- (20 bytes), the count right after it, and no bounds check on the store (the
 -- overflow fixes.lua:fixRemovedBuildings() closes). The only two sites that
