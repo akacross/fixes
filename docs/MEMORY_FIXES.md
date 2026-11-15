@@ -2041,7 +2041,12 @@ times, and a car let off the throttle stops dead at high fps and rolls at
 low. The stub returns `fWheelFriction * timestep * 0.6`, read at the use, so a
 value handling.cfg or another mod sets is scaled too. Junior_Djjr's Car Speed
 FPS Fix (CLEO) wrote `0.9 * timestep / 1.6667` over the global every script
-frame instead: a frame late, and it replaced any other value.
+frame instead: a frame late, and it replaced any other value. `fWheelFriction` is
+`gHandlingDataMgr + 4` (0xC2B9CC); a limit adjuster that moves the handling
+manager (Open Limit Adjuster 2.0's `HandlingEntries`) rewrites the five loads
+to its copy, so the address is taken from the loads themselves (all five must
+agree, or from the stub's head when they are already ours), and the stub, the
+sites' bytes and the CLEO stop's 0.9 use it.
 
 **swimfps.** `CTaskSimpleSwim::ProcessSwimmingResistance` (0x68A1D0) blends
 the ped's move speed toward a target with `1 - pow(0.9, timestep)`, which is

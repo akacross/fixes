@@ -2307,6 +2307,27 @@ do
 end
 fpsSession(); fpsStock()
 
+print('\n== a limit adjuster moved the handling manager: wheelfps follows fWheelFriction')
+do
+    local moved = 0x20001004                    -- where the five loads read it now
+    local load = {0xD9, 0x05, 0x04, 0x10, 0x00, 0x20}
+    fpsSession(); FPS.friction = nil
+    for _, site in ipairs(FPS.SITES) do if site.stub == 'wheel' then put(site.va, unpack(load)) end end
+    ok(env.fixFrameRate('wheelfps') == 5 and FPS.friction == moved, 'applied at the moved address')
+    local head = get(FPS.stubs.wheel, 6)
+    ok(same(head, load), 'the stub loads the moved fWheelFriction')
+    ok(env.stopFrameRate('wheelfps') == 5 and same(get(0x6D76CD, 6), load), 'off puts the moved load back')
+    put(0x6D767F, 0xD9, 0x05, 0xCC, 0xB9, 0xC2, 0x00)  -- one load still the stock address
+    fpsSession(); FPS.friction = nil
+    ok(env.fixFrameRate('wheelfps') == 0 and printed[#printed]:find('do not read one address', 1, true),
+        'loads that disagree are refused')
+    fpsSession(); FPS.friction = nil
+    for _, site in ipairs(FPS.SITES) do
+        if site.stub == 'wheel' then site.from = hex('D905CCB9C200') end
+    end
+end
+fpsSession(); fpsStock()
+
 print('\n== Car Speed FPS Fix (CLEO): nothing done unasked; stop, keep and a confirmed remove')
 do
     -- what identifies it: 0A8D reading 0x5B7273 first, an 0A8C write later

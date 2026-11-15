@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.26.0")
+script_version("0.26.1")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -2480,7 +2480,8 @@ end
 -- fps (a 1.6667 timestep). Each site becomes a call (or a jmp) to a stub in
 -- one shared block that scales by timestep / 1.6667, so 30 fps is stock.
 --   wheelfps  CVehicle::ProcessWheel and ProcessBikeWheel read
---             gHandlingDataMgr.fWheelFriction (0xC2B9CC) as the coasting
+--             gHandlingDataMgr.fWheelFriction (0xC2B9CC, or where a limit
+--             adjuster's HandlingEntries moved it) as the coasting
 --             brake: a fixed slow-down per step, so off the throttle a car
 --             stops dead at high fps (Junior_Djjr's Car Speed FPS Fix).
 --   swimfps   CTaskSimpleSwim::ProcessSwimmingResistance blends toward a
@@ -2517,8 +2518,36 @@ local FPS = {
 
 -- The block: four constants, then each stub. -> bytes, {name = va}. `game`
 -- moves the game globals the stubs read (the tests' harness).
+-- fWheelFriction as the five loads read it: 0xC2B9CC, or where a limit
+-- adjuster moved the handling manager. A load already ours names it in its
+-- stub's head. -> address (0xC2B9CC when a site holds other bytes, which the
+-- check then refuses), or nil when they disagree or it is unreadable
+function FPS.frictionVa()
+    local found
+    for _, site in ipairs(FPS.SITES) do
+        if site.stub == "wheel" then
+            local b, va = readBytes(site.va, 6), nil
+            if b and b[1] == 0xD9 and b[2] == 0x05 then
+                va = bytesU32({b[3], b[4], b[5], b[6]})
+            elseif b and b[1] == 0xE8 then
+                local at = (site.va + 5 + bytesU32({b[2], b[3], b[4], b[5]})) % 0x100000000
+                local head = not moduleAt(at) and readBytes(at, 6)
+                if head and head[1] == 0xD9 and head[2] == 0x05 then va = bytesU32({head[3], head[4], head[5], head[6]}) end
+            end
+            if not va then return 0xC2B9CC end
+            if found and va ~= found then return nil end
+            found = va
+        end
+    end
+    if found and found ~= 0xC2B9CC and not readable(found, 4) then return nil end
+    return found or 0xC2B9CC
+end
+
+function FPS.frictionLoad(va) return {0xD9, 0x05, unpack(u32bytes(va))} end
+
 function FPS.code(block, game)
-    game = game or {timestep = FPS.TIMESTEP, friction = 0xC2B9CC, minus = 0x858EF4, back = 0x68A50E, lift = 0x8708CC}
+    game = game or {timestep = FPS.TIMESTEP, friction = FPS.friction or FPS.frictionVa() or 0xC2B9CC,
+                    minus = 0x858EF4, back = 0x68A50E, lift = 0x8708CC}
     local code, at = {}, {}
     local function emit(hex, dword)
         for _, b in ipairs(hexBytes(hex)) do code[#code + 1] = b end
@@ -2580,13 +2609,28 @@ local function fpsHookTarget(site)
     local at = (site.va + 5 + bytesU32({b[2], b[3], b[4], b[5]})) % 0x100000000
     if moduleAt(at) then return nil end
     local head = readBytes(at, 6)
-    local want = ({wheel = "D9 05 CC B9 C2 00", swim = "D9 05 5C CB B7 00", dive = "D8 0D F4 8E 85 00",
-                   float = "D9 05 5C CB B7 00", lift = "D9 05 CC 08 87 00"})[site.stub]
-    return head and bytesEqual(head, hexBytes(want)) and at or nil
+    local want = site.stub == "wheel" and FPS.frictionLoad(FPS.friction or FPS.frictionVa() or 0xC2B9CC) or
+        hexBytes(({swim = "D9 05 5C CB B7 00", dive = "D8 0D F4 8E 85 00", float = "D9 05 5C CB B7 00",
+                   lift = "D9 05 CC 08 87 00"})[site.stub])
+    return head and bytesEqual(head, want) and at or nil
 end
 
 -- -> sites in place (0 when it stood down or refused)
 function fixFrameRate(option)
+    if option == "wheelfps" then
+        local va = FPS.frictionVa()
+        if not va then
+            log("[fixes] refusing wheelfps: the five fWheelFriction loads do not read one address", "warn")
+            return 0
+        end
+        FPS.friction = va
+        for _, site in ipairs(FPS.SITES) do
+            if site.stub == "wheel" then site.from = FPS.frictionLoad(va) end
+        end
+        if va ~= 0xC2B9CC then
+            log(string.format("[fixes] wheelfps: fWheelFriction is at 0x%X (the handling manager was moved)", va), "info")
+        end
+    end
     local mine = {}
     for _, site in ipairs(FPS.SITES) do if site.option == option then mine[#mine + 1] = site end end
     local todo = {}
@@ -4022,7 +4066,7 @@ function FPS.cleoStop()
     local scripts = FPS.cleoScripts()
     if #scripts == 0 or not FPS.ensureBlock() then return 0 end
     for _, script in ipairs(scripts) do writeCode(script + 0x14, u32bytes(FPS.stubs.cleoEnd)) end
-    writeCode(0xC2B9CC, hexBytes("66 66 66 3F"))             -- fWheelFriction 0.9, as the game sets it
+    writeCode(FPS.friction or FPS.frictionVa() or 0xC2B9CC, hexBytes("66 66 66 3F"))   -- fWheelFriction 0.9, as the game sets it
     FPS.cleoState, FPS.owner.wheelfps = "stopped", nil
     if options.wheelfps then fixFrameRate("wheelfps") else setOption("wheelfps", true) end
     log(string.format("[fixes] wheelfps: ended Car Speed FPS Fix (CLEO), asked to; fWheelFriction back to 0.9"), "warn")
