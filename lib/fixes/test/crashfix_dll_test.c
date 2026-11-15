@@ -425,6 +425,400 @@ static int stream_keeps(uint32_t fn, int32_t id, uint32_t *eax)
     return esi == 0x51515151 && edi == 0xD1D1D1D1 && ebx == 0xB1B1B1B1;
 }
 
+/* The draw counter's stand-ins: a device whose four draw slots count, and the
+ * game's bodies past the hooks drawing through it */
+static int draw_calls[4];
+static int32_t __stdcall draw_fake_dp(void *dev, uint32_t type, uint32_t start, uint32_t prims)
+{
+    (void)dev, (void)type, (void)start, (void)prims;
+    draw_calls[0]++;
+    return 0x11;
+}
+static int32_t __stdcall draw_fake_dip(void *dev, uint32_t type, int32_t base, uint32_t min, uint32_t vertices,
+                                       uint32_t start, uint32_t prims)
+{
+    (void)dev, (void)type, (void)base, (void)min, (void)vertices, (void)start;
+    draw_calls[1]++;
+    return 0x22 + (int32_t)prims;
+}
+static int32_t __stdcall draw_fake_dpup(void *dev, uint32_t type, uint32_t prims, const void *data, uint32_t stride)
+{
+    (void)dev, (void)type, (void)prims, (void)data, (void)stride;
+    draw_calls[2]++;
+    return 0x33;
+}
+static int32_t __stdcall draw_fake_dipup(void *dev, uint32_t type, uint32_t min, uint32_t vertices, uint32_t prims,
+                                         const void *indices, uint32_t format, const void *data, uint32_t stride)
+{
+    (void)dev, (void)type, (void)min, (void)vertices, (void)prims, (void)indices, (void)format, (void)data;
+    draw_calls[3]++;
+    return 0x44 + (int32_t)stride;
+}
+static void *draw_fake_vtbl[120], **draw_fake_device = draw_fake_vtbl;
+static uint8_t draw_inner[0x40];
+
+static int32_t draw_indexed(uint32_t prims)
+{
+    void **dev = (void **)&draw_fake_device;
+    return ((DrawIndexedFn)(*(void ***)dev)[82])(dev, 4, 0, 0, 0, 0, prims);
+}
+static void __cdecl draw_game_nonroad(void *entity)
+{
+    (void)entity;
+    for (int i = 0; i < 3; i++) draw_indexed(100);
+    Sleep(2);
+}
+static void __cdecl draw_game_entity(void *entity, uint32_t dist)
+{
+    (void)entity, (void)dist;
+    ((void (__cdecl *)(void *))0x553260)(draw_inner);                  /* as RenderEntity calls RenderOneNonRoad */
+    draw_indexed(7);
+}
+static void __cdecl draw_game_roads(void)
+{
+    void **dev = (void **)&draw_fake_device;
+    ((DrawFn)(*(void ***)dev)[81])(dev, 4, 0, 50);
+    ((DrawUpFn)(*(void ***)dev)[83])(dev, 4, 2, NULL, 0);
+}
+
+/* The phases' stand-ins: each sleeps 1 ms; Process runs the two inside it */
+static int phase_calls;
+static void __cdecl phase_game(void) { phase_calls++; Sleep(1); }
+static void __cdecl phase_game_process(void)
+{
+    phase_calls++;
+    ((void (__cdecl *)(void))0x5684A0)();
+    cf_ph_streaming();                                                  /* as its call in CGame::Process */
+}
+static uint32_t __cdecl phase_game_present(void *camera, void *window, uint32_t flags)
+{
+    phase_calls++;
+    Sleep(1);
+    return (uint32_t)camera + (uint32_t)window + flags;
+}
+
+/* volatile: set behind the compiler's back, through the stubs */
+static volatile int world_calls;
+static void *volatile world_this;
+static void __thiscall world_game(void *entity) { world_calls++; world_this = entity; }
+
+/* fn with the entity in esi and ecx, edi and ebx set: -> they come back */
+static __attribute__((noinline)) int world_keeps(void (*fn)(void), void *entity)
+{
+    uint32_t esi, edi, ebx, eax;
+    __asm__ volatile("mov $0xD1D1D1D1, %%edi\n mov $0xB1B1B1B1, %%ebx\n mov %%esi, %%ecx\n call *%%eax"
+                     : "=a"(eax), "=S"(esi), "=D"(edi), "=b"(ebx) : "a"(fn), "S"(entity) : "ecx", "edx", "memory", "cc");
+    return esi == (uint32_t)entity && edi == 0xD1D1D1D1 && ebx == 0xB1B1B1B1;
+}
+
+static void phase_test(void)
+{
+    printf("== the frame's phases (drawcount): each timed around the game's function, at its entry or its call\n");
+    /* site 0: an entry hook, the game's body past it at `back`; else the call's site, the function at `back` */
+    static const struct { const char *key; uint32_t site, back; const char *undo; int n; void *game; int ph; } P[] = {
+        {"phprocess", 0x53E981, 0x53BEE0, "", 0, phase_game_process, PH_PROCESS},
+        {"phworld", 0, 0x5684A7, "\x5E", 1, phase_game, PH_WORLD},
+        {"phstreaming", 0x53BF0B, 0x40E670, "", 0, phase_game, PH_STREAMING},
+        {"phlist", 0x53E9F9, 0x5556E0, "", 0, phase_game, PH_LIST},
+        {"phprerender", 0, 0x553915, "", 0, phase_game, PH_PRERENDER},
+        {"phscene", 0x53EABF, 0x53DF40, "", 0, phase_game, PH_SCENE},
+        {"pheffects", 0x53EAD3, 0x53E170, "", 0, phase_game, PH_EFFECTS},
+        {"phhud", 0x53EB12, 0x53E230, "", 0, phase_game, PH_HUD},
+        {"phpresent", 0, 0x7EE378, "", 0, phase_game_present, PH_PRESENT},
+    };
+    enum { N = sizeof P / sizeof P[0] };
+    uint8_t keep[N][6], body[6];
+    int in = 1, sites = 1;
+    for (int i = 0; i < N; i++) {
+        const Hook *h = &hooks[find(P[i].key)];
+        in &= CrashFix_Install(find(P[i].key), NULL) >= 1 && CrashFix_Installed(find(P[i].key));
+        if (P[i].site)
+            sites &= h->va == P[i].site && *(uint8_t *)P[i].site == 0xE8
+                     && *(uint32_t *)(P[i].site + 1) + P[i].site + 5 == (uint32_t)h->to
+                     && !memcmp(h->saved, h->stock, 5) && *(int32_t *)(h->stock + 1) + P[i].site + 5 == P[i].back;
+        memcpy(keep[i], (void *)P[i].back, P[i].n + 5);
+        memcpy(body, P[i].undo, P[i].n);
+        body[P[i].n] = 0xE9;
+        *(uint32_t *)(body + P[i].n + 1) = (uint32_t)P[i].game - (P[i].back + P[i].n + 5);
+        write_code(P[i].back, body, P[i].n + 5);
+    }
+    ok(in, "the three entries and six calls are as the hooks expect; hooked");
+    ok(sites, "each call was the game's call of that function and is now the timer's");
+    ok(CrashFix_DrawPhases() == PH_COUNT && !strcmp(CrashFix_DrawPhase(PH_WORLD), "process.world")
+       && CrashFix_DrawPhase(PH_COUNT) == NULL, "the phases by name");
+
+    double ms0[PH_COUNT], n0[PH_COUNT];
+    for (int i = 0; i < PH_COUNT; i++) ms0[i] = CrashFix_DrawPhaseStat(i, 0), n0[i] = CrashFix_DrawPhaseStat(i, 1);
+    phase_calls = 0;
+    int kept = 1;
+    for (int i = 0; i < N; i++) {
+        if (P[i].ph == PH_WORLD || P[i].ph == PH_STREAMING || P[i].ph == PH_PRESENT) continue;
+        uint32_t fn = P[i].site ? *(uint32_t *)(P[i].site + 1) + P[i].site + 5 : hooks[find(P[i].key)].va;
+        uint32_t esi, edi, ebx, eax;
+        __asm__ volatile("mov $0x51515151, %%esi\n mov $0xD1D1D1D1, %%edi\n mov $0xB1B1B1B1, %%ebx\n call *%%eax"
+                         : "=a"(eax), "=S"(esi), "=D"(edi), "=b"(ebx) : "a"(fn) : "ecx", "edx", "memory", "cc");
+        kept &= esi == 0x51515151 && edi == 0xD1D1D1D1 && ebx == 0xB1B1B1B1;
+    }
+    ok(phase_calls == 8 && kept, "as the game calls them: its functions run, esi, edi and ebx come back");
+    ok(((uint32_t (__cdecl *)(void *, void *, uint32_t))0x7EE370)((void *)0x1000, (void *)0x200, 3) == 0x1203 && phase_calls == 9,
+       "RwCameraShowRaster: its arguments reach it, its result comes back");
+    int each = 1;
+    for (int i = 0; i < PH_W_ANIM; i++) {
+        double ms = CrashFix_DrawPhaseStat(i, 0) - ms0[i];
+        each &= CrashFix_DrawPhaseStat(i, 1) - n0[i] == 1 && ms >= (i == PH_PROCESS ? 1.5 : 0.7) && ms < 500.0;
+    }
+    ok(each, "each phase ran once and has its time");
+    ok(CrashFix_DrawPhaseStat(PH_COUNT, 0) == 0 && CrashFix_DrawPhaseStat(-1, 1) == 0, "no such phase: 0");
+
+    /* CWorld::Process' passes: an entity whose vtable's slots are the stand-ins */
+    static const char *const wkeys[7] = {"wanim", "wcontrol1", "wcontrol2", "wcollision1", "wcollision2", "wshift1", "wshift2"};
+    int win = 1;
+    for (int i = 0; i < 7; i++) win &= CrashFix_Install(find(wkeys[i]), NULL) >= 1 && CrashFix_Installed(find(wkeys[i]));
+    ok(win, "the seven calls in CWorld::Process are as the hooks expect; hooked");
+    ok(*(uint8_t *)0x56863B == 0xE8 && *(uint32_t *)0x56863C + 0x56863B + 5 == (uint32_t)cf_w_control_stub
+       && *(uint16_t *)0x568640 == 0x9090 && *(uint8_t *)0x568642 == 0x8B, "a virtual's 7 bytes: the call and two NOPs, the next instruction whole");
+    static void *wvt[16];
+    static struct { void **vt; uint8_t pad[0x47C]; } went = {wvt};
+    for (int i = 0; i < 16; i++) wvt[i] = (void *)0xDEAD;
+    wvt[0x28 / 4] = wvt[0x2C / 4] = wvt[0x30 / 4] = world_game;
+    uint8_t wkeep[5];
+    memcpy(wkeep, (void *)0x535F00, 5);
+    body[0] = 0xE9;
+    *(uint32_t *)(body + 1) = (uint32_t)world_game - (0x535F00 + 5);
+    write_code(0x535F00, body, 5);
+    for (int i = 0; i < PH_COUNT; i++) ms0[i] = CrashFix_DrawPhaseStat(i, 0), n0[i] = CrashFix_DrawPhaseStat(i, 1);
+    world_calls = 0, world_this = NULL;
+    static void (*const wstub[4])(void) = {cf_w_anim_stub, cf_w_control_stub, cf_w_collision_stub, cf_w_shift_stub};
+    kept = 1;
+    for (int type = 2; type <= 4; type++) {
+        ((uint8_t *)&went)[0x36] = 0x18 | type;                         /* vehicle, ped, object */
+        for (int k = 0; k < 4; k++) {
+            kept &= world_keeps(wstub[k], &went);
+        }
+    }
+    ok(world_calls == 12 && world_this == &went && kept, "as the sites call them: the entity's own functions run on it, the registers come back");
+#define PH_N(ph) (CrashFix_DrawPhaseStat(ph, 1) - n0[ph])
+    ok(PH_N(PH_W_ANIM) == 3 && PH_N(PH_W_SHIFT) == 3, "UpdateAnim and ProcessShift: one phase each for every type");
+    ok(PH_N(PH_W_CONTROL) == 1 && PH_N(PH_W_CONTROL + 1) == 1 && PH_N(PH_W_CONTROL + 2) == 1 && PH_N(PH_W_COLLISION) == 1
+       && PH_N(PH_W_COLLISION + 1) == 1 && PH_N(PH_W_COLLISION + 2) == 1, "ProcessControl and ProcessCollision: by peds, vehicles, the rest");
+    ok(!strcmp(CrashFix_DrawPhase(PH_W_CONTROL + 1), "world.control.vehicles")
+       && !strcmp(CrashFix_DrawPhase(PH_W_COLLISION), "world.collision.peds") && !strcmp(CrashFix_DrawPhase(PH_W_SHIFT), "world.shift"),
+       "and named so");
+
+    /* the buckets: by distance from the player's ped, movement and use */
+    uint8_t *we = (uint8_t *)&went;
+    static float wmatrix[16], pmatrix[16];
+    static struct { void **vt; uint8_t pad[0x47C]; } wplayer;
+    void **player = (void **)0xB6F5F0, *wasplayer = *player;
+    *player = &wplayer;
+    *(void **)((uint8_t *)&wplayer + 0x14) = pmatrix;
+    *(void **)(we + 0x14) = wmatrix;
+    we[0x36] = 2;
+    ok(cf_world_bucket(we) == 12, "a vehicle at the player, still, no driver");
+    wmatrix[12] = 50.0f;
+    *(float *)(we + 0x44) = 0.1f;
+    *(void **)(we + 0x460) = we;
+    ok(cf_world_bucket(we) == 12 + 4 + 2 + 1, "50 m away, moving, driven");
+    wmatrix[12] = 0, wmatrix[13] = 200.0f;
+    we[0x36] = 3;
+    *(float *)(we + 0x44) = 0;
+    *(uint32_t *)(we + 0x46C) = 0x100;
+    ok(cf_world_bucket(we) == 8 + 1, "a ped 200 m away, still, in a vehicle");
+    *(void **)(we + 0x14) = NULL;
+    *(float *)(we + 8) = 20.0f;
+    *(uint32_t *)(we + 0x46C) = 0;
+    ok(cf_world_bucket(we) == 0, "no matrix: its placement's position; 20 m, on foot");
+    we[0x36] = 4;
+    ok(cf_world_bucket(we) == -1 && cf_world_bucket(&wplayer) == -1, "an object, and what has no type: no bucket");
+    CrashFix_DrawWorldDetail();
+    uint32_t *framecount = (uint32_t *)0xB7CB4C, wasframe = *framecount;
+    *framecount += 2;
+    we[0x36] = 3;
+    for (int i = 0; i < 4; i++) world_keeps(cf_w_collision_stub, we);
+    we[0x36] = 2;
+    *(void **)(we + 0x14) = wmatrix;
+    world_keeps(cf_w_control_stub, we);
+    const char *detail = CrashFix_DrawWorldDetail();
+    ok(strstr(detail, "collision peds under 30 m still on foot: 2.00 a frame, 0.")
+       && strstr(detail, "control vehicles over 100 m still driven: 0.50 a frame, 0."), "the detail: a frame's calls and ms a bucket that ran");
+    ok(strstr(detail, "control") < strstr(detail, "collision") && !strstr(detail, "30-100 m"), "the update first; no line for a bucket that did not run");
+    ok(!strstr(detail, "collision vehicles status"), "no vehicle collided: no status line");
+    we[0x36] = 2 | (4 << 3);                                            /* a vehicle, abandoned */
+    we[0xB8] = 10;
+    world_keeps(cf_w_collision_stub, we);
+    we[0xB8] = 3;
+    world_keeps(cf_w_collision_stub, we);
+    we[0x36] = 2 | (3 << 3);
+    world_keeps(cf_w_collision_stub, we);
+    detail = CrashFix_DrawWorldDetail();
+    ok(strstr(detail, "collision vehicles status physics: ") && strstr(detail, "collision vehicles status abandoned: ")
+       && strstr(detail, "collision vehicles status abandoned fake physics: "), "a vehicle's collision also by its status and fake physics");
+    ok(CrashFix_DrawWorldDetail()[0] == 0, "and they start again");
+    *framecount = wasframe;
+    *player = wasplayer;
+    write_code(0x535F00, wkeep, 5);
+    for (int i = 0; i < 7; i++) CrashFix_Uninstall(find(wkeys[i]));
+    ok(!memcmp((void *)0x56863B, "\x8B\x06\x8B\xCE\xFF\x50\x28", 7) && !memcmp((void *)0x5685BB, "\xE8\x40\xD9\xFC\xFF", 5),
+       "unhooked: the sites are the game's again");
+
+    for (int i = 0; i < N; i++) {
+        write_code(P[i].back, keep[i], P[i].n + 5);
+        CrashFix_Uninstall(find(P[i].key));
+    }
+    ok(!memcmp((void *)0x53E981, "\xE8\x5A\xD5\xFF\xFF", 5) && !memcmp((void *)0x5684A0, "\x56\x8B\x35\xC8\xAC\xB9\x00", 7)
+       && !memcmp((void *)0x7EE370, "\x8B\x44\x24\x0C\x8B\x4C\x24\x08", 8), "unhooked: the calls and entries are the game's again");
+}
+
+/* Idle's chained calls: a stand-in that takes two arguments on the stack and
+ * pops them, as a stdcall target would */
+static int idle_seen;
+static uint32_t __stdcall idle_game(uint32_t a, uint32_t b)
+{
+    idle_seen = (int)(a + b);
+    Sleep(1);
+    return a * b;
+}
+
+/* the stub of Idle's call k, called with 3 and 4 pushed, edi and ebx set -> eax; *regs: they came back */
+static uint32_t idle_call(uint32_t stub, int *regs)
+{
+    uint32_t eax, edi, ebx, esp0, esp1;
+    __asm__ volatile("mov %%esp, %%esi\n mov $0xD1D1D1D1, %%edi\n mov $0xB1B1B1B1, %%ebx\n"
+                     "push $4\n push $3\n call *%%eax\n mov %%esp, %%edx"
+                     : "=a"(eax), "=D"(edi), "=b"(ebx), "=S"(esp0), "=d"(esp1) : "a"(stub) : "ecx", "memory", "cc");
+    *regs = edi == 0xD1D1D1D1 && ebx == 0xB1B1B1B1 && esp0 == esp1;
+    return eax;
+}
+
+static void draw_test(void)
+{
+    printf("== the draw counter (drawcount): the device's draws by what the game is drawing\n");
+    static const char *const keys[3] = {"drawnonroad", "drawentity", "drawroads"};
+    int in = 1;
+    for (int i = 0; i < 3; i++) in &= CrashFix_Install(find(keys[i]), NULL) >= 1 && CrashFix_Installed(find(keys[i]));
+    ok(in, "the three entries are as the hooks expect; hooked");
+
+    uint8_t e[0x40] = {0};
+    e[0x36] = 0x19; ok(cf_draw_category(e) == DC_BUILDINGS, "a building (the status bits above the type ignored)");
+    e[0x34] = 3;    ok(cf_draw_category(e) == DC_LODS, "a building with LOD children: a LOD");
+    e[0x36] = 2;    ok(cf_draw_category(e) == DC_VEHICLES, "a vehicle (its +0x34 is not asked)");
+    e[0x36] = 3;    ok(cf_draw_category(e) == DC_PEDS, "a ped");
+    e[0x36] = 4;    ok(cf_draw_category(e) == DC_OBJECTS, "an object");
+    e[0x36] = 5;    ok(cf_draw_category(e) == DC_DUMMIES, "a dummy");
+    e[0x36] = 0;    ok(cf_draw_category(e) == DC_OTHER && cf_draw_category(NULL) == DC_OTHER, "no type, no entity: other");
+    ok(CrashFix_DrawCategories() == DC_CATS && !strcmp(CrashFix_DrawCategory(DC_LODS), "lods")
+       && CrashFix_DrawCategory(DC_CATS) == NULL, "the categories by name");
+
+    uint8_t keep[3][6], body[6];
+    memcpy(keep[0], (void *)0x553265, 6);
+    memcpy(keep[1], (void *)0x732B45, 6);
+    memcpy(keep[2], (void *)0x553A15, 5);
+    memcpy(body, "\x5E\xE9", 2);                                        /* pop esi; jmp */
+    *(uint32_t *)(body + 2) = (uint32_t)draw_game_nonroad - (0x553265 + 6);
+    write_code(0x553265, body, 6);
+    *(uint32_t *)(body + 2) = (uint32_t)draw_game_entity - (0x732B45 + 6);
+    write_code(0x732B45, body, 6);
+    body[0] = 0xE9;
+    *(uint32_t *)(body + 1) = (uint32_t)draw_game_roads - (0x553A15 + 5);
+    write_code(0x553A15, body, 5);
+
+    void **device = (void **)0xC97C28, *was = *device;
+    *device = NULL;
+    ok(CrashFix_DrawStart() == 0, "no device yet: not started");
+    draw_fake_vtbl[81] = draw_fake_dp, draw_fake_vtbl[82] = draw_fake_dip;
+    draw_fake_vtbl[83] = draw_fake_dpup, draw_fake_vtbl[84] = draw_fake_dipup;
+    draw_fake_vtbl[80] = draw_fake_vtbl[85] = (void *)0x1234;
+    *device = &draw_fake_device;
+    uint8_t idle_keep[IDLE_SITES][5];
+    for (int k = 0; k < IDLE_SITES; k++) memcpy(idle_keep[k], (void *)idle_site[k].site, 5);
+    ok(CrashFix_DrawStart() == 1 && CrashFix_DrawStart() == 1, "started; a second start keeps the first");
+    int chained = 1, k981 = -1;
+    for (int k = 0; k < IDLE_SITES; k++) {
+        const uint8_t *site = (const uint8_t *)idle_site[k].site;
+        chained &= CrashFix_DrawIdleStat(k, 2) == 1 && site[0] == 0xE8
+                   && idle_site[k].site + 5 + *(const uint32_t *)(site + 1) == (uint32_t)(idle_code + k * IDLE_STUB)
+                   && (uint32_t)CrashFix_DrawIdleStat(k, 3) == idle_site[k].site + 5 + *(const uint32_t *)(idle_keep[k] + 1);
+        if (idle_site[k].site == 0x53E981) k981 = k;
+        if (idle_site[k].site == 0x53BFC7) chained &= !strcmp(CrashFix_DrawIdleName(k), "process CTheScripts::Process");
+    }
+    ok(chained && CrashFix_DrawIdleSites() == IDLE_SITES, "each call of Idle's and CGame::Process' goes to its stub, which keeps the target it had");
+    ok(k981 >= 0 && !strcmp(CrashFix_DrawIdleName(k981), "idle CGame::Process") && CrashFix_DrawIdleName(IDLE_SITES) == NULL,
+       "and has its name");
+    uint32_t keep_target = idle_sum[k981].target;
+    idle_sum[k981].target = (uint32_t)idle_game;
+    double ims = CrashFix_DrawIdleStat(k981, 0), icalls = CrashFix_DrawIdleStat(k981, 1);
+    int regs;
+    uint32_t ir = idle_call((uint32_t)(idle_code + k981 * IDLE_STUB), &regs);
+    ok(ir == 12 && idle_seen == 7 && regs, "through the stub: the target gets its arguments, pops them, its result and the registers come back");
+    ok(CrashFix_DrawIdleStat(k981, 1) - icalls == 1 && CrashFix_DrawIdleStat(k981, 0) - ims >= 0.7
+       && CrashFix_DrawIdleStat(k981, 0) - ims < 500.0, "the call counted and timed");
+    idle_sum[k981].target = keep_target;
+    ok(draw_fake_vtbl[81] != draw_fake_dp && draw_fake_vtbl[84] != draw_fake_dipup && draw_fake_vtbl[80] == (void *)0x1234
+       && draw_fake_vtbl[85] == (void *)0x1234, "the four draw slots are the counter's, their neighbours untouched");
+
+    double base[DC_CATS][4];
+#define DRAW_BASE() for (int c = 0; c < DC_CATS; c++) for (int w = 0; w < 4; w++) base[c][w] = CrashFix_DrawStat(c, w)
+#define DRAW_D(c, w) (CrashFix_DrawStat(c, w) - base[c][w])
+    DRAW_BASE();
+    void **dev = (void **)&draw_fake_device;
+    ok(draw_indexed(9) == 0x22 + 9 && ((DrawIndexedUpFn2)draw_fake_vtbl[84])(dev, 4, 0, 4, 2, NULL, 101, NULL, 36) == 0x44 + 36,
+       "through the slots: the device's own functions run, their results come back");
+    ok(DRAW_D(DC_OTHER, 0) == 2 && DRAW_D(DC_OTHER, 1) == 11 && DRAW_D(DC_OTHER, 3) == 0, "outside any scope: other, with the primitives");
+
+    DRAW_BASE();
+    uint32_t r;
+    e[0x36] = 1, e[0x34] = 0;
+    __asm__ volatile("mov $0x51515151, %%esi\n push %%ecx\n call *%%eax\n add $4, %%esp"
+                     : "=a"(r), "=S"(in) : "a"(0x553260), "c"(e) : "edx", "memory", "cc");
+    ok((uint32_t)in == 0x51515151, "RenderOneNonRoad through the hook: esi comes back");
+    ok(DRAW_D(DC_BUILDINGS, 0) == 3 && DRAW_D(DC_BUILDINGS, 1) == 300 && DRAW_D(DC_BUILDINGS, 3) == 1
+       && DRAW_D(DC_BUILDINGS, 2) >= 1.5 && DRAW_D(DC_BUILDINGS, 2) < 500.0 && DRAW_D(DC_OTHER, 0) == 0,
+       "a building: its 3 draws, 300 primitives, one scope, timed");
+    e[0x34] = 1;
+    ((void (__cdecl *)(void *))0x553260)(e);
+    e[0x36] = 2;
+    ((void (__cdecl *)(void *))0x553260)(e);
+    ok(DRAW_D(DC_LODS, 0) == 3 && DRAW_D(DC_VEHICLES, 0) == 3 && DRAW_D(DC_BUILDINGS, 0) == 3, "a LOD and a vehicle: each its own");
+
+    DRAW_BASE();
+    e[0x36] = 4;
+    draw_inner[0x36] = 3;
+    ((void (__cdecl *)(void *, uint32_t))0x732B40)(e, 0x41200000);
+    ok(DRAW_D(DC_OBJECTS, 0) == 4 && DRAW_D(DC_OBJECTS, 1) == 307 && DRAW_D(DC_OBJECTS, 3) == 1 && DRAW_D(DC_PEDS, 0) == 0
+       && DRAW_D(DC_PEDS, 3) == 0, "RenderEntity over RenderOneNonRoad: all the alpha entity's, one scope");
+    ((void (__cdecl *)(void))0x553A10)();
+    ok(DRAW_D(DC_ROADS, 0) == 2 && DRAW_D(DC_ROADS, 1) == 52 && DRAW_D(DC_ROADS, 3) == 1, "RenderRoads: one scope for the pass");
+    draw_indexed(1);
+    ok(DRAW_D(DC_OTHER, 0) == 1, "after the scopes: other again");
+    ok(draw_calls[0] == 1 && draw_calls[1] == 15 && draw_calls[2] == 1 && draw_calls[3] == 1, "every draw reached the device once");
+
+    ok(CrashFix_DrawStop() == 1 && !memcmp((void *)0x53E981, idle_keep[k981], 5) && CrashFix_DrawIdleStat(k981, 2) == 0,
+       "stopped: Idle's calls as they were");
+    ok(draw_fake_vtbl[81] == draw_fake_dp && draw_fake_vtbl[82] == draw_fake_dip
+       && draw_fake_vtbl[83] == draw_fake_dpup && draw_fake_vtbl[84] == draw_fake_dipup, "stopped: the slots as they were");
+    ok(CrashFix_DrawStart() == 1, "started again");
+    uint8_t other[5] = {0xE8};
+    *(uint32_t *)(other + 1) = 0x12345678;
+    write_code(0x53E981, other, 5);
+    draw_fake_vtbl[82] = (void *)0x5678;
+    ok(CrashFix_DrawStop() == 0 && draw_fake_vtbl[82] == (void *)0x5678, "somebody wrote a slot after it: left alone, said");
+    draw_fake_vtbl[82] = draw_ours[1];
+    ok(CrashFix_DrawStop() == 1, "and out once the slots are its own again");
+    ok(!memcmp((void *)0x53E981, other, 5), "a call somebody wrote after it: left as they wrote it");
+    write_code(0x53E981, idle_keep[k981], 5);
+    int back = 1;
+    for (int k = 0; k < IDLE_SITES; k++) back &= !memcmp((void *)idle_site[k].site, idle_keep[k], 5);
+    ok(back, "every other call is the game's again");
+
+    *device = was;
+    write_code(0x553265, keep[0], 6);
+    write_code(0x732B45, keep[1], 6);
+    write_code(0x553A15, keep[2], 5);
+    for (int i = 0; i < 3; i++) CrashFix_Uninstall(find(keys[i]));
+    ok(!memcmp((void *)0x553260, "\x56\x8B\x74\x24\x08", 5) && !memcmp((void *)0x732B40, "\x56\x8B\x74\x24\x08", 5)
+       && !memcmp((void *)0x553A10, "\xA1\x24\x7B\xC9\x00", 5), "unhooked: the entries are the game's again");
+}
+
 static void stream_test(const char *exe)
 {
     printf("== the stream timer (streamtime): the three functions timed, by id and type, into stream.log\n");
@@ -552,13 +946,14 @@ static void gear_test(void)
     *(float *)0xB7CB5C = keep;
 }
 
-/* CVehicle::ProcessWheel for a free-rolling wheel sliding sideways 0.02 a step
- * (1 m/s) at a frame time of `ts`: the wheel state it leaves */
+/* CVehicle::ProcessWheel, closed loop: four wheels hold a car against a
+ * steady sideways pull of `demand` a step (as a turn asks) while each drives
+ * `thrust` a step; each frame the slip grows by the pull and loses what the
+ * wheels push back. -> the share of frames a wheel skids or spins */
 typedef void (__attribute__((thiscall)) *WheelFn)(void *veh, float *fwd, float *right, float *speed, float *point,
                                                   int32_t wheels, float thrust, float brake, float adhesion,
                                                   int8_t id, float *wspeed, int32_t *state, uint16_t status);
-static float slide_brake, slide_along;
-static int32_t slide(float ts, float *sideways)
+static float wheel_loop(float ts, float demand, float thrust)
 {
     static uint8_t veh[0x1000], handling[0x100];
     static float matrix[18];
@@ -573,44 +968,121 @@ static int32_t slide(float ts, float *sideways)
     *(float *)(handling + 0xA4) = 0.8f;             /* traction loss */
     *(uint8_t *)0xC1CDAC = 0;                       /* bAlreadySkidding */
     *(float *)0xB7CB5C = ts;
-    float fwd[3] = {0, 1, 0}, right[3] = {1, 0, 0}, speed[3] = {0.02f, 0, 0}, point[3] = {1, 1, 0}, wspeed = 0;
-    int32_t state = 0;
-    if (slide_brake > 0) speed[0] = 0, speed[1] = slide_along;    /* a braked wheel creeping along */
-    ((WheelFn)0x6D6C00)(veh, fwd, right, speed, point, 4, 0.0f, slide_brake * ts, 0.004f, 0, &wspeed, &state, 0);
-    if (sideways) *sideways = *(float *)(veh + 0x44);
-    return state;
+    int frames = (int)(2.0f * 50.0f / ts + 0.5f), skids = 0;
+    float s = 0, fwd[3] = {0, 1, 0}, right[3] = {1, 0, 0}, point[3] = {1, 1, 0}, wspeed = 0;
+    int32_t state[4] = {0};
+    for (int f = 0; f < frames; f++) {
+        s += demand * ts;
+        float push = 0;
+        int any = 0;
+        for (int w = 0; w < 4; w++) {
+            float speed[3] = {s, 0, 0};
+            *(float *)(veh + 0x44) = 0;
+            ((WheelFn)0x6D6C00)(veh, fwd, right, speed, point, 4, thrust * ts, 0.0f, 0.004f, (int8_t)w, &wspeed, &state[w], 0);
+            push += *(float *)(veh + 0x44);
+            any |= state[w] != 0;
+        }
+        s += push;
+        skids += any;
+    }
+    return (float)skids / frames;
+}
+
+/* parkedcol: the game's body past the hook replaced by a stand-in */
+static int parked_calls;
+static void *parked_this;
+static void __attribute__((thiscall)) parked_game(void *e) { parked_calls++; parked_this = e; }
+
+static void parked_test(void)
+{
+    printf("== a parked car's collision skipped (parkedcol)\n");
+    int k = find("parkedcol");
+    int was = CrashFix_Installed(k);
+    ok(CrashFix_Install(k, NULL) >= 1 && CrashFix_Installed(k), "in on the stock entry");
+    uint8_t keep[8], jmp[8] = {0x83, 0xC4, 0x04, 0xE9};                /* add esp, 4 (the -1); jmp */
+    memcpy(keep, (void *)0x54DFB8, 8);
+    *(uint32_t *)(jmp + 4) = (uint32_t)parked_game - (0x54DFB8 + 8);
+    write_code(0x54DFB8, jmp, 8);
+    static uint8_t car[0x1000];
+    memset(car, 0, sizeof car);
+    car[0x36] = 2 | (4 << 3);                                           /* a vehicle, abandoned */
+    car[0x1C] = 0x11;                                                   /* uses collision, stuck */
+    *(uint32_t *)(car + 0x40) = 0x9000;
+    *(float *)(car + 0xD4) = 3.0f;
+    *(uint32_t *)(car + 0x48) = 0x80000000;                             /* -0: still zero */
+    uint32_t before = CrashFix_ParkedSkips();
+    parked_calls = 0;
+    ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+    ok(parked_calls == 0 && CrashFix_ParkedSkips() - before == 1, "a still, abandoned car: the game's body not run, counted");
+    ok(*(float *)(car + 0xD4) == 0 && (car[0x1C] & 0x30) == 0x20 && (*(uint32_t *)(car + 0x40) & 0x9800) == 0,
+       "its flags as the game's stationary path leaves them: not moving, not stuck, safe, shift flags clear");
+    static const struct { int off; uint32_t val; const char *what; } C[] = {
+        {0x44, 0x3A83126F, "moving"}, {0x54, 0x3A83126F, "turning"}, {0x60, 0x3A83126F, "a friction speed"},
+        {0x40, 0x800, "to be processed even if stationary"}, {0x40, 0x20000, "simple collision off"},
+        {0x42C, 2, "a car park vehicle"}, {0x1C, 0x10, "no collision"},
+    };
+    int each = 1;
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        memset(car, 0, sizeof car);
+        car[0x36] = 2 | (4 << 3), car[0x1C] = 1;
+        if (C[i].off == 0x1C) car[0x1C] = 0x10;
+        else *(uint32_t *)(car + C[i].off) |= C[i].val;
+        parked_calls = 0;
+        ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+        if (parked_calls != 1 || parked_this != car) { each = 0; printf("  not passed on: %s\n", C[i].what); }
+    }
+    ok(each, "a car moving, turning or flagged otherwise: the game's path, on that car");
+    memset(car, 0, sizeof car);
+    car[0x1C] = 1;
+    int others = 1;
+    static const uint8_t kinds[4] = {2 | (0 << 3), 2 | (3 << 3), 3 | (4 << 3), 4 | (4 << 3)};
+    for (int i = 0; i < 4; i++) {
+        car[0x36] = kinds[i];
+        parked_calls = 0;
+        ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+        others &= parked_calls == 1;
+    }
+    ok(others, "a car a player drives, one on physics, a ped and an object: the game's path");
+    car[0x36] = 2 | (5 << 3);
+    parked_calls = 0;
+    ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+    ok(parked_calls == 0, "a still wreck: skipped too");
+    write_code(0x54DFB8, keep, 8);
+    CrashFix_Uninstall(k);
+    ok(!memcmp((void *)0x54DFB0, file_at(0x54DFB0), 16), "out: the entry stock");
+    if (was) CrashFix_Install(k, NULL);
+}
+
+static void carstill_test(void)
+{
+    printf("== the still test's speed and turn limits at 30 fps scale (carstill1, carstill2)\n");
+    static const struct { const char *key; uint32_t va; } R[] = {{"carstill1", 0x6B1C2C}, {"carstill2", 0x6B1C63}};
+    for (int i = 0; i < 2; i++) {
+        int k = find(R[i].key), was = CrashFix_Installed(k);
+        ok(CrashFix_Install(k, NULL) >= 1 && *(float **)R[i].va == &cf_k30 && cf_k30 > 1.66f && cf_k30 < 1.67f,
+           R[i].key);
+        CrashFix_Uninstall(k);
+        ok(*(uint32_t *)R[i].va == 0xB7CB5C, "out: CTimer::ms_fTimeStep again");
+        if (was) CrashFix_Install(k, NULL);
+    }
 }
 
 static void wheel_test(void)
 {
-    printf("== a tyre skids on a 30 fps frame's sideways slip (wheelskid)\n");
-    float keep = *(float *)0xB7CB5C, v30s, v850s, v30f, v850f;
-    int was = CrashFix_Installed(find("wheelskid"));
-    CrashFix_Uninstall(find("wheelskid"));
-    ok(slide(50.0f / 30.0f, &v30s) == 0, "stock, 30 fps: 1 m/s sideways is held, no skid");
-    ok(slide(50.0f / 850.0f, &v850s) == 2, "stock, 850 fps: the same slip skids");
-    ok(CrashFix_Install(find("wheelskid"), NULL) == 1, "wheelskid in");
-    ok(slide(50.0f / 30.0f, &v30f) == 0 && v30f == v30s, "fixed, 30 fps: as before");
-    ok(slide(50.0f / 850.0f, &v850f) == 0, "fixed, 850 fps: no skid");
-    {
-        float adh = 0.004f * 50.0f / 850.0f;
-        ok(fabsf(v850s + 0.8f * adh) < adh * 1e-3f, "stock: the push is 0.8 of the frame's adhesion (the traction loss)");
-        ok(fabsf(v850f + adh) < adh * 1e-3f, "fixed: the frame's whole adhesion, no more");
+    printf("== a tyre's skid test is the same at any frame rate in a closed loop (wheelskid is gone)\n");
+    float keep = *(float *)0xB7CB5C;
+    static const struct { float demand, thrust, want; const char *what; } C[] = {
+        {0.008f, 0, 0, "half the grip asked sideways: held"},
+        {0.020f, 0, 1, "more than the grip: slides"},
+        {0.0125f, 0.003f, 1, "driving through a turn past the grip together: skids"},
+        {0.008f, 0.003f, 0, "driving through a gentle turn: held"},
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; i++) {
+        float a = wheel_loop(50.0f / 30.0f, C[i].demand, C[i].thrust), b = wheel_loop(50.0f / 144.0f, C[i].demand, C[i].thrust),
+              c = wheel_loop(50.0f / 850.0f, C[i].demand, C[i].thrust);
+        printf("  %s: skidding %.0f%% at 30 fps, %.0f%% at 144, %.0f%% at 850\n", C[i].what, a * 100, b * 100, c * 100);
+        ok(fabsf(a - C[i].want) < 0.01f && fabsf(b - a) < 0.01f && fabsf(c - a) < 0.01f, C[i].what);
     }
-    ok(slide(50.0f / 850.0f, NULL) == 0 && slide(50.0f / 30.0f, NULL) == 0, "again");
-    /* a car on its brake, a wheel creeping 0.002 a step (0.1 m/s): held at 30 fps */
-    slide_brake = 0.012f, slide_along = 0.002f;
-    CrashFix_Uninstall(find("wheelskid"));
-    int stock30 = slide(50.0f / 30.0f, NULL), stock850 = slide(50.0f / 850.0f, NULL);
-    CrashFix_Install(find("wheelskid"), NULL);
-    int fixed30 = slide(50.0f / 30.0f, NULL), fixed850 = slide(50.0f / 850.0f, NULL);
-    printf("  braked and creeping: stock %d at 30 fps, %d at 850; fixed %d, %d\n", stock30, stock850, fixed30, fixed850);
-    ok(stock30 == 0 && stock850 != 0, "stock: the creep skids at 850 fps only");
-    ok(fixed30 == 0 && fixed850 == 0, "fixed: held at both");
-    slide_brake = 0.0004f, slide_along = 0.02f;            /* braking hard while moving: the brake's push */
-    ok(slide(50.0f / 850.0f, NULL) == slide(50.0f / 30.0f, NULL), "a wheel braking at its brake limit: the same state at both");
-    slide_brake = 0;
-    if (!was) CrashFix_Uninstall(find("wheelskid"));
     *(float *)0xB7CB5C = keep;
 }
 
@@ -1757,6 +2229,10 @@ __declspec(dllexport) int __cdecl run(void)
     faults_test(path);
 
     stream_test(path);
+    draw_test();
+    parked_test();
+    carstill_test();
+    phase_test();
 
     printf("crashfix: %d passed, %d failed\n", passed, failed);
     fflush(stdout);

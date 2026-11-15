@@ -11,7 +11,7 @@ in the upper half of `fixes.lua` and are resolved per build; they are not
 covered here, except the removed-building table (19), a crash fix that writes
 code of its own.
 
-**Status (2026-11-13):** `fixes.lua` 0.25.0. It applies the 137 `gamePatches`
+**Status (2026-11-15):** `fixes.lua` 0.26.0. It applies the 137 `gamePatches`
 entries below, with the plate pair (13 and 14) optional and off by default
 since 0.5.0, the animation-block preload (18), task-safe animation wipes (20,
 since 0.7.0), which write code of their own, and since 0.8.0 the
@@ -65,7 +65,10 @@ option `chutefps`, on by default) and `/fixes drift`
 writes the last 3 s before each death to `logs\death.log`; the Frame Limiter no
 longer resets the device to switch vsync (47, option `novsyncreset`, on by
 default). `faultlog` (48, on by default) writes every crash-type exception,
-with the return addresses on its stack, to `logs\faults.log` as it happens. It is published as a
+with the return addresses on its stack, to `logs\faults.log` as it happens. Since 0.26.0
+parked cars skip their collision step when it would change nothing (55, option
+`parkedcol`, on by default), and `drawcount` (54, off by default) counts the
+device's draw calls by what is drawn. It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go through `akacross.log` under the name `fixes`, to
@@ -2118,7 +2121,7 @@ startup line has "frame-rate fixes (MTA)". Physics is scaled by
 |---|---|---|
 | `turnfps` | turndamping 0x544D29 | `CPhysical::ApplyAirResistance` multiplies the turn speed by 0.99 every step (the move speed already uses `pow(..., timestep)`): `pow(0.99, timestep / 1.6667)`, so a spin dies as fast at any fps |
 | `pedfps` | climb1-2 0x6811E9, 0x68128A; aimwalk 0x61E4F2, aimreset 0x61E5E4; fallstep 0x67FB35, chokestep 0x620520, climbstep 0x681319, fightstep 0x6299A4, stancestep 0x6878F8 (ours) | the climb's pull to the hold reads a constant 1.6667 as its timestep, so it takes the same time at any fps instead of a huge speed (climbing over objects killing the player, MTA #602); moving while aiming compares against 0.1 scaled and keeps its move command (camera jitter); a knocked-down ped's down time (`CTaskSimpleFall::ProcessPed`, 500 ms for the player, 0x8D2EF4) lost each frame's fraction of a ms to `_ftol`, so it lasted longer at high fps (~830 ms at 600) and forever above 1000; it now takes whole ms with the fraction carried, one step a frame (`m_FrameCounter`) for every fall. The same step (`cf_ms_step`) counts down a choke from a spray can, teargas or extinguisher, the climb's get-to-position timer, a fighter's idle counter and the player's fight-stance timer, each called in place of its fld/fmul/fmul/`_ftol` |
-| `vehiclefps` | boatcontrol 0x6DC23F, boatwater 0x6D2771; heli1-2 0x6C4F29, 0x6C4F37; chassis1-2 0x6F42D5, 0x6F434E, doorangle 0x6F4422 (every part since 0.22.0, 43); carsleep 0x6B1D34, bikesleep 0x6B997C, bikeclamp 0x6B99BD; carsettle 0x6B1AF5, bikesettle 0x6B9850, carfall 0x6B361C, bikefall 0x6BC18F, bikestill 0x6BC15D (ours); gearstep 0x6D05E0, gearinertia 0x6D0880, gearsmooth1-2 0x6D08F0, 0x6D08F8, wheelskid 0x6D6F5E (ours); still1-6; carburn 0x6A7126, heliburn 0x6A723E, rcburn 0x6A726F, bikeburn 0x6BBD04, boatburn 0x6F1E88, alarmstep 0x6D2207, enginedrain 0x6A761F, jumpout1-6 0x6D2110.. (ours) | boats, helicopter takeoff, the swinging chassis, and parked cars settling: the still frames before a car sleeps scale with the frame rate (10 at 30 fps, up to 240), the stillness threshold with them (from the exe's 0.005), no sleep on a car's first frame, and the still damping keeps its fall speed. A burning car, aircraft, bike or boat counts to 5000 ms by `cf_ms_step` (stock it lost each frame's fraction: 5.8 s at 144 to 288 fps, never above 1000), the car alarm likewise; a wrecked engine's 2 health a frame (`ProcessCarOnFireAndExplode`, engine status above 225, which only `FuckCarCompletely` sets) is scaled by timestep / 1.6667; `CanPedJumpOutCar`, run each frame by `CTaskSimpleCarWaitToSlowDown`, slows a stuck car by 0.9 a frame, now `pow(0.9, timestep / 1.6667)` (jumpout1 computes it, jumpout2-6 point the other five operands at it) |
+| `vehiclefps` | boatcontrol 0x6DC23F, boatwater 0x6D2771; heli1-2 0x6C4F29, 0x6C4F37; chassis1-2 0x6F42D5, 0x6F434E, doorangle 0x6F4422 (every part since 0.22.0, 43); carsleep 0x6B1D34, carstill1-2 0x6B1C2C, 0x6B1C63 (ours), bikesleep 0x6B997C, bikeclamp 0x6B99BD; carsettle 0x6B1AF5, bikesettle 0x6B9850, carfall 0x6B361C, bikefall 0x6BC18F, bikestill 0x6BC15D (ours); gearstep 0x6D05E0, gearinertia 0x6D0880, gearsmooth1-2 0x6D08F0, 0x6D08F8; still1-6; carburn 0x6A7126, heliburn 0x6A723E, rcburn 0x6A726F, bikeburn 0x6BBD04, boatburn 0x6F1E88, alarmstep 0x6D2207, enginedrain 0x6A761F, jumpout1-6 0x6D2110.. (ours) | boats, helicopter takeoff, the swinging chassis, and parked cars settling: the still frames before a car sleeps scale with the frame rate (10 at 30 fps, up to 240), the stillness threshold with them (from the exe's 0.005), no sleep on a car's first frame, and the still damping keeps its fall speed. A burning car, aircraft, bike or boat counts to 5000 ms by `cf_ms_step` (stock it lost each frame's fraction: 5.8 s at 144 to 288 fps, never above 1000), the car alarm likewise; a wrecked engine's 2 health a frame (`ProcessCarOnFireAndExplode`, engine status above 225, which only `FuckCarCompletely` sets) is scaled by timestep / 1.6667; `CanPedJumpOutCar`, run each frame by `CTaskSimpleCarWaitToSlowDown`, slows a stuck car by 0.9 a frame, now `pow(0.9, timestep / 1.6667)` (jumpout1 computes it, jumpout2-6 point the other five operands at it) |
 | `effectsfps` | tick 0x561C5D; shake 0x52C723, movingfog 0x716BA6, glass1-3; 19 gates; fuelstep 0x7379F7, fuelfx 0x737A31 (ours) | the camera shake, moving fog and glass shards scaled; wheel dirt and sand, exhaust, boat and rain splashes, rain, swimming effects and bubbles, plane smoke and damage particles, rocket smoke, the water cannon (its reach, its push, its particles), broken objects despawning and the money counter only on a 30 Hz frame. A vehicle explosion's burning fuel (`CExplosion::Update`, 3 fx a frame while its fuel timer is under 200 ms) spawns on a 30 Hz frame, and the timer takes `cf_ms_step` |
 | `pushfps` | push1-8, pushalt1-2: the 10 calls to `CPhysical::ApplyCollision` (0x548680) and its other form (0x544D50) | a ped's push on a car with no driver is held to what momentum allows (ped mass x10 against the car's), its tilt and lift kept out |
 
@@ -2176,20 +2179,30 @@ cannon's push reads `cf_frame30`. With the tick not in place (or taken out)
   frame (times 1.6667 / timestep) and the smoothing is
   pow(0.85, timestep / 1.6667); gearstep works both out at the function's
   start, where the FPU is empty.
-- `wheelskid` (ours). `CVehicle::ProcessWheel` marks a tyre skidding when its
-  slip passes the frame's adhesion, which is timestep-scaled; the sideways
-  slip is a speed and is not, so at 850 fps an ordinary slide skidded, and a
-  skidding tyre loses traction the next frame: donuts turned 645 deg in 6 s
-  against 285 at 30 fps, and a straight burnout pivoted 118 deg: the braked
-  front wheels of a car standing in a burnout skidded on its creep, let it
-  slide, and the creep passed the burnout's 0.01 limit, so the burnout
-  dropped on and off every few tenths of a second (physrec, 2026-11-13).
-  The test is redone as a 30 fps frame sees it: speeds (the sideways slip,
-  and along the tyre a rolling wheel's or one braking under its brake) times
-  timestep / 1.6667, pushes (the thrust, a wheel at its brake) as they are.
-  Fitting, the force is still held to this frame's adhesion but the tyre
-  neither skids nor loses traction; a locked wheel and bigger slips take
-  GTA's path.
+- `carstill1-2` (ours). With `carsleep` a parked car needs about 80 still
+  frames in a row at 250 fps before fake physics, and GTA zeroes the count
+  on any frame that fails its test: the smoothed move speed (+0x74) against
+  0.003 (0.006 wrecked) times the timestep, the smoothed turn speed (+0x80)
+  against ProcessControl's limit times the timestep. Both are speeds; their
+  limits shrank with the timestep, so a parked car's suspension jiggle failed
+  most frames at 250 fps and parked cars never slept: in LS 25-28 of 33
+  abandoned cars a frame ran full collision (drawcount's parked line,
+  2026-11-14); with `carsleep` held out `parkedcol` skipped 12-15. The two
+  `CTimer::ms_fTimeStep` operands (0x6B1C2C, 0x6B1C63) point at 1.6667: the
+  limits a 30 fps frame uses. The distance test (+0xD4 against [esp+10h]) is
+  left as it is.
+- Not taken: `CVehicle::ProcessWheel`'s skid test (a `wheelskid` row from
+  2026-11-13, removed). It compares the slip with the frame's adhesion, which
+  is timestep-scaled while the slip is not, so a fixed slip skids at high fps.
+  But the slip is not fixed: each frame the wheels push back all of it while
+  they hold, so it grows only by what the turn asks in one frame, which scales
+  with the timestep too. Driven in a closed loop (crashfix_dll_test) the
+  stock test skids the same share of frames at 30, 144 and 850 fps. Scaling
+  the slip down cut it a second time: a Sultan under full gas through a long
+  turn skidded 5.75 s at 30 fps and 0.01 s at 511-611 fps, kept grip, turned
+  324 deg against 302 and ended 27-30 m from the 30 fps run (physrec,
+  2026-11-14). The donut and burnout gaps it was made for came from the
+  burnout turn force (the `burnout` row).
 - Not taken: `CWeapon::Update`'s shot timing (0x73DC3D), which shortens
   every weapon's firing state at high fps (a fire-rate change on SA-MP), and
   the headless-ped particles (MTA's `setPedHeadless`).
@@ -2647,3 +2660,137 @@ lines, the `in loadall` mark, the drain's caller and the summary.
 `fixes_test.lua`: off by default; on starts the log and installs the hooks;
 the read's sums since the last read; drift's fields; the report; off; an older
 DLL.
+
+## 54. Draw calls by category (option drawcount)
+
+A diagnostic, not a fix: which part of the scene the frame's draw calls come
+from, before anything is merged. Off by default. `lib/fixes/native/drawcount.c`
+(crashfix.dll).
+
+The exe draws from some 250 sites through the device's vtable, so the count is
+taken there: slots 81-84 (`DrawPrimitive`, `DrawIndexedPrimitive`,
+`DrawPrimitiveUP`, `DrawIndexedPrimitiveUP`) of the `IDirect3DDevice9` at
+0xC97C28 point at counters that pass the call on. SA-MP's and the overlays'
+draws on the same device are counted too. Turning the option off puts the
+slots back unless somebody wrote them since. With no device yet, fixes' loop
+asks again each second.
+
+Each draw goes to the category the game's thread is in, set by three entry
+hooks (5 bytes each, C wrappers around the game's functions, integers only):
+
+- `drawroads` (0x553A10) `CRenderer::RenderRoads`: the whole pass is `roads`.
+- `drawnonroad` (0x553260) `CRenderer::RenderOneNonRoad`: the entity's type
+  (`+0x36`, low 3 bits): `buildings`, `vehicles` (driver and passengers
+  included), `peds`, `objects`, `dummies`. A building with LOD children
+  (`+0x34`) is `lods`.
+- `drawentity` (0x732B40) `CVisibilityPlugins::RenderEntity`: the alpha
+  lists' entities, by the same types; its inner `RenderOneNonRoad` stays the
+  outer one's.
+
+Anything else is `other`: sky, water, effects, shadows, the HUD, SA-MP, the
+overlays. Each category's scopes are timed with QueryPerformanceCounter;
+`other` has no time of its own (the frame's ms less the rest).
+
+The frame's phases are timed the same way, around the functions `Idle`
+(0x53E920) calls. Three are entry hooks; six are the calls themselves
+(5 bytes, `E8`), because urp-client.dll holds those functions' entries. A
+call's wrapper runs the function at its entry, so that mod's hook runs inside
+the phase and its time is the phase's.
+
+| phase | hook | function |
+|---|---|---|
+| `process` | `phprocess`, the call at 0x53E981 | `CGame::Process` |
+| `process.world` | `phworld` 0x5684A0 | `CWorld::Process`, inside it |
+| `process.streaming` | `phstreaming`, the call at 0x53BF0B | `CStreaming::Update`, inside it |
+| `list` | `phlist`, the call at 0x53E9F9 | `CRenderer::ConstructRenderList` |
+| `prerender` | `phprerender` 0x553910 | `CRenderer::PreRender` |
+| `scene` | `phscene`, the call at 0x53EABF | `RenderScene` (the categories' scopes are inside it; the mirror's call at 0x7271DE is not timed) |
+| `effects` | `pheffects`, the call at 0x53EAD3 | `RenderEffects` |
+| `hud` | `phhud`, the call at 0x53EB12 | `Render2dStuff` |
+| `present` | `phpresent` 0x7EE370 | `RwCameraShowRaster`: the present and whatever hooks it |
+
+Inside `CWorld::Process`, its passes over the moving entities are timed a
+call each. The sites are `mov reg, [esi]; mov ecx, esi; call [reg+slot]`
+(7 bytes, replaced by a call and two NOPs) and one direct call:
+
+| phase | hook | call |
+|---|---|---|
+| `world.anim` | `wanim` 0x5685BB | `CEntity::UpdateAnim` (0x535F00), the moving list's (the entity is in `ecx` there) |
+| `world.control.peds`, `.vehicles`, `.objects` | `wcontrol1` 0x56863B, `wcontrol2` 0x5686ED (postponed) | `ProcessControl` (vtable +0x28), by the entity's type |
+| `world.collision.peds`, `.vehicles`, `.objects` | `wcollision1` 0x56876F, `wcollision2` 0x5687CF (the four further rounds) | `ProcessCollision` (+0x2C), by type |
+| `world.shift` | `wshift1` 0x568894, `wshift2` 0x568908 | `ProcessShift` (+0x30) |
+
+The stuck pass' `ProcessCollision` (0x56882E) and the cutscene's calls are
+not timed. Two clock reads a call cost some tens of microseconds a frame.
+
+A ped's or vehicle's `ProcessControl` and `ProcessCollision` are also summed
+by what it is doing as the call starts: its distance from the player's ped
+(0xB6F5F0; under 30 m, 30-100 m, over 100 m), moving or still
+(`m_vecMoveSpeed` at +0x44), and a vehicle driven or empty (`m_pDriver` at
++0x460) or a ped in a vehicle or on foot (`bInVehicle`, bit 8 at +0x46C).
+With `drift` on, each 30 s line's buckets go to `logs\world.log` under a
+header with the line's fps, ms, draws and world time:
+
+A vehicle's collision is also summed by its status (`+0x36` bits 3-7:
+physics, abandoned, wrecked ...) and whether the game has put it on fake
+physics (`m_nFakePhysics` at +0xB8 reached 10: `CAutomobile::ProcessControl`
+resets its speeds each frame, so `ProcessCollision` skips `CheckCollision`).
+Only abandoned and wrecked vehicles can get there; a vehicle never leaves the
+moving list.
+
+    19:22:01 fps=299 ms=3.34 draws=1588 world=1.051
+      control vehicles under 30 m still empty: 14.20 a frame, 0.031000 ms
+      collision peds 30-100 m moving on foot: 9.10 a frame, 0.120000 ms
+      collision vehicles status abandoned fake physics: 20.10 a frame, 0.060000 ms
+
+Every call `Idle` makes (32 sites from `CTimer::Update` at 0x53E968 to
+`RsCameraShowRaster` at 0x53EC01, and `AppEventHandler`'s call of `Idle`
+at 0x53ECBD), and every call `CGame::Process` makes (74 sites from
+`CPad::UpdatePads` at 0x53BEE6 to `WaterCreatureManager_c::Update` at
+0x53C22F, its clock reads left out) is also timed by chaining: the site's `E8` goes to a stub made
+at run time that calls the target the site had, whoever's it is, through a
+pointer. So SA-MP's hooks on `CGame::Process` and `Render2dStuff` are inside
+those calls, and the module a call goes to is named. The stub keeps the
+flags and every register but `eax`/`edx` around its timing; the return
+address is kept in the site's slot (`Idle` does not recurse). Stopping puts a
+site back only while it still calls the stub. With `drift` on, these go to
+`logs\world.log` after the buckets, the longest first:
+
+    idle Idle: 3.100 ms a frame
+    idle CGame::Process: 1.400 ms a frame (through samp.dll)
+    process CWorld::Process: 0.900 ms a frame
+
+`rest` is the frame's ms less the undotted phases: the message loop, audio,
+SA-MP's own work, the menus and fonts. A phase whose site another mod holds
+is left out and its time falls into `rest`.
+
+With `drift` also on, each 30 s line gains, after `lods`: `draws` and `ktris`
+(a frame's draw calls and thousands of primitives), `d.<category>` (a frame's
+draws) and `ms.<category>` (a frame's ms inside its scopes), then `t.<phase>` and `t.rest` (a frame's
+ms). `/fixes drawcount
+report` prints the same by category for the frames since the last report,
+with each one's share.
+
+## 55. Parked cars' collision (option parkedcol)
+
+On by default. A car never leaves the moving list, so
+`CPhysical::ProcessCollision` (0x54DFB0) runs for every parked car every
+frame, about 6 microseconds each (drawcount's `logs\world.log`, 2026-11-14:
+28 parked cars in LS, 20 of them on fake physics, about 0.17 ms a frame).
+With its move and turn speeds zero the game's path checks nothing: it applies
+the zero speeds, reorthogonalises the matrix, sets the flags, measures a
+distance of zero and calls `RemoveAndAdd`, which re-links the car in the
+sector lists where it already is.
+
+`parkedcol` (8 bytes at the entry, `lib/fixes/native/parked.c`) takes a car
+that the stock path would leave as it is and returns after setting what that
+path sets: `m_fMovingSpeed` (+0xD4) 0, physical flags (+0x40) 0x800, 0x1000
+and 0x8000 clear, not stuck and in a safe position (+0x1C: 0x10 clear, 0x20
+set). The car must be a vehicle, abandoned or wrecked (status 4 or 5: never a
+player's, a remote, simple or ghost car), use collision, have simple
+collision on (0x20000 clear), not be flagged to process even if stationary
+(0x800) or for `ApplySpeed`'s special path (0x80), not be a car park vehicle
+(+0x42C bit 1), and have its move, turn and both friction speeds (+0x44 to
++0x73) all zero, compared as integers (-0 is zero). A car that is hit gets a
+speed and takes the game's path the same frame. Peds and objects always take
+it. `CrashFix_ParkedSkips` counts the skipped calls.

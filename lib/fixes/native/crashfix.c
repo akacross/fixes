@@ -1608,6 +1608,8 @@ __asm__(
 #include "sky.c"
 #include "faults.c"
 #include "stream.c"
+#include "drawcount.c"
+#include "parked.c"
 
 /* ------------------------------------------------------------------------ */
 /* The table                                                                */
@@ -1634,7 +1636,7 @@ typedef struct {
 #define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k, "crashfix"},
 #define FROW(k, option, name, va, len, stock) {#k, name, va, len, -1, stock, cf_hook_##k, &cf_n_##k, option},
 #define PROW(k, option, kind, name, va, len, stock, to) {#k, name, va, len, -1, stock, NULL, &cf_n_##k, option, kind, to},
-static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) STREAM(FROW) };
+static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) STREAM(FROW) DRAWCOUNT(FROW, PROW) PARKED(FROW) };
 #define HOOK_COUNT ((int)(sizeof hooks / sizeof hooks[0]))
 
 static int samp_hook(void)

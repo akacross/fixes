@@ -112,10 +112,11 @@ Frame rate (each as at 30 fps, the rate the game was tuned for):
   plane, bike or boat, the car alarm, a choke, the climb, fight and stance
   timers and an explosion's fuel last as long at any fps (they ran long at
   144 fps and never ended above 1000).
-- Cars are quicker at high fps and tyres skid sooner (12% quicker to 20 m/s
-  at 850 fps, donuts turning twice as far): the gearbox's engine inertia and
-  the tyre's skid test are taken per 30 fps frame, and a burnout's whole turn
-  is scaled, not only its steering.
+- Cars are quicker at high fps and donuts turn too far (12% quicker to
+  20 m/s at 850 fps, donuts turning twice as far): the gearbox's engine
+  inertia is taken per 30 fps frame, and a burnout's whole turn is scaled, not
+  only its steering. The tyre's skid test was measured and is the same at any
+  fps, so it is left alone.
 - A ridden bike at rest no longer rocks at high fps.
 
 If Car Speed FPS Fix (CLEO) is running, fixes leaves it and its file alone,
@@ -130,6 +131,9 @@ Speed:
   Microsoft's d3dx9_25.dll and with Wine's own (a prefix without Microsoft's).
 - SA-MP's and GTA's frame caps come off while the in-game Frame Limiter is
   off, over 0.3.DL's own 2 ms wait too (given back with `framecaps` off).
+- A parked car that is standing still skips the game's collision step, which
+  changed nothing for it but still cost about 6 microseconds a car every
+  frame (0.17 ms a frame for the 28 parked cars around Los Santos).
 
 Also: every animation block is preloaded and pinned, SA-MP's F1 help dialog
 is disabled, the smoking animation is fixed, and crashes.asi's visual and
@@ -189,6 +193,12 @@ that averted a crash says so.
   streamtime report` prints a summary, and with `drift` on each drift line
   shows the ms a frame. A diagnostic for
   [docs/ASYNC_STREAMING_PLAN.md](docs/ASYNC_STREAMING_PLAN.md), not a fix.
+- `/fixes drawcount on` counts the frame's draw calls by what is drawn
+  (roads, buildings, vehicles, peds and the rest) and writes a world detail
+  to `moonloader/logs/world.log`: peds' and vehicles' update and collision by
+  distance, movement and use. A diagnostic, not a fix.
+- `/fixes hook <key> off` takes one hook out for this session, to test it
+  alone; `on` or a restart puts it back.
 - `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
   session and uses fixes' own, `keep` keeps it and turns `wheelfps` off,
   `remove` explains first, and only `/fixes cleo remove yes` within 30
@@ -222,6 +232,7 @@ that averted a crash says so.
 | `chutefps` | on | the parachute steers as at 30 fps |
 | `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
 | `glasslist` | on | a car's see-through parts drawn in order past 20 |
+| `parkedcol` | on | a parked car standing still skips the collision step |
 | `skygrad` | on | the sky drawn dithered, without colour bands |
 | `novsyncreset` | on | the Frame Limiter and loading screens do not reset the graphics device for vsync |
 | `anisotropic` | on | anisotropic texture filtering, 16x or the device's most |
@@ -230,6 +241,7 @@ that averted a crash says so.
 | `scrollreload` | off | the mouse wheel does not cancel a reload (changes weapon switching) |
 | `faultlog` | on | the fault log above |
 | `streamtime` | off | the model loading timer above |
+| `drawcount` | off | the draw-call counter above |
 | `drift` | off | the frame-rate log above |
 | `deathtrace` | off | the death log above |
 | `noheathaze`, `noclouds` | on | no heat haze, no clouds |

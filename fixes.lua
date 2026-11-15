@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.25.0")
+script_version("0.26.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -988,6 +988,17 @@ local OPTIONS = {
             stopStreamTimer()
             return c, 0
         end},
+    drawcount = {default = false,
+        label = "draw calls counted by what is drawn (roads, buildings, LODs, vehicles, peds, objects), on drift's lines (/fixes drawcount report)",
+        apply = function(on)
+            if on then
+                local c = fixCrashes("game")
+                startDrawCounter()
+                return c, 0
+            end
+            stopDrawCounter()
+            return fixCrashes("game"), 0
+        end},
     chutefps = {default = true, label = "the parachute turns, rolls and speeds up as at 30 fps (it spun at high fps)",
         apply = function() chuteTick(); return 0, 0 end},
     positionguard = {default = true, label = "NaN, inf and off-map positions put back before a ped, car or object is placed",
@@ -1012,6 +1023,9 @@ local OPTIONS = {
         label = "a car's glass and other see-through parts drawn in order past the game's 20 a car (San Andreas Online)",
         apply = function() return fixCrashes("game"), 0 end},
     pedmatrix = {default = true, label = "a ped whose bone matrices went bad is not drawn stretched across the screen (MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    parkedcol = {default = true,
+        label = "a parked car's collision skipped while it stands still (the game re-links it where it already is every frame)",
         apply = function() return fixCrashes("game"), 0 end},
     skygrad = {default = true, label = "the sky's gradient dithered, so it shows no colour bands (as skygrad.asi)",
         apply = function() return fixCrashes("game"), 0 end},
@@ -3055,7 +3069,11 @@ end
 -- Off unless their option is on: 19 breaks SkyGFX; MTA no longer installs 12 and 17.
 local CRASHFIX_OPTION = {misc19 = "frameclone", misc12 = "oldcrashfixes", misc17 = "oldcrashfixes"}
 
+-- Hooks taken out by hand for this session (/fixes hook <key> off), to test one row
+crashFixHeld = {}
+
 local function crashFixWanted(key, option)
+    if crashFixHeld[key] then return false end
     if option ~= "crashfix" then return options[option] == true end
     if options.crashfix == false then return false end
     if CRASHFIX_OPTION[key] then return options[CRASHFIX_OPTION[key]] == true end
@@ -3068,14 +3086,15 @@ local function crashFixOption(lib, i)
     return ok and p ~= nil and ffi.string(p) or "crashfix"
 end
 
--- What a hook is by its option: "crash", "glass", "ped", "sky", "stream" or "frame" (the frame-rate fixes)
+-- What a hook is by its option: "crash", "glass", "ped", "sky", "stream", "draw" or "frame" (the frame-rate fixes)
 local crashFixKind
 do
-    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky", streamtime = "stream"}
+    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky", streamtime = "stream", parkedcol = "parked",
+        drawcount = "draw"}
     function crashFixKind(option) return kinds[option] or "frame" end
 end
 local CRASHFIX_NOUN = {crash = "crash fix", frame = "frame-rate fix", glass = "glass list", ped = "ped fix", sky = "sky fix",
-    stream = "stream timer"}
+    stream = "stream timer", draw = "draw counter", parked = "parked-car skip"}
 
 -- part: "game" (gta_sa.exe, from the start) or "samp" (samp.dll's helper,
 -- once SA-MP is up). -> hooks installed or removed now.
@@ -3159,6 +3178,7 @@ end
 -- otherFixes' ("in place", "left to X", "off ...", "not in place")
 local CRASHFIX_OFF = {crash = "off (option crashfix)", glass = "off (option glasslist)", ped = "off (option pedmatrix)",
     sky = "off (option skygrad)", stream = "off (option streamtime)",
+    draw = "off (option drawcount)", parked = "off (option parkedcol)",
     frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps)"}
 function crashFixState(kind)
     kind = kind or "crash"
@@ -3166,7 +3186,8 @@ function crashFixState(kind)
     if not crashFixLib then
         local wanted = kind == "crash" and options.crashfix ~= false or kind == "glass" and options.glasslist
             or kind == "ped" and options.pedmatrix or kind == "sky" and options.skygrad
-            or kind == "stream" and options.streamtime
+            or kind == "stream" and options.streamtime or kind == "draw" and options.drawcount
+            or kind == "parked" and options.parkedcol
         return wanted and "not in place" or off
     end
     local n, owners, seen = crashFixCounts(kind), {}, {}
@@ -3340,6 +3361,197 @@ do
         if #lines == 0 then lines[1] = "streamtime: nothing timed yet" end
         lines[#lines + 1] = "every file: " .. STREAM_LOG
         return lines
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Draw counter (lib/fixes/crashfix.dll, drawcount.c)
+--------------------------------------------------------------------------------
+-- A diagnostic, not a fix: the device's draw calls by what the game is
+-- drawing, and the time in each category's render scopes, on drift's lines.
+-- Option "drawcount", off by default. docs/MEMORY_FIXES.md 54.
+pcall(ffi.cdef, [[
+    int CrashFix_DrawStart(void);
+    int CrashFix_DrawStop(void);
+    int CrashFix_DrawCategories(void);
+    const char* CrashFix_DrawCategory(int cat);
+    double CrashFix_DrawStat(int cat, int which);
+    int CrashFix_DrawPhases(void);
+    const char* CrashFix_DrawPhase(int phase);
+    double CrashFix_DrawPhaseStat(int phase, int which);
+    const char* CrashFix_DrawWorldDetail(void);
+    int CrashFix_DrawIdleSites(void);
+    uint32_t CrashFix_ParkedWhy(int i);
+    const char* CrashFix_DrawIdleName(int k);
+    double CrashFix_DrawIdleStat(int k, int which);
+]])
+do
+    local counting                 -- true while the device's draw slots are the DLL's
+    local wanted                   -- true from on to off; the device may come later
+    local names                    -- the categories, in the DLL's order
+    local phases                   -- the frame's phases, in the DLL's order; {} from a DLL without them
+    local last, lastReport         -- the sums at the last read, at the last report
+
+    -- -> {category = {draws, prims, ms, scopes}} as the DLL has them now
+    local function sums()
+        local lib, t = crashFixLib, {}
+        for i, name in ipairs(names) do
+            t[name] = {}
+            for w = 0, 3 do t[name][w + 1] = tonumber(lib.CrashFix_DrawStat(i - 1, w)) end
+        end
+        for i, name in ipairs(phases) do                       -- a phase: ms in the slot of a category's ms
+            t["phase " .. name] = {0, 0, tonumber(lib.CrashFix_DrawPhaseStat(i - 1, 0)),
+                tonumber(lib.CrashFix_DrawPhaseStat(i - 1, 1))}
+        end
+        return t
+    end
+
+    local function since(now, before)
+        local d = {}
+        for name, v in pairs(now) do
+            local b = before[name]
+            d[name] = {draws = v[1] - b[1], prims = v[2] - b[2], ms = v[3] - b[3], scopes = v[4] - b[4]}
+        end
+        return d
+    end
+
+    local function frameCounter()
+        local ok, n = pcall(readU32, 0xB7CB4C)                 -- CTimer::m_FrameCounter
+        return ok and n or 0
+    end
+
+    function startDrawCounter()
+        wanted = true
+        if counting then return true end
+        local lib, why = loadCrashFix()
+        if not lib then
+            log("[fixes] refusing the draw counter: " .. why, "warn")
+            return false
+        end
+        local ok, started = pcall(function()
+            if not names then
+                names = {}
+                for i = 0, lib.CrashFix_DrawCategories() - 1 do names[i + 1] = ffi.string(lib.CrashFix_DrawCategory(i)) end
+                phases = {}
+                pcall(function()
+                    for i = 0, lib.CrashFix_DrawPhases() - 1 do phases[i + 1] = ffi.string(lib.CrashFix_DrawPhase(i)) end
+                end)
+            end
+            return lib.CrashFix_DrawStart() == 1
+        end)
+        if not ok then
+            log("[fixes] the draw counter needs a newer lib\\fixes\\crashfix.dll", "warn")
+            wanted = nil
+            return false
+        end
+        if started then
+            counting = true
+            last = sums()
+            lastReport = {sums = last, frame = frameCounter()}
+            log("[fixes] draw counter: the device's draw calls counted by what is drawn -- counting")
+        end
+        return started                                         -- false: no device yet, drawCounterTick tries again
+    end
+
+    function stopDrawCounter()
+        wanted = nil
+        if not counting then return true end
+        local ok, out = pcall(function() return crashFixLib.CrashFix_DrawStop() == 1 end)
+        if ok and not out then log("[fixes] draw counter: somebody hooked the device after it; its slots are left", "warn") end
+        counting = nil
+        return true
+    end
+
+    function drawCounterTick()
+        if wanted and not counting then startDrawCounter() end
+    end
+
+    -- Since the last call -> {category = {draws, prims, ms, scopes}}, the
+    -- categories in order and the phases in order (a phase is under
+    -- "phase <name>", its runs in scopes); nothing while it is off
+    function drawCounterRead()
+        if not counting then return end
+        local ok, d = pcall(function()
+            local now = sums()
+            local d = since(now, last)
+            last = now
+            return d
+        end)
+        if ok then return d, names, phases end
+    end
+
+    -- Peds' and vehicles' update and collision by distance, movement and use
+    -- since the last call -> lines; nothing while it is off or from an older DLL
+    function drawCounterWorld()
+        if not counting then return end
+        local ok, text = pcall(function() return ffi.string(crashFixLib.CrashFix_DrawWorldDetail()) end)
+        if not ok then return end
+        local lines = {}
+        for line in text:gmatch("[^\r\n]+") do lines[#lines + 1] = line end
+        return lines
+    end
+
+    -- Each call Idle and CGame::Process make over `frames` frames since the last call -> lines,
+    -- the longest first, each "<name>: <ms> ms a frame" with the module its
+    -- call goes to when that is a hook; nothing while off or from an older DLL
+    local idleLast = {}
+    function drawCounterIdle(frames)
+        if not counting then return end
+        local ok, lines = pcall(function()
+            local lib, rows = crashFixLib, {}
+            for k = 0, lib.CrashFix_DrawIdleSites() - 1 do
+                local ms, calls = tonumber(lib.CrashFix_DrawIdleStat(k, 0)), tonumber(lib.CrashFix_DrawIdleStat(k, 1))
+                local was = idleLast[k] or {0, 0}
+                idleLast[k] = {ms, calls}
+                if lib.CrashFix_DrawIdleStat(k, 2) == 1 then
+                    local target, owner = tonumber(lib.CrashFix_DrawIdleStat(k, 3)), nil
+                    if target >= 0x857000 or target < 0x401000 then owner = moduleAt(target) or string.format("0x%X", target) end
+                    rows[#rows + 1] = {name = ffi.string(lib.CrashFix_DrawIdleName(k)), ms = (ms - was[1]) / frames,
+                        calls = (calls - was[2]) / frames, owner = owner}
+                end
+            end
+            table.sort(rows, function(a, b) return a.ms > b.ms end)
+            local out = {}
+            for _, r in ipairs(rows) do
+                if r.ms >= 0.0005 then
+                    out[#out + 1] = string.format("%s: %.3f ms a frame%s%s", r.name, r.ms,
+                        math.abs(r.calls - 1) > 0.05 and string.format(" in %.2f calls", r.calls) or "",
+                        r.owner and " (through " .. r.owner .. ")" or "")
+                end
+            end
+            return out
+        end)
+        if ok then return lines end
+    end
+
+    -- -> lines: a frame's draws, triangles and ms by category since the last report
+    function drawCounterReport()
+        if not counting then return {"drawcount is off: /fixes drawcount on, stand where the fps is low, then report"} end
+        local ok, lines = pcall(function()
+            local now, frame = sums(), frameCounter()
+            local d, frames = since(now, lastReport.sums), math.max(frame - lastReport.frame, 1)
+            lastReport = {sums = now, frame = frame}
+            local out, total = {}, 0
+            for _, name in ipairs(names) do total = total + d[name].draws end
+            out[1] = string.format("drawcount over %d frames: %.0f draws a frame", frames, total / frames)
+            for _, name in ipairs(names) do
+                local c = d[name]
+                if c.draws > 0 then
+                    out[#out + 1] = string.format("%s: %.0f draws (%.0f%%), %.1fk primitives%s", name, c.draws / frames,
+                        total > 0 and c.draws * 100 / total or 0, c.prims / frames / 1000,
+                        c.scopes > 0 and string.format(", %.3f ms in %.0f", c.ms / frames, c.scopes / frames) or "")
+                end
+            end
+            for _, name in ipairs(phases) do
+                local c = d["phase " .. name]
+                if c.scopes > 0 then
+                    out[#out + 1] = string.format("phase %s: %.3f ms a frame%s", name, c.ms / frames,
+                        c.scopes > frames * 1.5 and string.format(" in %.0f calls", c.scopes / frames) or "")
+                end
+            end
+            return out
+        end)
+        return ok and lines or {"drawcount: could not read the counts"}
     end
 end
 
@@ -3960,6 +4172,7 @@ local DRIFT = {
     SWEEPS = {{"labels", "sampIs3dTextDefined", 2048}, {"textdraws", "sampTextdrawIsExists", 2304}},
     SLICE = 128, LEAD = 2000,
     LOG = getWorkingDirectory() .. "\\logs\\drift.log",
+    WORLD_LOG = getWorkingDirectory() .. "\\logs\\world.log",
     -- CPools: storage +0, slot flags +4 (0x80 free), size +8
     POOLS = {{"peds", 0xB74490}, {"vehicles", 0xB74494}, {"objects", 0xB7449C}, {"buildings", 0xB74498},
              {"dummies", 0xB744A0}, {"colmodels", 0xB744A4}, {"tasks", 0xB744A8}, {"events", 0xB744AC},
@@ -3978,6 +4191,12 @@ function DRIFT.clock()
     end
     ffi.C.fx_qpc(DRIFT.tick)
     return tonumber(DRIFT.tick[0]) * DRIFT.perTick
+end
+
+-- The draw counter's world detail: a header, then its lines indented
+function DRIFT.writeWorld(header, lines)
+    local f = io.open(DRIFT.WORLD_LOG, "a")
+    if f then f:write(header, "\n  ", table.concat(lines, "\n  "), "\n"); f:close() end
 end
 
 function DRIFT.write(line)
@@ -4074,6 +4293,8 @@ function DRIFT.counts()
         c.streamtotal, c.streamn, c.loadallms, c.loadalls = streamed, files, allMs, alls
         if id >= 0 then c.streamworst, c.streamworstid = worst, id end
     end
+    local drawn, cats, phases = drawCounterRead()
+    if drawn then c.drawn, c.drawcats, c.drawphases = drawn, cats, phases end
     if refPool and refPool.used then pcall(function() c.refs = readU32(refPool.used) end) end
     pcall(function()
         local me, m = ffi.C.fx_process(), ffi.new("FxProcessMemory")
@@ -4103,7 +4324,18 @@ DRIFT.FIELDS = {
     {"colmodels", "pool"}, {"tasks", "pool"}, {"events", "pool"}, {"intelligence", "pool"}, {"ptrsingle", "pool"},
     {"ptrdouble", "pool"}, {"entryinfo", "pool"}, {"txds", "pool"},
     {"streamMB", "%.0f"}, {"streamms", "%.3f"}, {"streamn", "%d"}, {"streamworst", "%.1f"}, {"streamworstid", "%d"},
-    {"loadalls", "%d"}, {"loadallms", "%.1f"}, {"visible", "%d"}, {"lods", "%d"}, {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
+    {"loadalls", "%d"}, {"loadallms", "%.1f"}, {"visible", "%d"}, {"lods", "%d"},
+    {"draws", "%.0f"}, {"ktris", "%.0f"}, {"d.roads", "%.0f"}, {"d.buildings", "%.0f"}, {"d.lods", "%.0f"},
+    {"d.vehicles", "%.0f"}, {"d.peds", "%.0f"}, {"d.objects", "%.0f"}, {"d.dummies", "%.0f"}, {"d.other", "%.0f"},
+    {"ms.roads", "%.3f"}, {"ms.buildings", "%.3f"}, {"ms.lods", "%.3f"}, {"ms.vehicles", "%.3f"}, {"ms.peds", "%.3f"},
+    {"ms.objects", "%.3f"}, {"ms.dummies", "%.3f"},
+    {"t.process", "%.3f"}, {"t.process.world", "%.3f"}, {"t.process.streaming", "%.3f"}, {"t.list", "%.3f"},
+    {"t.prerender", "%.3f"}, {"t.scene", "%.3f"}, {"t.effects", "%.3f"}, {"t.hud", "%.3f"}, {"t.present", "%.3f"},
+    {"t.rest", "%.3f"},
+    {"t.world.anim", "%.3f"}, {"t.world.control.peds", "%.3f"}, {"t.world.control.vehicles", "%.3f"},
+    {"t.world.control.objects", "%.3f"}, {"t.world.collision.peds", "%.3f"}, {"t.world.collision.vehicles", "%.3f"},
+    {"t.world.collision.objects", "%.3f"}, {"t.world.shift", "%.3f"},
+    {"fx", "%d"}, {"labels", "%d"}, {"textdraws", "%d"},
     {"refs", "%d"}, {"workingMB", "%.0f"}, {"privateMB", "%.0f"}, {"addressMB", "%.0f"}, {"handles", "%d"},
     {"gdi", "%d"}, {"user", "%d"}, {"luaKB", "%.0f"}, {"lost", "%d"}, {"resets", "%d"},
 }
@@ -4118,6 +4350,46 @@ function DRIFT.sample(now)
         DRIFT.quantile(0.5), DRIFT.quantile(0.95), DRIFT.quantile(0.99), DRIFT.worst, slow
     s.paused = paused / 1000
     if s.streamtotal then s.streamms = n > 0 and s.streamtotal / n or 0 end     -- ms a frame
+    if s.drawn and n > 0 then                                                    -- a frame's, by category
+        local draws, prims = 0, 0
+        for _, name in ipairs(s.drawcats) do
+            local c = s.drawn[name]
+            draws, prims = draws + c.draws, prims + c.prims
+            if c.draws > 0 or name ~= "dummies" then s["d." .. name] = c.draws / n end
+            if c.scopes > 0 then s["ms." .. name] = c.ms / n end
+        end
+        s.draws, s.ktris = draws / n, prims / n / 1000
+        local timed, any = 0, false                                              -- a frame's ms by phase
+        for _, name in ipairs(s.drawphases) do
+            local c = s.drawn["phase " .. name]
+            if c.scopes > 0 then
+                s["t." .. name], any = c.ms / n, true
+                if not name:find(".", 1, true) then timed = timed + c.ms / n end
+            end
+        end
+        if any then s["t.rest"] = math.max(s.ms - timed, 0) end                  -- what no phase has
+        local world = drawCounterWorld() or {}
+        pcall(function()                                                         -- parkedcol's verdicts a frame
+            local now, names = {}, {"skipped", "no collision", "flagged", "car park", "moving", "friction speed",
+                "count 0", "counting", "asleep", "over the limit", "speed over 30 fps limit", "turn over 30 fps limit",
+                "moved over 0.005", "damaged", "x or y moving", "z alone", "turn alone", "largest under 1e-6",
+                "largest under 1e-4", "largest above", "count same", "count up 1", "count up more", "count down",
+                "count to 0"}
+            for i = 1, 25 do now[i] = tonumber(crashFixLib.CrashFix_ParkedWhy(i - 1)) end
+            local was, parts = DRIFT.parkedWhy or {}, {}
+            DRIFT.parkedWhy = now
+            for i = 1, 25 do
+                was[i] = was[i] or 0
+                if now[i] > was[i] then parts[#parts + 1] = string.format("%s %.2f", names[i], (now[i] - was[i]) / n) end
+            end
+            if #parts > 0 then world[#world + 1] = "parked cars a frame: " .. table.concat(parts, ", ") end
+        end)
+        for _, line in ipairs(drawCounterIdle(n) or {}) do world[#world + 1] = line end
+        if #world > 0 then
+            DRIFT.writeWorld(string.format("%s fps=%.0f ms=%.2f draws=%.0f world=%.3f", os.date("%H:%M:%S"), s.fps, s.ms,
+                s.draws, s["t.process.world"] or 0), world)
+        end
+    end
     local prev, span = DRIFT.samples[#DRIFT.samples], (now - DRIFT.since) / 1000
     if s.tchits then
         s["tchits/s"] = (s.tchits - (prev and prev.tchits or 0)) / span
@@ -4166,6 +4438,7 @@ function startDrift()
     DRIFT.sweep = {i = 1, id = 0, count = 0, running = false, done = false}
     DRIFT.reset()
     streamTimerRead()                              -- its sums start with the first line
+    drawCounterRead()
     DRIFT.write(("== %s fixes drift: a line every %d s"):format(os.date("%Y-%m-%d %H:%M:%S"), DRIFT.EVERY))
     log(("[fixes] drift: a line every %d s in logs\\drift.log"):format(DRIFT.EVERY), "info")
     return true
@@ -4230,6 +4503,18 @@ function fixesCommand(params)
     end
     if key == "streamtime" and value == "report" then
         for _, line in ipairs(streamTimerReport()) do say(line) end
+        return
+    end
+    if key == "drawcount" and value == "report" then
+        for _, line in ipairs(drawCounterReport()) do say(line) end
+        return
+    end
+    if key == "hook" then
+        local name, state = tostring(params or ""):lower():match("^%s*%S+%s+(%S+)%s*(%S*)")
+        if not name or not crashFixes[name] then say("/fixes hook <key> off|on - takes one hook out for this session") return end
+        crashFixHeld[name] = state == "off" or nil
+        fixCrashes("game")
+        say(string.format("hook %s: %s", name, crashFixHeld[name] and "held out until on or a restart" or "back to its option"))
         return
     end
     if key == "patches" then
@@ -4631,6 +4916,7 @@ function main()
     if options.faultlog then startFaultLog() end
     if options.streamtime then startStreamTimer() end
     fixCrashes("game")                           -- gta_sa.exe code, before the game runs much of it
+    if options.drawcount then startDrawCounter() end
     if options.fogrestore then
         worked = fixFogRestore()
         noteFix("fog restore", worked, fogRestore and fogRestore.owner)
@@ -4728,6 +5014,6 @@ function main()
         deathFrame()
         timed('thread:fixes/references', refPoolTick)
         local now = os.clock()
-        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now); streamTimerFlush() end
+        if now >= nextFilterCheck then nextFilterCheck = now + 1; exceptionFilterTick(); PG.tick(); FPS.cleoTick(); crashFixTick(now); streamTimerFlush(); drawCounterTick() end
     end
 end

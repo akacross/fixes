@@ -87,6 +87,10 @@
         "\xD9\x46\x14\x8B\xCB\xD8\x46\x0C") \
     FJ(carsleep, "vehiclefps", "CAutomobile::ProcessControl: still frames before sleep scaled", 0x6B1D34, 10, \
         "\xB3\x0A\x3A\xC3\x88\x96\xB8\x00\x00\x00") \
+    FP(carstill1, "vehiclefps", KIND_PTR, "CAutomobile::ProcessControl: the still test's speed limit at 30 fps scale", \
+        0x6B1C2C, 4, TS, &cf_k30) \
+    FP(carstill2, "vehiclefps", KIND_PTR, "CAutomobile::ProcessControl: the still test's turn limit at 30 fps scale", \
+        0x6B1C63, 4, TS, &cf_k30) \
     FJ(bikesleep, "vehiclefps", "CBike::ProcessControl: still frames before sleep scaled", 0x6B997C, 8, \
         "\x3C\x0A\x88\x8E\xB8\x00\x00\x00") \
     FJ(bikeclamp, "vehiclefps", "CBike::ProcessControl: the still-frame clamp scaled", 0x6B99BD, 24, \
@@ -107,8 +111,6 @@
         0x6D08F0, 4, "\x7C\x34\x8D\x00", &cf_gear_smooth) \
     FP(gearsmooth2, "vehiclefps", KIND_PTR, "cTransmission::CalculateDriveAcceleration: the inertia smoothing per 30 fps frame", \
         0x6D08F8, 4, "\x7C\x34\x8D\x00", &cf_gear_smooth) \
-    FJ(wheelskid, "vehiclefps", "CVehicle::ProcessWheel: a tyre skids on a 30 fps frame's slip", 0x6D6F5E, 6, \
-        "\x83\x7D\x00\x03\x74\x52") \
     FP(still1, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B33F8, 4, STILL, &cf_still) \
     FP(still2, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B340E, 4, STILL, &cf_still) \
     FP(still3, "vehiclefps", KIND_PTR, "CAutomobile: the stillness threshold scaled", 0x6B3424, 4, STILL, &cf_still) \
@@ -543,50 +545,6 @@ __asm__(
 "    GO 0x6D0885\n"
 "gearinertia_cheat:\n"
 "    GO 0x6D088D\n"
-/* CVehicle::ProcessWheel, the slip over the frame's adhesion: st0 the
- * sideways slip, [esp+10h] the one along the tyre, [esp+70h] the thrust,
- * [esp+74h] the brake, [esp+78h] the adhesion (all three timestep-scaled),
- * [ebp] the wheel state. The test again as a 30 fps frame sees it: speeds
- * (the sideways slip; along the tyre, a rolling or unclamped braking wheel's)
- * times timestep / 1.6667, pushes (the thrust, a braking wheel at its brake)
- * as they are. Fitting, the force is still held to this frame's adhesion but
- * the tyre neither skids nor loses traction; otherwise GTA's own test. */
-"HOOK wheelskid\n"
-"    cmp dword ptr [ebp], 3\n"
-"    je wheelskid_fixed\n"
-"    fld st(0)\n"
-"    fmul dword ptr ds:0xB7CB5C\n"
-"    fdiv dword ptr [_cf_k30]\n"
-"    fmul st, st(0)\n"
-"    fld dword ptr [esp+0x10]\n"
-"    cmp byte ptr ds:0xC1CDAD, 0\n"            /* driving: the thrust */
-"    jne wheelskid_push\n"
-"    cmp byte ptr ds:0xC1CDAE, 0\n"            /* rolling: a speed */
-"    je wheelskid_speed\n"
-"    fld st(0)\n"
-"    fabs\n"
-"    fcomp dword ptr [esp+0x74]\n"
-"    fnstsw ax\n"
-"    test ah, 0x01\n"                          /* under the brake: a speed */
-"    jz wheelskid_push\n"
-"wheelskid_speed:\n"
-"    fmul dword ptr ds:0xB7CB5C\n"
-"    fdiv dword ptr [_cf_k30]\n"
-"wheelskid_push:\n"
-"    fmul st, st(0)\n"
-"    faddp st(1), st\n"
-"    fld dword ptr [esp+0x78]\n"
-"    fmul st, st(0)\n"
-"    fcompp\n"
-"    fnstsw ax\n"
-"    test ah, 0x01\n"
-"    jnz wheelskid_skids\n"
-"    fld1\n"
-"    GO 0x6D6FFF\n"
-"wheelskid_skids:\n"
-"    GO 0x6D6F64\n"
-"wheelskid_fixed:\n"
-"    GO 0x6D6FB6\n"
 "HOOK bikestill\n"
 "    cmp dword ptr [esi+0x460], 0\n"
 "    je 1f\n"

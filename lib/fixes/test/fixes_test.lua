@@ -1401,6 +1401,7 @@ do
             {key = 'skydither', name = 'sky', va = 0x7154A8, result = 1, option = 'skygrad'},
             {key = 'camnan', name = 'NaN camera', va = 0x526FC0, result = 1},
             {key = 'streamconvert', name = 'ConvertBufferToObject, timed', va = 0x40C6B0, result = 1, option = 'streamtime'},
+            {key = 'drawnonroad', name = 'RenderOneNonRoad, counted', va = 0x553260, result = 1, option = 'drawcount'},
             {key = 'samp', name = 'SA-MP helper', va = 0, result = 1},
         },
         installs = {}, uninstalls = {}, shadows = nil, sampSite = nil,
@@ -1667,6 +1668,118 @@ do
     ok(lineAfter(s2, 'the stream timer needs a newer lib\\fixes\\crashfix.dll'),
         'an older DLL without it: said: ' .. tostring(printed[s2 + 1]))
     env.fixesCommand('streamtime off')
+
+    print('\n== /fixes hook: one hook held out for the session')
+    local h1 = #cf.uninstalls
+    env.fixesCommand('hook streamconvert off')
+    ok(chat[#chat]:find('hook streamconvert: held out', 1, true) and #cf.uninstalls == h1, 'an off hook held out: said, nothing to take out: ' .. tostring(chat[#chat]))
+    env.fixesCommand('hook misc1 off')
+    ok(cf.uninstalls[#cf.uninstalls] == 'misc1' and chat[#chat]:find('held out', 1, true), 'a hooked one: taken out')
+    local i1 = #cf.installs
+    env.fixesCommand('hook misc1 on')
+    ok(cf.installs[#cf.installs] ~= nil and #cf.installs > i1 and cf.hooks[1].on and chat[#chat]:find('back to its option', 1, true), 'on: back in')
+    env.fixesCommand('hook nosuch off')
+    ok(chat[#chat]:find('/fixes hook <key> off|on', 1, true), 'an unknown key: how to use it')
+
+    print('\n== draw counter: off by default; on, the device\'s draws by category go onto drift\'s lines')
+    local draw = {calls = {}, start = 0, stop = 1, cats = {[0] = 'other', 'roads', 'buildings', 'vehicles', 'dummies'},
+        stat = {[0] = {10, 100, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}}}
+    lib.CrashFix_DrawStart = function() draw.calls[#draw.calls + 1] = 'start'; return draw.start end
+    lib.CrashFix_DrawStop = function() draw.calls[#draw.calls + 1] = 'stop'; return draw.stop end
+    lib.CrashFix_DrawCategories = function() return 5 end
+    lib.CrashFix_DrawCategory = function(i) return draw.cats[i] end
+    lib.CrashFix_DrawStat = function(cat, which) return draw.stat[cat][which + 1] end
+    draw.phases = {[0] = 'process', 'process.world', 'scene', 'present'}
+    draw.phase = {[0] = {0, 0}, {0, 0}, {0, 0}, {0, 0}}
+    lib.CrashFix_DrawPhases = function() return 4 end
+    lib.CrashFix_DrawPhase = function(i) return draw.phases[i] end
+    lib.CrashFix_DrawPhaseStat = function(ph, which) return draw.phase[ph][which + 1] end
+    env.fixesCommand('drawcount')
+    ok(chat[#chat]:find('drawcount: off - ', 1, true), 'off by default: ' .. tostring(chat[#chat]))
+    env.fixesCommand('drawcount report')
+    ok(chat[#chat]:find('drawcount is off', 1, true), 'off: the report says how to start it: ' .. tostring(chat[#chat]))
+    ok(env.drawCounterRead() == nil and #draw.calls == 0, 'off: nothing read, the DLL not asked')
+    local d1, di = #printed, #cf.installs
+    env.fixesCommand('drawcount on')
+    ok(cf.installs[#cf.installs] == 'drawnonroad' and #cf.installs > di and draw.calls[#draw.calls] == 'start',
+        'on: its hooks installed, then the device asked for')
+    ok(lineAfter(d1, 'drawnonroad') and lineAfter(d1, 'drawnonroad'):find(
+        '0x553260 draw counter drawnonroad (RenderOneNonRoad, counted): hooked', 1, true),
+        'its line names it a draw counter: ' .. tostring(lineAfter(d1, 'drawnonroad')))
+    ok(env.crashFixState('draw') == 'in place', 'counted apart from the others')
+    ok(env.drawCounterRead() == nil, 'no device yet: nothing read')
+    env.drawCounterTick()
+    ok(#draw.calls == 2 and env.drawCounterRead() == nil, 'the loop asks again; still none')
+    draw.start = 1
+    env.drawCounterTick()
+    ok(#draw.calls == 3 and env.drawCounterRead() ~= nil, 'the device is there: counting')
+    env.drawCounterTick()
+    ok(#draw.calls == 3, 'and not asked again')
+    draw.stat = {[0] = {110, 1100, 0, 0}, {50, 500, 5, 10}, {1010, 200000, 100, 500}, {400, 80000, 50, 20}, {0, 0, 0, 0}}
+    local got, cats = env.drawCounterRead()
+    ok(got.other.draws == 100 and got.buildings.draws == 1010 and got.buildings.prims == 200000 and got.buildings.ms == 100
+        and got.vehicles.scopes == 20 and cats[3] == 'buildings', 'a read: each category since the start')
+    local phaseNames
+    got, cats, phaseNames = env.drawCounterRead()
+    ok(got.buildings.draws == 0 and got.other.draws == 0, 'again at once: nothing since')
+    ok(phaseNames[2] == 'process.world' and got['phase scene'].ms == 0, 'the phases beside them, by name')
+
+    local keepClock2, keepWrite2, keepEvery2, now2, lines2 = D.clock, D.write, D.EVERY, 0, {}
+    D.clock, D.write, D.EVERY = function() return now2 end, function(line) lines2[#lines2 + 1] = line end, 1
+    ok(env.startDrift(), 'drift on beside it')
+    draw.stat = {[0] = {360, 3600, 0, 0}, {300, 3000, 30, 60}, {3510, 700000, 350, 1750}, {1400, 280000, 175, 70}, {0, 0, 0, 0}}
+    draw.phase = {[0] = {250, 250}, {125, 250}, {200, 250}, {0, 0}}
+    local worldLog, keepWorld = {}, D.writeWorld
+    D.writeWorld = function(header, lines) worldLog[#worldLog + 1] = {header, lines} end
+    lib.CrashFix_DrawWorldDetail = function()
+        return 'collision vehicles under 30 m still empty: 12.00 a frame, 0.085000 ms\r\ncontrol peds 30-100 m moving on foot: 3.50 a frame, 0.010000 ms\r\n'
+    end
+    local idle = {names = {[0] = 'idle RenderScene', 'idle CGame::Process', 'idle Idle'},
+        stat = {[0] = {250, 250, 1, 0x53DF40}, {500, 250, 1, 0x10001000}, {900, 250, 0, 0x53E920}}}
+    lib.CrashFix_DrawIdleSites = function() return 3 end
+    lib.CrashFix_DrawIdleName = function(k) return idle.names[k] end
+    lib.CrashFix_DrawIdleStat = function(k, w) return idle.stat[k][w + 1] end
+    env.driftFrame()
+    while #lines2 < 2 do now2 = now2 + 4; env.driftFrame() end
+    ok(lines2[2]:find(' t.process=1.000 t.process.world=0.500 t.scene=0.800 t.rest=2.200 ', 1, true),
+        'and its phases: ms a frame, the rest of the 4 ms without the inner one twice, none for a phase that did not run: ' .. lines2[2])
+    ok(#worldLog >= 1 and worldLog[1][2][3] and worldLog[1][2][3]:find('^idle CGame::Process: 2%.000 ms a frame %(through ')
+        and worldLog[1][2][4] == 'idle RenderScene: 1.000 ms a frame' and #worldLog[1][2] == 4,
+        'and Idle\'s calls after them, the longest first, a hook\'s module named, none for one not chained: '
+        .. tostring(worldLog[1] and worldLog[1][2][3]))
+    ok(#worldLog >= 1 and worldLog[1][1]:find(' fps=250 ms=4.00 draws=16 world=0.500', 1, true) and #worldLog[1][2] == 4
+        and worldLog[1][2][1]:find('collision vehicles under 30 m still empty: 12.00 a frame', 1, true),
+        'and the world detail goes to its own log under the line\'s numbers: ' .. tostring(worldLog[1] and worldLog[1][1]))
+    D.writeWorld = keepWorld
+    lib.CrashFix_DrawWorldDetail = nil
+    lib.CrashFix_DrawIdleSites = nil
+    ok(lines2[2]:find(' draws=16 ktris=3 d.roads=1 d.buildings=10 d.vehicles=4 d.other=1 ms.roads=0.100 ms.buildings=1.000 ms.vehicles=0.500 ', 1, true),
+        'drift\'s line: a frame\'s draws and ms by category over its 250 frames, no dummies: ' .. lines2[2])
+    env.stopDrift()
+    D.clock, D.write, D.EVERY, D.samples = keepClock2, keepWrite2, keepEvery2, nil
+
+    draw.stat = {[0] = {460, 4600, 0, 0}, {300, 3000, 30, 60}, {3810, 800000, 380, 1900}, {1400, 280000, 175, 70}, {0, 0, 0, 0}}
+    local c2 = #chat
+    env.fixesCommand('drawcount report')
+    ok(chat[c2 + 1]:find('drawcount over ', 1, true) and chat[c2 + 1]:find(' draws a frame', 1, true), 'the report: the total first: ' .. tostring(chat[c2 + 1]))
+    local all = table.concat(chat, '\n', c2 + 1)
+    ok(all:find('buildings: ', 1, true) and all:find('vehicles: ', 1, true) and all:find('other: ', 1, true)
+        and not all:find('dummies', 1, true), 'then a line a category that drew: ' .. tostring(chat[c2 + 2]))
+    ok(all:find('phase process: ', 1, true) and all:find('phase scene: ', 1, true) and not all:find('phase present', 1, true),
+        'then a line a phase that ran, none for one that did not')
+    local u2 = #cf.uninstalls
+    env.fixesCommand('drawcount off')
+    ok(draw.calls[#draw.calls] == 'stop' and cf.uninstalls[#cf.uninstalls] == 'drawnonroad' and #cf.uninstalls == u2 + 1,
+        'off: the device\'s slots back, then its hooks out')
+    ok(env.drawCounterRead() == nil, 'and nothing read')
+    env.drawCounterTick()
+    ok(draw.calls[#draw.calls] == 'stop', 'the loop no longer asks')
+    lib.CrashFix_DrawStart = function() error('missing export') end
+    local d2 = #printed
+    env.fixesCommand('drawcount on')
+    ok(lineAfter(d2, 'the draw counter needs a newer lib\\fixes\\crashfix.dll'),
+        'an older DLL without it: said: ' .. tostring(printed[d2 + 1]))
+    env.fixesCommand('drawcount off')
 
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString
