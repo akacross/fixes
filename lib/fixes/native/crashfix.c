@@ -66,8 +66,8 @@
     H(matrix, "CMatrix::UpdateRwMatrix into a bad RwMatrix", 0x59AD70, 6, -1, "\x8B\x11\x8B\x44\x24\x04") \
     H(allocmatrix1, "CPlaceable::AllocateMatrix: a reused matrix keeps its attachment", 0x54F5A6, 8, -1, \
         "\x89\x70\x48\x89\x46\x14\x5E\xC3") \
-    H(allocmatrix2, "CPlaceable::AllocateMatrix: a new matrix keeps its attachment", 0x54F5C5, 8, -1, \
-        "\x89\x70\x48\x89\x46\x14\x5E\xC3") \
+    H(allocmatrix2, "CPlaceable::AllocateMatrix: a new matrix keeps its attachment", 0x54F5C5, 6, -1, \
+        "\x89\x70\x48\x89\x46\x14") \
     H(misc21, "CTaskSimpleCarFallOut::FinishAnimFallOutCB with a stale task", 0x648EE0, 7, -1, \
         "\x8B\x44\x24\x08\x8B\x48\x10") \
     H(misc22, "CAnimBlendAssociation::Init with a bad node array", 0x4CEF08, 6, -1, "\x8B\x14\x82\x8B\x5E\x10") \
@@ -731,6 +731,8 @@ __asm__(
 /* CPlaceable::AllocateMatrix's two tails: the CMatrixLink's attach matrix
  * cleared as it is handed out */
 "HOOK allocmatrix1\n"
+/* (6 bytes, not MTA's 8: the early return at 0x54F568 jumps to the pop esi /
+ * ret at 0x54F5CB, which MTA's padding NOPs) */
 "HOOK allocmatrix2\n"
 "    mov dword ptr [eax+0x48], esi\n"
 "    mov dword ptr [esi+0x14], eax\n"

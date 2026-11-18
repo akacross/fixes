@@ -161,8 +161,8 @@ uint8_t __attribute__((thiscall)) cf_beat_limit(void *audio);
         10, "\xD8\x4C\x24\x18\xD8\x0D\xC4\x8C\x85\x00") \
     FJ(planesteer3, "vehiclefps", "CPlane::ProcessControlInputs: a control surface eases to the stick as at 30 fps", 0x6CB0B1, \
         10, "\xD8\x4C\x24\x14\xD8\x0D\xC4\x8C\x85\x00") \
-    FJ(planesteer4, "vehiclefps", "CPlane::ProcessControlInputs: a control surface eases to the stick as at 30 fps", 0x6CB1AD, \
-        10, "\xD8\x4C\x24\x14\xD8\x0D\xC4\x8C\x85\x00") \
+    FJ(planesteer4, "vehiclefps", "CPlane::ProcessControlInputs: the rudder eases to the pad as at 30 fps", 0x6CB1B1, 6, \
+        "\xD8\x0D\xC4\x8C\x85\x00") \
     FJ(flyturn1, "turnfps", "CVehicle::FlyingControl: the turn resistance once per 30 fps step, not timestep squared", \
         0x6DAA16, 10, "\xD8\x05\x24\x86\x85\x00\xD8\x7C\x24\x1C") \
     FJ(flyturn2, "turnfps", "CVehicle::FlyingControl: the turn resistance once per 30 fps step, not timestep squared", \
@@ -449,6 +449,13 @@ float __cdecl cf_slew(float k)
     float base = 1.0f - k * cf_k30, r = ratio30();
     if (!(base > 0.0f && base < 1.0f)) return k * cf_k30 * r;
     return 1.0f - pow3(base, r);
+}
+
+/* The same over the timestep, for a gap already times the timestep */
+float __cdecl cf_slew_per_step(float k)
+{
+    float t = TIMESTEP;
+    return t > 0.0001f ? cf_slew(k) / t : k;
 }
 
 /* A weight on a gap once a frame (a wheel easing down) as the same per second */
@@ -1094,8 +1101,21 @@ __asm__(
 "    SLEW 0x858CC4, 0x6CB076\n"
 "HOOK planesteer3\n"
 "    SLEW 0x858CC4, 0x6CB0BB\n"
+/* the rudder's fmul [0.2], which the plane's paths jump to (0x6CB238,
+ * 0x6CB24D) with gap * timestep on st0: the share per timestep */
 "HOOK planesteer4\n"
-"    SLEW 0x858CC4, 0x6CB1B7\n"
+"    sub esp, 4\n"
+"    fstp dword ptr [esp]\n"
+"    pushfd\n"
+"    pushad\n"
+"    push dword ptr ds:0x858CC4\n"
+"    call _cf_slew_per_step\n"
+"    add esp, 4\n"
+"    popad\n"
+"    popfd\n"
+"    fmul dword ptr [esp]\n"
+"    add esp, 4\n"
+"    GO 0x6CB1B7\n"
 
 /* FlyingControl: st0 the speed term, [esp+N] pow(resistance, timestep), edi
  * the flying handling (the resistances at +40h, +44h, +48h) */

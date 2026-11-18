@@ -1770,7 +1770,7 @@ that thunk.
 | keys | sites | what they stop |
 |---|---|---|
 | matrix, matmul | 0x59AD70, 0x7F18B0 | `UpdateRwMatrix` into a null, low or unaligned matrix; `RwMatrixMultiply` with a null one (dst returned) |
-| allocmatrix1, 2 | 0x54F5A6, 0x54F5C5 | a matrix handed out with its old attach matrix |
+| allocmatrix1, 2 | 0x54F5A6, 0x54F5C5 | a matrix handed out with its old attach matrix. allocmatrix2 takes 6 bytes, not MTA's 8: the early return for an entity that has a matrix (0x54F568) jumps to the `pop esi / ret` at 0x54F5CB, which MTA's padding NOPs |
 | misc43, 44, 45 | 0x4E028C, 0x4E0347, 0x4E02E8 | `GetSoundBuffer`: a slot out of range, impossible slot data, a sound past its slot's buffer |
 | misc47, 48, 49 | 0x4DFE7D, 0x4DFF78, 0x4E0094 | `CAEMP3BankLoader::Service`: stream sizes clamped to the buffer and the slot |
 | misc30, misc32 | 0x4CEBE8, 0x4CEA80 | `SetFinishCallback` on null; `SetCurrentTime` on null or with no hierarchy |
@@ -2836,7 +2836,7 @@ with one value on it.
 |---|---|---|
 | `pedfps`, `vehiclefps`, `timerfps` | 103 rows (`aimtime1`, ... `hudtime46`, `drown`) | a `call _ftol` of a frame's time keeps its fraction per call site (`cf_ftol_carry`, by return address; a second call in the frame with the same value gets the same integer): the target lock's 1200 ms, nine more task timers, the police AI, `FlyingControl`, the plane and car bomb timers, the upside-down check, a damaged engine's sputter, drowning's damage (none above 150 fps), the idle camera, on-screen countdowns, every script's TIMERA/B (SilentPatch's call there stands it down), 21 stat counters, 13 stunt counters and 46 HUD timers. They ran long at high fps and stopped above 1000 |
 | `vehiclefps` | `gearkick`, `gearkick2` | `JustFinishedAccelerationLoop` declares the acceleration loop ended after 10 frames, which kicks the nose up on an upshift: 9 ms at 1000 fps, where it kicked every eleventh frame. Both reads take `round(10 / ratio)` |
-| `vehiclefps` | `carsteer1`-`2`, `bikesteer1`-`2`, `planesteer1`-`4` | the steering and control surfaces ease to the pad by `0.2 * timestep` a frame; `1 - (1 - 0.3333)^ratio` closes per second what a 30 fps step does |
+| `vehiclefps` | `carsteer1`-`2`, `bikesteer1`-`2`, `planesteer1`-`4` | the steering and control surfaces ease to the pad by `0.2 * timestep` a frame; `1 - (1 - 0.3333)^ratio` closes per second what a 30 fps step does. `planesteer4` is the rudder's `fmul [0.2]` alone (0x6CB1B1): a plane's two paths jump to it with `gap * timestep` already on st0 (0x6CB238, 0x6CB24D), so it takes the share over the timestep. In 0.27.0 it took 0x6CB1AD's 10 bytes, as HighFpsFixes does, and those jumps ran our jump's last byte: with crashfix.dll at 0x75350000 a `je` to 0x6CB143, an `xchg` with a heap byte and a fault reading 0x74 at 0x6CB14C (2026-11-18, once) |
 | `turnfps` | `flyturn1`-`3` | `FlyingControl` raises each axis's turn resistance to `timestep²`, so an aircraft held far more turn per second at high fps (and with `turndamping`'s 0.99 turned faster than at 30). The first timestep is 1.6667 |
 | `vehiclefps` | `springdamp`, `loadlean` | `ApplySpringDampening` takes `min(timestep * level, 0.25)` a frame: at 30 fps a level over 0.15 is capped, at high fps it is not (a third more damping). The level becomes the one that takes per second what the capped step does. `loadlean` keeps each entity's speeds at the start of `CPhysical::ProcessControl`, and the damper bites the speed the frame has added so far as a 30 fps step does, so the body leans as far under a cornering or braking load |
 | `vehiclefps` | `carrest`, `bikerest`, `trailerrest`, `objsleep`, `trailersleep` | `m_fMovingSpeed` (a distance per frame) as a 30 fps step's against the rest limit; an object's and a trailer's still frames counted per 30 fps step (cars and bikes have `carsleep`, `bikesleep`) |
@@ -2864,6 +2864,9 @@ the climb's clamp (`climb1`-`2`); the bike lean target, the abandoned bike's
 substeps and the takeoff pitch (experiments there); `AddParticle`'s general
 gate (`effectsfps` gates the per-frame emitters at their callers); the frame
 limits and the footprints' height.
+
+`row_branch_test.py` (run by crashfix_dll_test.sh) disassembles gta_sa.exe
+and fails on any branch that lands inside a row past its first byte.
 
 Tests: fixes_test checks the INI (a missing key on, `0`, `1`, a comment that
 makes it neither, `classicHandling`) and that `wheelfps` stands down while

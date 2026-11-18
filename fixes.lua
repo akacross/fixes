@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.0")
+script_version("0.27.1")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end

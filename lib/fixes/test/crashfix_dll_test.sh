@@ -12,6 +12,7 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
 i686-w64-mingw32-gcc -O2 -Wall -shared -static -o "$work/crashfix_dll_test.dll" "$here/crashfix_dll_test.c"
 luajit "$here/fixes_test.lua" --fog-bytes "$work/fog.bin" >/dev/null
+python3 -I "$here/row_branch_test.py" "$exe" "$here/../native"
 python3 -I - "$exe" "$work/gta_sa.exe" <<'PY'
 import struct, sys
 d = bytearray(open(sys.argv[1], 'rb').read())

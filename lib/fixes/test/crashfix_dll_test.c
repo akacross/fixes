@@ -2094,6 +2094,15 @@ __declspec(dllexport) int __cdecl run(void)
         ok(fabsf(s30 - 0.2f * 50.0f / 30.0f) < 1e-5f && fabsf(powf(1 - s300, 10) - (1 - s30)) < 1e-4f,
            "the steering closes a third of the gap at 30 fps, and as much in ten 300 fps frames");
 
+        /* the rudder: its paths reach the fmul [0.2] with gap * timestep */
+        ret_at(0x6CB1B7);
+        *ts = 50.0f / 300.0f;
+        float r300 = call_fpu(hook_of("planesteer4"), 1.0f * *ts, 1);
+        *ts = 50.0f / 30.0f;
+        float r30 = call_fpu(hook_of("planesteer4"), 1.0f * *ts, 1);
+        unret(0x6CB1B7);
+        ok(fabsf(r30 - s30) < 1e-5f && fabsf(r300 - s300) < 1e-5f, "the rudder closes the same share as the steering, from gap * timestep");
+
         *ts = 50.0f / 1000.0f;
         cf_loop_frames_update();
         int k1000 = cf_loop_frames;
