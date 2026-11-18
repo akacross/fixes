@@ -100,6 +100,22 @@ __attribute__((noinline)) static float call_fpu(uint32_t entry, float x, int tak
     return fpu_out;
 }
 
+/* A call _ftol site called with x on the x87 stack and ecx set: after it
+ * eax, edx, ecx and the status word */
+float carry_x;
+uint32_t carry_target, carry_eax, carry_edx, carry_ecx;
+uint16_t carry_sw;
+__attribute__((noinline)) static int32_t carry_call(uint32_t va, float x)
+{
+    carry_x = x, carry_target = va;
+    __asm__ volatile("finit\n\tflds _carry_x\n\tmov $0x1234, %%ecx\n\tcall *_carry_target\n\t"
+                     "mov %%eax, _carry_eax\n\tmov %%edx, _carry_edx\n\tmov %%ecx, _carry_ecx\n\tfnstsw _carry_sw\n"
+                     ::: "memory", "eax", "ecx", "edx");
+    return (int32_t)carry_eax;
+}
+
+static int __attribute__((thiscall)) task_type(void *task) { (void)task; return 0x2BD; }
+
 /* Call a hook as code deep in a function reaches it: eax set, x on the x87
  * stack (takes 1) or not, the 100h bytes above its return address from
  * site_stack and back (site_stack[i] is the hook's [esp+4+4i]); after it eax
@@ -1592,6 +1608,21 @@ __declspec(dllexport) int __cdecl run(void)
            "a line at z -10000 (Unity Roleplay's objects) stays, nothing counted");
     }
 
+    printf("== a followed ped with no primary task (followtask)\n");
+    {
+        ret_at(0x523EA0);
+        call_site(hook_of("followtask"), 0, 0, 0, 0);
+        unret(0x523EA0);
+        ok(averted("followtask") == 1, "no task: past the check, counted");
+        static void *vtable[8];
+        static void *task[2] = {vtable};
+        vtable[4] = (void *)task_type;
+        ret_at(0x523E72);
+        call_site(hook_of("followtask"), (uint32_t)task, 0, 0, 0);
+        unret(0x523E72);
+        ok(site_ret == 0x2BD && averted("followtask") == 1, "a task: its type asked, as the game does");
+    }
+
     printf("== a camera gone NaN (camnan)\n");
     {
         typedef void (__attribute__((thiscall)) *InitFn)(void *);
@@ -2003,6 +2034,197 @@ __declspec(dllexport) int __cdecl run(void)
         ok(bturn[0] == 0.0f && bturn[1] == 0.0f && bturn[2] == 0.0f, "300 fps: 0.00005 is at rest");
         *(uint8_t *)0x6BC166 = keep166, *(uint8_t *)0x6BC192 = keep192;
         *ts = 50.0f / 30.0f;
+    }
+
+    printf("== HighFpsFixes': a truncated time keeps its fraction per call site (cf_ftol_carry)\n");
+    {
+        uint32_t *frames = (uint32_t *)0xB7CB4C;
+        int called = 1, n = 0;
+        for (int i = 0; i < CrashFix_Count(); i++) {
+            const Hook *h = &hooks[i];
+            if (h->to != (const void *)cf_ftol_carry) continue;
+            n++;
+            called &= h->installed && *(const uint8_t *)h->va == 0xE8 &&
+                      h->va + 5 + *(const uint32_t *)(h->va + 1) == (uint32_t)cf_ftol_carry;
+        }
+        ok(called && n == 103, "103 sites call it in place of _ftol");
+        uint32_t stunt = hooks[find("stunt1")].va, hud = hooks[find("hudtime1")].va;
+        ret_at(stunt + 5);
+        int32_t sum = 0, again = 1;
+        for (int f = 0; f < 600; f++) {
+            ++*frames;
+            int32_t ms = carry_call(stunt, 1000.0f / 600.0f);
+            again &= carry_call(stunt, 1000.0f / 600.0f) == ms;
+            sum += ms;
+        }
+        ok(sum >= 999 && sum <= 1000, "600 frames at 600 fps: 1000 ms (stock: 600)");
+        ok(again, "a second call in the same frame with the same value: the same integer, not carried twice");
+        ok(carry_ecx == 0x1234 && carry_edx == 0 && (carry_sw & 0x3800) == 0, "ecx kept, edx the sign, the x87 stack empty");
+        sum = 0;
+        for (int f = 0; f < 600; f++) { ++*frames; sum += carry_call(stunt, -1000.0f / 600.0f); }
+        ok(sum <= -999 && sum >= -1000 && carry_edx == 0xFFFFFFFF, "a countdown (negated): -1000 ms, edx -1");
+        unret(stunt + 5);
+        ret_at(hud + 5);
+        sum = 0;
+        for (int f = 0; f < 4; f++) { ++*frames; sum += carry_call(hud, 2.5f); }
+        unret(hud + 5);
+        ok(sum == 10, "another site carries its own: 2.5 four times is 10");
+    }
+
+    printf("== HighFpsFixes': vehicles per 30 fps step\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        uint32_t *frames = (uint32_t *)0xB7CB4C;
+        int due = 0;
+        *ts = 50.0f / 300.0f;
+        for (int f = 0; f < 300; f++) { ++*frames; due += cf_due30(); due += cf_due30() * 0; }
+        ok(due >= 29 && due <= 30, "a 30 fps step ends on 30 of 300 frames at 300 fps");
+        *ts = 50.0f / 30.0f;
+        due = 0;
+        for (int f = 0; f < 30; f++) { ++*frames; due += cf_due30(); }
+        ok(due == 30, "and on every frame at 30 fps");
+
+        /* the steering's share of the gap: ten 300 fps frames close what one 30 fps frame does */
+        *ts = 50.0f / 30.0f;
+        ret_at(0x6AD86E);
+        float s30 = call_fpu(hook_of("carsteer1"), 1.0f, 1);
+        *ts = 50.0f / 300.0f;
+        float s300 = call_fpu(hook_of("carsteer1"), 1.0f, 1);
+        unret(0x6AD86E);
+        ok(fabsf(s30 - 0.2f * 50.0f / 30.0f) < 1e-5f && fabsf(powf(1 - s300, 10) - (1 - s30)) < 1e-4f,
+           "the steering closes a third of the gap at 30 fps, and as much in ten 300 fps frames");
+
+        *ts = 50.0f / 1000.0f;
+        cf_loop_frames_update();
+        int k1000 = cf_loop_frames;
+        *ts = 50.0f / 30.0f;
+        cf_loop_frames_update();
+        ok(k1000 == 333 && cf_loop_frames == 10, "the upshift's 10 frames: 333 at 1000 fps, 10 at 30");
+
+        /* an aircraft's turn with no speed term: the same left after a second at 30 and 300 fps */
+        float left[2];
+        for (int k = 0; k < 2; k++) {
+            int fps = k ? 300 : 30;
+            float t = *ts = 50.0f / fps, turn = 1.0f;
+            for (int f = 0; f < fps; f++) turn *= powf(cf_fly_turn(0.9f, powf(0.9f, t), 0.0f), t);
+            left[k] = turn;
+        }
+        ok(fabsf(left[0] - left[1]) < 1e-4f, "an aircraft's turn resistance holds as much per second at 300 fps as at 30");
+
+        /* the damper: ten 300 fps frames take what one capped 30 fps frame does */
+        static uint8_t body[0x100];
+        float args[4] = {0.2f, 1.0f, 0, 0};
+        *ts = 50.0f / 300.0f;
+        cf_spring_level(body, args);
+        ok(fabsf(powf(1 - *ts * args[0], 10) - 0.75f) < 1e-4f, "the damping a 30 fps frame takes, capped at 0.25");
+        body[0x40] = 1;
+        args[0] = 0.05f;
+        cf_spring_level(body, args);
+        ok(fabsf(powf(1 - *ts * args[0] * 2, 10) - (1 - 50.0f / 30.0f * 0.05f * 2)) < 1e-4f,
+           "under the cap, and twice the mass, the same per second");
+        *ts = 50.0f / 30.0f;
+        args[0] = 0.2f;
+        cf_spring_level(body, args);
+        ok(args[0] == 0.2f, "at 30 fps the level is stock");
+
+        /* the wave: a 300 fps frame's rise counts on the frame a 30 fps step ends, ten times over */
+        *ts = 50.0f / 300.0f;
+        int32_t sum = 0;
+        for (int f = 0; f < 10; f++) { ++*frames; sum += cf_wave_rise_c(30.0); }
+        ok(sum >= 299 && sum <= 300, "a wave's rise over a 30 fps step, once in ten frames");
+
+        /* the thunks for the constant steps */
+        *ts = 50.0f / 300.0f;
+        float d = call_fpu((uint32_t)cf_decay95, 1.0f, 1), sub = call_fpu((uint32_t)cf_sub10, 1.0f, 1);
+        float add = call_fpu((uint32_t)cf_add05, 1.0f, 1), sink = call_fpu((uint32_t)cf_sink_step, 1.0f, 1);
+        ok(fabsf(powf(d, 10) - 0.95f) < 1e-5f && fabsf(sub - 0.99f) < 1e-6f && fabsf(add - 1.005f) < 1e-6f &&
+           fabsf(sink - 8e-7f) < 1e-11f, "0.95, -0.1, +0.05 and the sinking per 30 fps step");
+        float settle = call_fpu((uint32_t)cf_settle, 1.0f, 1);
+        ok(fabsf(powf(1 - settle, 10) - 0.25f) < 1e-5f, "a wheel eases down by 0.75 of the gap per 30 fps step");
+        *ts = 50.0f / 30.0f;
+    }
+
+    printf("== HighFpsFixes': peds, the world, weapons, the HUD, SA-MP's objects\n");
+    {
+        float *ts = (float *)0xB7CB5C;
+        uint32_t *frames = (uint32_t *)0xB7CB4C, *ms = (uint32_t *)0xB7CB84;
+        *ts = 50.0f / 300.0f;
+        uint32_t steps = cf_steps30;
+        for (int f = 0; f < 300; f++) { ++*frames; cf_count30_now(); cf_count30_now(); }
+        ok(cf_steps30 - steps >= 29 && cf_steps30 - steps <= 30, "30 fps steps counted: 30 in 300 frames at 300 fps");
+
+        /* fat: 2 ms a frame at rate 3 is 0.6 a frame, nothing stock; 60 over 100 frames */
+        uint32_t *fat = (uint32_t *)0xB794FC, was = *fat;
+        for (int f = 0; f < 100; f++) cf_fat_add_c(2, 3);
+        ok(*fat - was >= 59 && *fat - was <= 60, "fat burns 0.6 a frame with the remainder kept (stock: 0)");
+        *fat = was;
+
+        /* a flamethrower's ammo: 30 units a second at 300 fps */
+        static int32_t flamer[8] = {37};
+        int taken = 0;
+        *ms = 100000;
+        for (int f = 0; f < 300; f++) { *ms += f % 3 ? 3 : 4; taken += cf_take_ammo(flamer); }
+        *ms += 1;
+        ok(taken >= 29 && taken <= 31, "a flamethrower uses 30 units in a second at 300 fps");
+        static int32_t pistol[8] = {22};
+        ok(cf_take_ammo(pistol) == 1, "a pistol is left alone");
+
+        /* the area shots: 30 a second per firer */
+        static int firer;
+        int shot = 0;
+        for (int f = 0; f < 300; f++) { ++*frames; *ms += f % 3 ? 3 : 4; shot += take_shot(&firer); }
+        ok(shot >= 29 && shot <= 31, "a spray's shots: 30 in a second at 300 fps");
+
+        /* the chainsaw: a rewind armed every 2/30 s */
+        static int saw;
+        int armed = 0;
+        for (int f = 0; f < 300; f++) { *ms += f % 3 ? 3 : 4; cf_chainsaw_c(&saw); armed += cf_saw_rewind > 0.0f; }
+        ok(armed >= 14 && armed <= 16, "the chainsaw: 15 strikes a second at 300 fps");
+        *ts = 50.0f / 30.0f;
+        cf_chainsaw_c(&saw);
+        ok(cf_saw_rewind == 0.01f, "at 30 fps its rewind is stock");
+
+        /* the HUD's flash: bit 3 of game ms / 40, 320 ms on and off at any fps */
+        *ms = 40 * 8;
+        uint32_t armor = hooks[find("hudflash1")].va;
+        ret_at(armor + 7);
+        call_site(hook_of("hudflash1"), 0, 0, 0, 0);
+        int on = !(site_flags & 0x40);
+        *ms = 40 * 16;
+        call_site(hook_of("hudflash1"), 0, 0, 0, 0);
+        unret(armor + 7);
+        ok(on && (site_flags & 0x40), "the armour bar flashes on the 25 fps clock");
+
+        /* a footprint: 30 steps a second at 300 fps */
+        static int ped;
+        uint32_t left = 100;
+        *ts = 50.0f / 300.0f;
+        for (int f = 0; f < 300; f++) { ++*frames; left = cf_footprint(&ped, left); }
+        ok(left >= 70 && left <= 71, "a bloody footprint fades 30 a second at 300 fps");
+
+        /* the aim camera's hold */
+        float before = *ts;
+        cf_aim_begin();
+        float held = *ts, real = cf_real_timestep_c();
+        cf_aim_end();
+        ok(held == 1.0f && real == before && *ts == before, "aiming holds the timestep at 1 and gives it back; the zoom sees it");
+        *ts = 50.0f / 30.0f;
+
+        /* SA-MP's object site: the turn 12Ch after the arrival test */
+        static uint8_t samp[0x200];
+        static const uint8_t test[] = {0xD9, 0x44, 0x24, 0x24, 0xD8, 0x5C, 0x24, 0x20, 0xDF, 0xE0, 0xF6, 0xC4, 0x01, 0x0F, 0x85,
+                                       0x10, 0x00, 0x00, 0x00};
+        static const uint8_t turn[] = {0xD9, 0x44, 0x24, 0x28, 0xD8, 0xB3, 0x5B, 0x01, 0x00, 0x00};
+        uint32_t at = (uint32_t)samp + 8;
+        memcpy((void *)at, test, sizeof test);
+        ok(!CrashFix_SetSampObjectSite(at), "no turn where it should be: refused");
+        memcpy((void *)(at + 0x12C), turn, sizeof turn);
+        ok(CrashFix_SetSampObjectSite(at) && CrashFix_Address(find("sampmove")) == at &&
+           CrashFix_Address(find("samprot")) == at + 0x12C && cf_samp_moving == at + 19 + 0x10 && cf_samp_arrived == at + 19,
+           "the arrival test and the turn found, the ways on read from its jne");
+        ok(cf_samp_rot_left(1.0f, 4.0f) == 0.75f && cf_samp_rot_left(5.0f, 4.0f) == 0.0f && cf_samp_expired(4.0f, 4.0f),
+           "the turn left and the arrival from the time moved");
+        hooks[find("sampmove")].va = hooks[find("samprot")].va = 0;
     }
 
     printf("== FramerateVigilante's: swinging parts, the burnout, swimming\n");

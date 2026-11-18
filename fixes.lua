@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.26.1")
+script_version("0.27.0")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -538,6 +538,14 @@ local gamePatches = {
         from = hexBytes("D9 05 24 86 85 00 D8 1D 5C CB B7 00 DF E0 F6 C4 41 75 08 D9 05 24 86 85 00 EB 06"),
         to = nops(27)
     },
+    {   -- the same clamp in the on-foot camera, into the fld at 0x523838
+        -- (HighFpsFixes)
+        name = "CCam::Process_FollowPed_SA timestep clamp",
+        va = 0x52381D, option = "camerafps",
+        from = hexBytes("D9 05 24 86 85 00 D8 1D 5C CB B7 00 DF E0 F6 C4 41 75 08 D9 05 24 86 85 00 EB 06"),
+        to = nops(27),
+        standDown = function(found) return hookOwner(0x52381D, found) end
+    },
     {   -- zeroes the 0xBB8 in `lea eax,[ecx+eax+0xBB8]` so m_nExpireTime is
         -- now + lifetime instead of now + lifetime + 3000 ms. Longest-lived
         -- explosion type in the game
@@ -925,10 +933,11 @@ gamePatches[#gamePatches + 1] = {name = "01C3 keeps the car (CleanUpThisVehicle 
 local OPTIONS = {
     plates = {default = false, label = "custom plates on bikes, boats, planes and trailers"},
     occluders = {default = true, label = "no exterior occlusion, so server-mapped objects stop vanishing"},
-    framecaps = {default = true, label = "SA-MP's and GTA's frame caps off while the in-game Frame Limiter is off (as autofps)",
+    framecaps = {default = true,
+        label = "SA-MP's and GTA's frame caps off while the in-game Frame Limiter is off (as autofps); a car radio no longer holds 30 fps",
         apply = function(on)
-            if on then return fixFrameCap() and 1 or 0, 0 end
-            return stopFrameCap() and 1 or 0, 0
+            if on then return (fixFrameCap() and 1 or 0) + fixCrashes("game"), 0 end
+            return (stopFrameCap() and 1 or 0) + fixCrashes("game"), 0
         end},
     anisotropic = {default = true, label = "anisotropic texture filtering, 16x or the most the device offers",
         apply = function(on) return fixAnisotropic(on) and 1 or 0, 0 end},
@@ -949,20 +958,28 @@ local OPTIONS = {
             if on then return fixFrameRate("floatfps"), 0 end
             return stopFrameRate("floatfps"), 0
         end},
-    -- MTA's frame-rate fixes, in crashfix.dll
-    turnfps = {default = true, label = "a spinning car or object slows its spin as fast at any fps (MTA)",
+    -- MTA's, FramerateVigilante's and HighFpsFixes' frame-rate fixes, in crashfix.dll
+    turnfps = {default = true, label = "a spinning car, object or aircraft slows its spin as fast at any fps (MTA, HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
-    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke and the fight stance last as long at any fps",
+    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke, the fight stance, the target lock and the other task timers last as long, drowning hurts and a drunk steers late at any fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     vehiclefps = {default = true,
-        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a burning vehicle and an alarm last as long at any fps",
+        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a burning vehicle and an alarm last as long at any fps; steering, the gearbox's kick, suspension, wheels, hydraulics, forks, sinking, a damaged plane and bike leans as at 30 fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     effectsfps = {default = true,
-        label = "particles, rain, splashes, explosion fuel and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA)",
+        label = "particles, rain, splashes, explosion fuel and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA); fire spread, explosions, lightning, the engine note, the jetpack and SA-MP's moving objects as at 30 fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     pushfps = {default = true, label = "walking into a parked car pushes it as at 30 fps, not away (MTA)",
         apply = function() return fixCrashes("game"), 0 end},
     sirenfps = {default = true, label = "a horn tap under 150 ms switches the siren at any fps (FramerateVigilante)",
+        apply = function() return fixCrashes("game"), 0 end},
+    timerfps = {default = true,
+        label = "HUD timers and flashes, skills, stunts, fat, the idle camera, ambient sounds, script and on-screen timers in real time; the map's wheel zooms (HighFpsFixes)",
+        apply = function() return fixCrashes("game"), 0 end},
+    camerafps = {default = true, label = "the on-foot camera turns and the aim camera holds still and zooms as at 30 fps (HighFpsFixes)",
+        apply = function() return fixCrashes("game"), 0 end},
+    weaponfps = {default = true,
+        label = "a spray, flame or extinguisher shows its particles and uses ammo and hurts 30 a second; the chainsaw and tear gas as at 30 fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     drift = {default = false, label = "a line every 30 s in logs\\drift.log: fps, frame times and what could grow (/fixes drift report)",
         apply = function(on)
@@ -1592,10 +1609,11 @@ local function moduleSections(base)
 end
 
 -- The first `needle` in the mapped sections of that kind, as a va.
-local function findInSections(sections, code, needle)
+local function findInSections(sections, code, needle, from)
     for _, s in ipairs(sections) do
-        if s.code == code then
-            local at = ffi.string(ffi.cast("const char*", s.va), s.size):find(needle, 1, true)
+        if s.code == code and (not from or from < s.va + s.size) then
+            local start = from and from > s.va and from - s.va + 1 or 1
+            local at = ffi.string(ffi.cast("const char*", s.va), s.size):find(needle, start, true)
             if at then return s.va + at - 1 end
         end
     end
@@ -2516,6 +2534,144 @@ local FPS = {
     owner = {},                    -- option -> another mod's name, when it stood down
 }
 
+-- HighFpsFixes.asi (sonochiwa's sa-high-fps-fixes) fixes much of the same.
+-- Where it patches our bytes, our rows find them gone and stand down; these
+-- are the rows and options of ours it fixes at another instruction, by its
+-- INI switch for the same behaviour ([section] key, on unless "0").
+FPS.HFPS_MODULE = "HighFpsFixes.asi"
+FPS.HFPS = {
+    ["player.swimmingMovement"] = {"swimfps", "swimsurface", "swimsplash1", "swimsplash2", "swimsplash3", "swimsplash4"},
+    ["player.drowningDamage"] = {"drown"},
+    ["player.drunkSteerDelay"] = {"drunksteer"},
+    ["player.objectPickUp"] = {"pickup1", "pickup2"},
+    ["player.fatCounter"] = {"fatcount"},
+    ["player.bloodyFootprints"] = {"footprints"},
+    ["player.jetPackFlame"] = {"jetflame1", "jetflame2"},
+    ["player.swimPitchRate"] = {"swimpitch1", "swimpitch2", "swimpitch3"},
+    ["player.pedPushVehicle"] = {"push1", "push2", "push3", "push4", "push5", "push6", "push7", "push8",
+        "pushalt1", "pushalt2"},
+    ["player.parachuteFlight"] = {"chutefps"},
+    ["player.waterBuoyancy"] = {"floatfps"},
+    ["player.climbSpeed"] = {"climb1", "climb2"},
+    ["player.taskTimers"] = {"fallstep", "chokestep", "climbstep", "fightstep", "stancestep", "aimtime1", "aimtime2",
+        "inairstep", "fightmove", "stealthstep", "killstep", "drivestep", "duckstep", "fallstep2", "gunstep"},
+    ["player.skillProgress"] = {"fatstep", "healthstep", "sprintstep", "runstep", "cyclestam", "cycleskill1", "cycleskill2",
+        "swimstam", "swimunder", "drive1", "drive2", "drive3", "drive4", "fly1", "fly2", "fly3", "fly4", "bike1", "bike2",
+        "bike3", "bike4"},
+    ["player.stuntCounters"] = {"stunt1", "stunt2", "stunt3", "stunt4", "stunt5", "stunt6", "stunt7", "stunt8", "stunt9",
+        "stunt10", "stunt11", "stunt12", "stunt13"},
+    ["vehicles.turnAirResistance"] = {"turndamping"},
+    ["vehicles.gearChangeInertia"] = {"gearstep", "gearinertia", "gearsmooth1", "gearsmooth2"},
+    ["vehicles.gearChangeKick"] = {"gearkick", "gearkick2"},
+    ["vehicles.steerInputRate"] = {"carsteer1", "carsteer2", "bikesteer1", "bikesteer2", "planesteer1", "planesteer2",
+        "planesteer3", "planesteer4"},
+    ["vehicles.aircraftTurnResistance"] = {"flyturn1", "flyturn2", "flyturn3"},
+    ["vehicles.suspensionDampingLimit"] = {"springdamp"},
+    ["vehicles.suspensionLoadLean"] = {"loadlean"},
+    ["vehicles.restThreshold"] = {"carrest", "bikerest", "trailerrest"},
+    ["vehicles.movingParts"] = {"movingparts"},
+    ["vehicles.vehicleSinking"] = {"sink1", "sink2"},
+    ["vehicles.damagedPlaneControl"] = {"planeloss1", "planeloss2", "planeloss3", "sputter1", "sputter2"},
+    ["vehicles.hydraulicStance"] = {"hydraise", "hydlower"},
+    ["vehicles.boatWaves"] = {"boatwaves"},
+    ["vehicles.boatEngineSpeed"] = {"boatengine"},
+    ["vehicles.wheelSpin"] = {"wheelspin1", "wheelspin2", "wheelspin3", "wheelspin4", "wheelspin5", "wheelspin6"},
+    ["vehicles.burnout"] = {"burnspeed"},
+    ["vehicles.bikeWheelSpin"] = {"bikewheel1", "bikewheel2", "bikepitch", "bikerear1", "bikerear2"},
+    ["vehicles.bmxSprintLean"] = {"bmxsprint"},
+    ["vehicles.bmxLeanSettle"] = {"bmxlean1", "bmxlean2", "bmxlean3", "bmxlean4"},
+    ["vehicles.headBopping"] = {"headbop1", "headbop2"},
+    ["vehicles.wheelSettle"] = {"wheelsettle1", "wheelsettle2", "wheelsettle3", "wheelsettle4", "wheelsettle5", "wheelsettle6"},
+    ["vehicles.attachedEntitySpeed"] = {"attached"},
+    ["vehicles.aiAircraftSteer"] = {"aisteer"},
+    ["vehicles.upsideDownTimer"] = {"upsidestep"},
+    ["vehicles.wheelFriction"] = {"wheelfps"},
+    ["vehicles.sirenTap"] = {"siren"},
+    ["vehicles.heliRotorSpeed"] = {"heli1", "heli2"},
+    ["vehicles.skimmerResistance"] = {"boatwater"},
+    ["vehicles.doorSwing"] = {"chassis1", "chassis2", "doorangle", "doordamp1", "doordamp2", "doordamp3", "doordamp4"},
+    ["vehicles.jumpOutCarSpeed"] = {"jumpout1", "jumpout2", "jumpout3", "jumpout4", "jumpout5", "jumpout6"},
+    ["vehicles.physicsSleepRate"] = {"carsleep", "bikesleep", "bikeclamp", "objsleep", "trailersleep"},
+    ["vehicles.vehicleTimers"] = {"alarmstep", "aistep1", "aistep2", "aistep3", "flystep", "planestep", "bombstep"},
+    ["vehicles.burnTimers"] = {"carburn", "heliburn", "rcburn", "bikeburn", "boatburn"},
+    ["vehicles.waterCannon"] = {"cannon"},
+    ["world.fallingGlass"] = {"glass1", "glass2", "glass3"},
+    ["world.breakableObjectLifetime"] = {"breakobj"},
+    ["world.explosions"] = {"fuelstep", "fuelfx", "blastframes", "blastroll", "blastfire"},
+    ["world.fireSpread"] = {"firecar", "firespread", "firemerge"},
+    ["world.lightning"] = {"lightning1", "lightning2", "lightning3", "lightning4"},
+    ["world.sampObjectRotation"] = {"samprot", "sampmove"},
+    ["audio.engineRevs"] = {"enginerevs1", "enginerevs2"},
+    ["audio.ambientSounds"] = {"ambience1", "ambience2"},
+    ["menu.mapZoomWheel"] = {"mapwheel", "mapzoomin", "mapzoomout"},
+    ["camera.aimCameraShake"] = {"aimcam", "aimweapon", "aimzoom"},
+    ["weapons.continuousWeaponParticles"] = {"weaponfx"},
+    ["weapons.continuousWeaponAmmo"] = {"weaponammo"},
+    ["weapons.continuousWeaponShots"] = {"weaponshot", "weaponfire", "weaponwater"},
+    ["weapons.chainsawStrikeRate"] = {"chainsaw"},
+    ["weapons.tearGas"] = {"teargas"},
+    ["framerate.radioFrameLock"] = {"radiolock"},             -- no switch: always on there
+    ["camera.drunkCameraShake"] = {"shake"},
+    ["camera.idleCameraTimer"] = {"idlecam"},
+    ["world.missionTimers"] = {"onscreen", "scripttimer"},
+    ["particles.emissionRate"] = {"rocket", "wheeldirt", "planesmoke", "boatsplash1", "rain", "planedamage", "wheelsand",
+        "boatsplash2", "rainsplash", "planecontrol", "exhaust", "swimfx", "bubbles", "cannonfx"},
+    ["hud.hudTiming"] = {"money", "hudflash1", "hudflash2", "hudflash3", "hudflash4", "hudflash5", "hudflash6", "hudtime1", "hudtime2", "hudtime3", "hudtime4", "hudtime5", "hudtime6", "hudtime7", "hudtime8",
+        "hudtime9", "hudtime10", "hudtime11", "hudtime12", "hudtime13", "hudtime14", "hudtime15", "hudtime16",
+        "hudtime17", "hudtime18", "hudtime19", "hudtime20", "hudtime21", "hudtime22", "hudtime23", "hudtime24",
+        "hudtime25", "hudtime26", "hudtime27", "hudtime28", "hudtime29", "hudtime30", "hudtime31", "hudtime32",
+        "hudtime33", "hudtime34", "hudtime35", "hudtime36", "hudtime37", "hudtime38", "hudtime39", "hudtime40",
+        "hudtime41", "hudtime42", "hudtime43", "hudtime44", "hudtime45", "hudtime46"},
+}
+-- classicHandling=1 turns these of its switches off
+FPS.HFPS_CLASSIC = {turnAirResistance = true, aircraftTurnResistance = true, steerInputRate = true,
+    gearChangeInertia = true, gearChangeKick = true, suspensionDampingLimit = true, suspensionLoadLean = true,
+    wheelSlipRate = true}
+
+-- Its INI beside it (its own file name, .ini), or nil when it is not loaded
+function FPS.hfpsIni()
+    local ok, handle = pcall(getModuleHandle, FPS.HFPS_MODULE)
+    if not ok or not handle or handle == 0 then return nil end
+    local buf = ffi.new("char[260]")
+    local n = ffi.C.GetModuleFileNameA(ffi.cast("void*", handle), buf, 260)
+    return n > 0 and (ffi.string(buf, n):gsub("%.[^.\\/]*$", "") .. ".ini") or ""
+end
+
+-- -> "HighFpsFixes.asi" when it is loaded and fixes what row or option `key`
+-- does, else nil. Its INI is read once.
+function FPS.hfpsOwner(key)
+    if FPS.hfpsOwned == nil then
+        FPS.hfpsOwned = false
+        local path = FPS.hfpsIni()
+        if not path then return nil end
+        local ini, section = {}, ""
+        local f = path ~= "" and io.open(path, "r")
+        if f then
+            for line in f:lines() do
+                local s = line:match("^%s*%[([^%]]+)%]")
+                if s then section = s:lower() else
+                    local k, v = line:match("^%s*([^=;%s][^=]-)%s*=%s*(.-)%s*$")   -- as GetPrivateProfileString
+                    if k then ini[section .. "." .. k:lower()] = v end
+                end
+            end
+            f:close()
+        end
+        local function on(name, default)
+            local v = ini[name:lower()]
+            if v == "0" then return false elseif v == "1" then return true end
+            return default
+        end
+        local classic = on("vehicles.classicHandling", false)
+        FPS.hfpsOwned = {}
+        for name, keys in pairs(FPS.HFPS) do
+            if on(name, true) and not (classic and FPS.HFPS_CLASSIC[name:match("%.(.+)")]) then
+                for _, k in ipairs(keys) do FPS.hfpsOwned[k] = name end
+            end
+        end
+    end
+    return FPS.hfpsOwned and FPS.hfpsOwned[key] and FPS.HFPS_MODULE or nil
+end
+
 -- The block: four constants, then each stub. -> bytes, {name = va}. `game`
 -- moves the game globals the stubs read (the tests' harness).
 -- fWheelFriction as the five loads read it: 0xC2B9CC, or where a limit
@@ -2630,6 +2786,12 @@ function fixFrameRate(option)
         if va ~= 0xC2B9CC then
             log(string.format("[fixes] wheelfps: fWheelFriction is at 0x%X (the handling manager was moved)", va), "info")
         end
+    end
+    local hfps = FPS.hfpsOwner(option)
+    if hfps then
+        FPS.owner[option] = hfps
+        log(string.format("[fixes] %s: %s fixes the same; standing down", option, hfps), "info")
+        return 0
     end
     local mine = {}
     for _, site in ipairs(FPS.SITES) do if site.option == option then mine[#mine + 1] = site end end
@@ -3087,6 +3249,7 @@ pcall(ffi.cdef, [[
     const char* CrashFix_Name(int i);
     uint32_t CrashFix_Address(int i);
     int CrashFix_SetSampSite(uint32_t va);
+    int CrashFix_SetSampObjectSite(uint32_t va);
     void CrashFix_SetShadows(int volumetric);
     int CrashFix_Install(int i, uint32_t* found);
     int CrashFix_Uninstall(int i);
@@ -3152,14 +3315,24 @@ function fixCrashes(part)
     local changed = 0
     for i = 0, lib.CrashFix_Count() - 1 do
         local key = ffi.string(lib.CrashFix_Key(i))
-        if (key == "samp") == (part == "samp") then
+        if (key:sub(1, 4) == "samp") == (part == "samp") then
             local entry = crashFixes[key] or {name = ffi.string(lib.CrashFix_Name(i)), option = crashFixOption(lib, i), seen = 0}
             crashFixes[key] = entry
             local noun = CRASHFIX_NOUN[crashFixKind(entry.option)]
             if part == "samp" and lib.CrashFix_Installed(i) == 0 then
                 local base = getModuleHandle("samp.dll")
-                local site = base and base ~= 0 and findInSections(moduleSections(base), true, CRASHFIX_SAMP)
-                if site then lib.CrashFix_SetSampSite(site) end
+                local sections = base and base ~= 0 and moduleSections(base)
+                if key == "samp" then
+                    local site = sections and findInSections(sections, true, CRASHFIX_SAMP)
+                    if site then lib.CrashFix_SetSampSite(site) end
+                elseif sections and tonumber(lib.CrashFix_Address(i)) == 0 then
+                    -- the moving-object test, once in samp.dll: fld [esp+24h] / fcomp
+                    -- [esp+20h] / fnstsw ax / test ah, 1 / jne
+                    local move = string.char(0xD9, 0x44, 0x24, 0x24, 0xD8, 0x5C, 0x24, 0x20, 0xDF, 0xE0, 0xF6, 0xC4, 0x01, 0x0F, 0x85)
+                    local site = findInSections(sections, true, move)
+                    local again = site and findInSections(sections, true, move, site + 1)
+                    if site and not again then lib.CrashFix_SetSampObjectSite(site) end
+                end
             end
             entry.va = tonumber(lib.CrashFix_Address(i))
             if not crashFixWanted(key, entry.option) then
@@ -3168,6 +3341,11 @@ function fixCrashes(part)
                     log(string.format("[fixes] %s %s (%s): removed", noun, key, entry.name), "info")
                 end
                 entry.state, entry.why = "off", nil
+            elseif FPS.hfpsOwner(key) then
+                if lib.CrashFix_Installed(i) == 1 and lib.CrashFix_Uninstall(i) == 1 then changed = changed + 1 end
+                entry.state, entry.why = "conflict", FPS.hfpsOwner(key)
+                log(string.format("[fixes] 0x%X %s %s (%s): %s fixes the same; standing down",
+                    entry.va, noun, key, entry.name, entry.why), "info")
             elseif entry.va == 0 then
                 entry.state, entry.why = "refused", "its pattern is not in samp.dll"
                 log(string.format("[fixes] refusing %s %s (%s): %s", noun, key, entry.name, entry.why), "info")
@@ -3223,7 +3401,7 @@ end
 local CRASHFIX_OFF = {crash = "off (option crashfix)", glass = "off (option glasslist)", ped = "off (option pedmatrix)",
     sky = "off (option skygrad)", stream = "off (option streamtime)",
     draw = "off (option drawcount)", parked = "off (option parkedcol)",
-    frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps)"}
+    frame = "off (options turnfps, pedfps, vehiclefps, effectsfps, pushfps, swimfps, sirenfps, timerfps, camerafps, weaponfps)"}
 function crashFixState(kind)
     kind = kind or "crash"
     local off = CRASHFIX_OFF[kind]
@@ -3950,6 +4128,7 @@ end
 
     -- From the main loop, every frame
     function chuteTick()
+        if FPS.hfpsOwner("chutefps") then return end             -- it rewrites the same literals
         local code_, why = code()
         if not code_ then
             -- a new PLCHUTE is named on its first frame: only one missing 3 s is told

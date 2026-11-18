@@ -158,6 +158,8 @@
     H(stencilobj, "CStencilShadows::RenderForObject: a shadow mesh over 2048 vertices", 0x710471, 6, -1, \
         "\x85\xC0\xD9\x44\x24\x38") \
     H(ikchain, "IKChain_c::Init: a bone the ped's skin does not have", 0x6183B2, 6, -1, "\x50\xE8\x88\xC6\x11\x00") \
+    H(followtask, "CCam::Process_FollowPed_SA: a followed ped with no primary task", 0x523E6B, 7, -1, \
+        "\x8B\x10\x8B\xC8\xFF\x52\x10") \
     H(samp,"SA-MP's association helper: bad pointers", 0, 5, -1, "\x74\x12\x8B\x50\x10")
 
 #define DECLARE(k, name, va, len, mi, stock) void cf_hook_##k(void); volatile LONG cf_n_##k;
@@ -1460,6 +1462,18 @@ __asm__(
 "    fild dword ptr ds:0xB6FE34\n"
 "    GO 0x526FC6\n"
 
+/* CCam::Process_FollowPed_SA: the followed ped's active primary task in eax,
+ * null for a ped with none (spectating one): past the use-gun check */
+"HOOK followtask\n"
+"    test eax, eax\n"
+"    jz 1f\n"
+"    mov edx, dword ptr [eax]\n"
+"    mov ecx, eax\n"
+"    call dword ptr [edx+0x10]\n"
+"    GO 0x523E72\n"
+"1:  AVERTED followtask\n"
+"    GO 0x523EA0\n"
+
 /* CAnimBlendAssocGroup::CopyAnimation (this, id): the group and the id */
 "HOOK copyanim\n"
 "    pushad\n"
@@ -1603,6 +1617,7 @@ __asm__(
 #include "framerate.c"
 #include "vigilante.c"
 #include "mixsets.c"
+#include "hfps.c"
 #include "pedmatrix.c"
 #include "glasslist.c"
 #include "sky.c"
@@ -1614,7 +1629,7 @@ __asm__(
 /* ------------------------------------------------------------------------ */
 /* The table                                                                */
 /* ------------------------------------------------------------------------ */
-#define MAX_LEN 24
+#define MAX_LEN 32
 
 enum { KIND_JMP, KIND_NOP, KIND_PTR, KIND_CALL };   /* a jmp to the hook; NOPs; a dword = to; call to */
 
@@ -1636,8 +1651,15 @@ typedef struct {
 #define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k, "crashfix"},
 #define FROW(k, option, name, va, len, stock) {#k, name, va, len, -1, stock, cf_hook_##k, &cf_n_##k, option},
 #define PROW(k, option, kind, name, va, len, stock, to) {#k, name, va, len, -1, stock, NULL, &cf_n_##k, option, kind, to},
-static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) STREAM(FROW) DRAWCOUNT(FROW, PROW) PARKED(FROW) };
+static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) HFPS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) STREAM(FROW) DRAWCOUNT(FROW, PROW) PARKED(FROW) };
 #define HOOK_COUNT ((int)(sizeof hooks / sizeof hooks[0]))
+
+/* Whether the row `key` is in place (the hooks that depend on another's) */
+int cf_installed(const char *key)
+{
+    for (int i = 0; i < HOOK_COUNT; i++) if (!strcmp(hooks[i].key, key)) return hooks[i].installed;
+    return 0;
+}
 
 static int samp_hook(void)
 {
@@ -1705,6 +1727,25 @@ __declspec(dllexport) int __cdecl CrashFix_SetSampSite(uint32_t va)
     if (s < 0 || hooks[s].installed) return 0;
     hooks[s].va = va;
     cf_samp_check_site = va;
+    return 1;
+}
+
+/* SA-MP's moving-object test (the pattern D9 44 24 24 D8 5C 24 20 DF E0 F6 C4 01
+ * 0F 85, once in samp.dll): sampmove there, samprot 12Ch on, where its turn
+ * is. -> 1 set, 0 the turn is not where it should be */
+__declspec(dllexport) int __cdecl CrashFix_SetSampObjectSite(uint32_t va)
+{
+    int rot = -1, move = -1;
+    for (int i = 0; i < HOOK_COUNT; i++) {
+        if (!strcmp(hooks[i].key, "samprot")) rot = i;
+        if (!strcmp(hooks[i].key, "sampmove")) move = i;
+    }
+    if (rot < 0 || move < 0 || hooks[rot].installed || hooks[move].installed) return 0;
+    if (!readable((void *)va, 0x140) || memcmp((void *)(va + 0x12C), hooks[rot].stock, hooks[rot].len)) return 0;
+    hooks[move].va = va, hooks[rot].va = va + 0x12C;
+    cf_samp_rot_back = va + 0x12C + 10;
+    cf_samp_arrived = va + 19;
+    cf_samp_moving = va + 19 + *(const int32_t *)(va + 15);
     return 1;
 }
 

@@ -172,7 +172,7 @@ do
     local listing = {}
     for i = before + 1, #chat do if chat[i]:find('options: ', 1, true) then listing[#listing + 1] = chat[i] end end
     local all = table.concat(listing, ' ')
-    ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, boatfoam on, boatradio on, chutefps on, crashfix on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
+    ok(#listing >= 7 and all:find('keepcars on', 1, true) and all:find('wheelfps on', 1, true) and all:find('swimfps on', 1, true) and all:find('background on, boatfoam on, boatradio on, camerafps on, chutefps on', 1, true) and all:find('drift off', 1, true) and all:find('floatclock on', 1, true)
         and all:find('turnfps on', 1, true) and all:find('vehiclefps on', 1, true) and all:find('chutefps on', 1, true) and all:find('pedfps on', 1, true) and all:find('pushfps on', 1, true)
         and all:find('occluders on', 1, true) and all:find('plates o', 1, true) and all:find('textcache on', 1, true),
         'the options, six to a line, with their states: ' .. all)
@@ -1783,6 +1783,12 @@ do
 
 
     fakeFfi.load, fakeFfi.C.LoadLibraryA, fakeFfi.string = oldLoad, oldLL, oldString
+    local load = upvalue(env.fixCrashes, 'loadCrashFix')      -- the fake DLL goes with them
+    for i = 1, 200 do
+        local name = debug.getupvalue(load, i)
+        if not name then break end
+        if name == 'crashFixLib' then debug.setupvalue(load, i, nil) end
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -2435,6 +2441,46 @@ do
     env.io = envIo
     os.execute('rm -rf "' .. dir .. '"')
     putU32(0xA8B42C, 0); FPS.cleoState = nil
+end
+
+print('\n== HighFpsFixes.asi: what its INI leaves on stands ours down, the rest stays ours')
+do
+    local opts = upvalue(env.fixesCommand, 'options')
+    local hfpsIni = FPS.hfpsIni
+    FPS.hfpsOwned = nil
+    ok(FPS.hfpsOwner('push1') == nil and FPS.hfpsOwned == false, 'not loaded: nothing stands down')
+
+    local ini = '[player]\r\nswimmingMovement = 0\r\nclimbSpeed=1\r\ntaskTimers=0 ; a comment is part of it\r\n' ..
+        '[Vehicles]\r\nclassicHandling=1\r\nwheelFriction=2\r\n[particles]\r\nemissionRate=0\r\n'
+    local envIo = rawget(env, 'io')
+    env.io = setmetatable({open = function(path, mode)
+        if path ~= 'GAME\\scripts\\HighFpsFixes.ini' then return envIo.open(path, mode) end
+        local lines = {}
+        for l in ini:gmatch('[^\n]+') do lines[#lines + 1] = l end
+        return {lines = function() return coroutine.wrap(function() for _, l in ipairs(lines) do coroutine.yield(l) end end) end,
+            close = function() end}
+    end}, {__index = envIo})
+    FPS.hfpsIni, FPS.hfpsOwned = function() return 'GAME\\scripts\\HighFpsFixes.ini' end, nil
+    ok(FPS.hfpsOwner('push1') == 'HighFpsFixes.asi' and FPS.hfpsOwner('chutefps') == 'HighFpsFixes.asi',
+        'a switch missing from its INI is on')
+    ok(FPS.hfpsOwner('climb1') == 'HighFpsFixes.asi', 'climbSpeed=1')
+    ok(FPS.hfpsOwner('swimfps') == nil and FPS.hfpsOwner('swimsurface') == nil, 'swimmingMovement = 0')
+    ok(FPS.hfpsOwner('fallstep') == 'HighFpsFixes.asi', 'taskTimers=0 ; ...: not 0 to Windows either, so on')
+    ok(FPS.hfpsOwner('exhaust') == nil, 'emissionRate=0')
+    ok(FPS.hfpsOwner('turndamping') == nil and FPS.hfpsOwner('gearinertia') == nil,
+        'classicHandling=1 (any case section) turns its handling switches off')
+    ok(FPS.hfpsOwner('wheelfps') == 'HighFpsFixes.asi', 'a value not 0 or 1 is its default, on')
+    ok(FPS.hfpsOwner('carsettle') == nil, 'a row of ours it has none for')
+
+    fpsSession(); fpsStock()
+    opts.wheelfps, opts.swimfps = true, true
+    ok(env.fixFrameRate('wheelfps') == 0 and FPS.owner.wheelfps == 'HighFpsFixes.asi' and
+        same(get(0x6D6E69, 6), hex('D905CCB9C200')), 'wheelfps left to it, its bytes untouched')
+    ok(env.fixFrameRate('swimfps') == 3, 'swimfps ours')
+    env.stopFrameRate('swimfps')
+
+    FPS.hfpsIni, FPS.hfpsOwned, env.io = hfpsIni, nil, envIo
+    fpsSession(); fpsStock()
 end
 
 print('\n== an ASI a fix stood down for is named in chat once')

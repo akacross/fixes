@@ -32,6 +32,9 @@ Crashes:
 - A camera gone NaN (after a fall or a teleport): the world stopped drawing
   and the screen flashed until a respawn. It is set up again behind you on
   the next frame.
+- Spectating a ped that has no task: the camera crashed every frame (SA-MP
+  swallowed it as "Warning(s007) ... at 0x523E6B") and was left half
+  updated.
 - A null GXT string crashing `CMessages::GetStringLength`
   (gxt_crash_fix's fix).
 - SA-MP's removed-building table overflowing past 1000 entries (samp.dll).
@@ -118,12 +121,35 @@ Frame rate (each as at 30 fps, the rate the game was tuned for):
   only its steering. The tyre's skid test was measured and is the same at any
   fps, so it is left alone.
 - A ridden bike at rest no longer rocks at high fps.
+- From HighFpsFixes (sonochiwa), what fixes did not have:
+  - Timers that drop a frame's fraction of a millisecond keep it: the target
+    lock and other ped tasks, police, plane and car-bomb timers, drowning
+    (no damage above 150 fps), the idle camera, script and on-screen
+    timers, skill and stunt counters and every HUD timer.
+  - Vehicles: steering and plane controls ease as at 30 fps; an upshift kicks
+    the nose once, not every eleventh frame; aircraft turn and settle, the
+    suspension damps and the body leans as at 30 fps; forklift forks, the
+    dozer blade and ramps move (they stopped above 500 fps); sinking, a
+    damaged plane's controls, hydraulics, boat waves, wheels spinning in the
+    air, bike and BMX leans and wheels settling as at 30 fps.
+  - The world: fire spread, explosions (cut short at high fps), lightning,
+    the engine note, ambient gunfire, the jetpack flame, swim splashes and
+    bloody footprints as at 30 fps; SA-MP's slowly moving objects turn and
+    arrive.
+  - The on-foot camera turns and the aim camera holds still and zooms as at
+    30 fps; HUD flashes keep their rate; a wheel notch zooms the pause map.
+  - A spray, flame or extinguisher shows its particles, uses ammo and hurts
+    30 times a second; the chainsaw strikes 15 times a second; tear gas as
+    at 30 fps.
+  - A car radio no longer holds the game at 30 fps.
 
 If Car Speed FPS Fix (CLEO) is running, fixes leaves it and its file alone,
 turns its own coasting fix off so nothing is applied twice, and asks in chat
 (`/fixes cleo`, below). Swim FPS Fix.asi and gxt_crash_fix.asi, when
 installed, are left to do their part and named in chat; remove them if you
-want fixes' own.
+want fixes' own. With HighFpsFixes.asi installed, fixes reads its INI and
+stands down every fix of its own that does what one of its switches turned
+on does, so nothing is applied twice.
 
 Speed:
 - SA-MP's text (chat, nametags, labels) is laid out once and replayed, not
@@ -227,9 +253,12 @@ that averted a crash says so.
 | `wheelfps` | on | the coasting slow-down off the throttle is the same at any fps |
 | `swimfps` | on | swimming is as fast at any fps |
 | `floatfps` | on | buoyancy scaled as Swim FPS Fix does (boats too) |
-| `turnfps`, `pedfps`, `vehiclefps`, `effectsfps`, `pushfps` | on | MTA's frame-rate fixes (FramerateVigilante's doors and burnout under `vehiclefps`) |
+| `turnfps`, `pedfps`, `vehiclefps`, `effectsfps`, `pushfps` | on | MTA's frame-rate fixes (FramerateVigilante's and HighFpsFixes' under them too) |
 | `sirenfps` | on | a horn tap under 150 ms switches the siren at any fps |
 | `chutefps` | on | the parachute steers as at 30 fps |
+| `timerfps` | on | HUD timers and flashes, skills, stunts, ambient sounds and script timers in real time (HighFpsFixes) |
+| `camerafps` | on | the on-foot and aim cameras as at 30 fps (HighFpsFixes) |
+| `weaponfps` | on | spray, flame and extinguisher particles, ammo and damage, the chainsaw and tear gas as at 30 fps (HighFpsFixes) |
 | `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
 | `glasslist` | on | a car's see-through parts drawn in order past 20 |
 | `parkedcol` | on | a parked car standing still skips the collision step |
@@ -276,6 +305,10 @@ against gta_sa.exe's own code, and `position_guard_test.sh` and
   buoyancy fixes follow Swim FPS Fix.asi; the GXT fix follows gxt_crash_fix.
 - The door, burnout, swim and siren frame-rate fixes are from
   FramerateVigilante by [Junior_Djjr](https://github.com/JuniorDjjr) (MIT).
+- The timer, vehicle, world, camera, weapon and HUD frame-rate fixes under
+  `timerfps`, `camerafps`, `weaponfps` and the other frame-rate options are
+  from [HighFpsFixes](https://github.com/sonochiwa/sa-high-fps-fixes) by
+  **sonochiwa** (MIT).
 - The shadow, weapon icon, reload, skidmark, boat radio and wake fixes are
   from [SA-MixSets](https://github.com/CanerKaraca23/SA-MixSets) by
   **Junior_Djjr** (MIT).

@@ -68,7 +68,10 @@ default). `faultlog` (48, on by default) writes every crash-type exception,
 with the return addresses on its stack, to `logs\faults.log` as it happens. Since 0.26.0
 parked cars skip their collision step when it would change nothing (55, option
 `parkedcol`, on by default), and `drawcount` (54, off by default) counts the
-device's draw calls by what is drawn. It is published as a
+device's draw calls by what is drawn. Since 0.27.0 it carries HighFpsFixes'
+frame-rate fixes that it lacked and stands its own down where that mod is
+installed (56, options `timerfps`, `camerafps` and `weaponfps`, on by
+default; the rest under the other frame-rate options). It is published as a
 plain repo, https://gitlab.com/akacross/fixes (no updater, release zip per
 tag). It is outside the shared runtime except for two optional pieces:
 since 0.10.1 its lines go through `akacross.log` under the name `fixes`, to
@@ -1793,6 +1796,7 @@ that thunk.
 | pathnodes | 0x156F966 | path nodes that failed to allocate |
 | los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end): \|x\|, \|y\| over 16000 as MTA's, \|z\| over 1000000 (MTA's -5000 tripped at a server's z -10000; only x and y enter the sector walk) |
 | camnan | 0x526FC0 | a camera with a NaN or an infinity in its floats (it feeds it back to itself every frame, nothing is drawn and every line of sight starts nowhere): the bad floats zeroed, `CCam::Init` as on a change of mode with the mode kept, the source 4 behind and 1 above its target (or the player's ped) |
+| followtask | 0x523E6B | `CCam::Process_FollowPed_SA` asks the followed ped for its active primary task (0x681720) and reads its type without a null check: spectating a ped with none faulted every frame (SA-MP swallowed it as s007, 512 times on 2026-11-18, and the camera was left half done). With none it goes on past the use-gun check (0x523EA0), as for another task |
 
 **SA-MP moves the model infos.** SA-MP R5 copies
 `CModelInfo::ms_modelInfoPtrs` (0xA9B0C8) to its own 65535-entry array and
@@ -2799,3 +2803,73 @@ collision on (0x20000 clear), not be flagged to process even if stationary
 +0x73) all zero, compared as integers (-0 is zero). A car that is hit gets a
 speed and takes the game's path the same frame. Peds and objects always take
 it. `CrashFix_ParkedSkips` counts the skipped calls.
+
+## 56. HighFpsFixes' frame-rate fixes (options timerfps, camerafps, weaponfps)
+
+HighFpsFixes (sonochiwa's sa-high-fps-fixes, MIT, 1.9.0) fixes many
+frame-rate bugs 41 and 43 do not. `lib/fixes/native/hfps.c` has the ones
+SA-MP reaches, as crashfix.dll rows: stock bytes checked, another hook stood
+down for, a line each. New options `timerfps`, `camerafps` and `weaponfps`
+(on by default) and the existing `pedfps`, `vehiclefps`, `effectsfps`,
+`turnfps` and `framecaps` switch them.
+
+**Standing down for it.** When HighFpsFixes.asi is loaded, its INI beside it
+(its file name with `.ini`; a key missing or not `0`/`1` is on, as its
+`ReadSetting` has it, and `classicHandling=1` turns its handling keys off) is
+read once, and every row or option of ours that fixes the same behaviour
+stands down while its switch for it is on (`FPS.HFPS` in fixes.lua maps them):
+where it patches our bytes the row would anyway, and the map also covers what
+it fixes at another instruction (the swim speed it wraps at the caller, the
+ped push, the parachute's literals, the door dampings it takes at their
+shared `fmul`, the sleep counter's increment beside our threshold, the
+particles it gates in `AddParticle`). Its guard rewrites a site holding
+another mod's jump; ours never hold one it fixes, so they do not fight.
+
+**Per 30 fps step.** `cf_due30` says whether a 30 fps step ends this frame
+(every frame at or under 30 fps), once per frame for every caller, and counts
+the steps in `cf_steps30`. The rows that call C with the game's values on the
+x87 stack move them to memory first and use `pow3`, a pow in three registers:
+msvcrt's `pow` (behind MinGW's `powf`) wants the stack empty and returned NaN
+with one value on it.
+
+| option | keys | what |
+|---|---|---|
+| `pedfps`, `vehiclefps`, `timerfps` | 103 rows (`aimtime1`, ... `hudtime46`, `drown`) | a `call _ftol` of a frame's time keeps its fraction per call site (`cf_ftol_carry`, by return address; a second call in the frame with the same value gets the same integer): the target lock's 1200 ms, nine more task timers, the police AI, `FlyingControl`, the plane and car bomb timers, the upside-down check, a damaged engine's sputter, drowning's damage (none above 150 fps), the idle camera, on-screen countdowns, every script's TIMERA/B (SilentPatch's call there stands it down), 21 stat counters, 13 stunt counters and 46 HUD timers. They ran long at high fps and stopped above 1000 |
+| `vehiclefps` | `gearkick`, `gearkick2` | `JustFinishedAccelerationLoop` declares the acceleration loop ended after 10 frames, which kicks the nose up on an upshift: 9 ms at 1000 fps, where it kicked every eleventh frame. Both reads take `round(10 / ratio)` |
+| `vehiclefps` | `carsteer1`-`2`, `bikesteer1`-`2`, `planesteer1`-`4` | the steering and control surfaces ease to the pad by `0.2 * timestep` a frame; `1 - (1 - 0.3333)^ratio` closes per second what a 30 fps step does |
+| `turnfps` | `flyturn1`-`3` | `FlyingControl` raises each axis's turn resistance to `timestep²`, so an aircraft held far more turn per second at high fps (and with `turndamping`'s 0.99 turned faster than at 30). The first timestep is 1.6667 |
+| `vehiclefps` | `springdamp`, `loadlean` | `ApplySpringDampening` takes `min(timestep * level, 0.25)` a frame: at 30 fps a level over 0.15 is capped, at high fps it is not (a third more damping). The level becomes the one that takes per second what the capped step does. `loadlean` keeps each entity's speeds at the start of `CPhysical::ProcessControl`, and the damper bites the speed the frame has added so far as a 30 fps step does, so the body leans as far under a cornering or braking load |
+| `vehiclefps` | `carrest`, `bikerest`, `trailerrest`, `objsleep`, `trailersleep` | `m_fMovingSpeed` (a distance per frame) as a 30 fps step's against the rest limit; an object's and a trailer's still frames counted per 30 fps step (cars and bikes have `carsleep`, `bikesleep`) |
+| `vehiclefps` | `movingparts` | `UpdateMovingCollision` truncated each frame's step of the forks, blade, bed and ramps: 300 units a second for 480 at 300 fps, nothing above 500. The 30 fps step per 30 fps step, its fraction kept per vehicle |
+| `vehiclefps` | `sink1`-`2`, `boatwaves`, `boatengine`, `hydraise`, `hydlower` | a car under water and a burnt-out boat sink per 30 fps step; a boat's wave slam from the rise over a 30 fps step; a coasting propeller's 0.95; a hydraulic car's stance steps per 30 fps step |
+| `vehiclefps` | `planeloss1`-`3` | a damaged part costs a slewed control `1 - 0.2 * status` a frame; each part's share settles where a 30 fps step does, under this frame's slew |
+| `vehiclefps` | `wheelspin1`-`6`, `burnspeed`, `bikewheel1`-`2`, `bikepitch`, `bikerear1`-`2` | a wheel in the air spins up (-0.1), back (+0.05) and down (0.95) per 30 fps step; the burnout's 3000; a free bike wheel's decay and turn, the rear wheel's speed limit |
+| `vehiclefps` | `bmxsprint`, `bmxlean1`-`4`, `headbop1`-`2`, `wheelsettle1`-`6` | the BMX rider's leans, the driver's head bop, a bike's or aircraft's wheel easing down (0.75 of the gap) per 30 fps step |
+| `vehiclefps` | `attached`, `aisteer` | `PositionAttachedEntity` and the aircraft autopilot divide by `max(1, timestep)`, short by the ratio above 50 fps: the timestep itself |
+| `pedfps` | `drunksteer`, `pickup1`-`2` | a drunk's 10-deep steering delay shifts per 30 fps step (9 frames was 4.5 ms at 2000 fps); the step onto a box takes a 30 fps step's share |
+| `timerfps` | `fatcount`, `hudflash1`-`6`, `ambience1`-`2`, `mapwheel`, `mapzoomin`, `mapzoomout` | fat burns with the remainder kept (none under rate 5 at 500 fps); the HUD flashes on game ms / 40; distant gunfire and the foghorn every 1024 30 fps steps; a map wheel notch zooms past the 20 ms repeat on its first frame |
+| `effectsfps` | `firecar`, `firespread`, `firemerge`, `blastframes`, `blastroll`, `blastfire`, `lightning1`-`4` | a fire's rolled events, an explosion's second blast and setting its victim alight, a lightning burst's start and end, per 30 fps step; an explosion's frame count stops at 255 (it wrapped at 0.85 s at 300 fps); a burst measured in 30 fps steps |
+| `effectsfps` | `footprints`, `jetflame1`-`2`, `swimsplash1`-`4`, `enginerevs1`-`2` | bloody footprints fade, the jetpack's flame ramps, a sprinting swimmer splashes, the engine note follows the pedal, per 30 fps step |
+| `effectsfps` | `samprot`, `sampmove` | SA-MP's `CObject::Process` turns a moving object by how far it has come and calls it arrived when the step would pass the rest: a server moving it by millimetres a frame left it under float precision at high fps, never turning or arriving. Both from SA-MP's own elapsed * speed. Found in samp.dll by the arrival test's 15 bytes (once), the turn 12Ch on |
+| `camerafps` | `aimcam`, `aimweapon`, `aimzoom` + a game patch at 0x52381D | aiming on foot, `CCamera::Process` and `Process_AimWeapon` run with the timestep at least 1 (the aim camera shook at high fps), the zoom with the real one; the on-foot camera's `max(1, timestep)` clamp NOPed as the car camera's is |
+| `weaponfps` | `weaponfx`, `weaponammo`, `weaponshot`, `weaponfire`, `weaponwater`, `chainsaw`, `teargas` | a spray's or flame's emitter keeps its particle fraction (none came out at high fps); a flamethrower, spraycan or extinguisher takes ammo and adds its shot 30 a second, the extinguisher's water a 30 fps step's worth; the chainsaw's rewind held to a strike every 2/30 s (45 a second at 144); tear gas's roll per 30 fps step |
+| `framecaps` | `radiolock` | the main loop held the frame limiter while the player's car radio had a beat track: a car ride at 30 fps. Only the dance and lowrider minigames keep it |
+
+Not taken: the gang war timers, the burglary and mission literals, the stunt
+jump camera, the cop's car exit and the SWAT ropes (single player); the wheel
+slip rate (41: the skid test is fps-neutral in a closed loop); the rifle's
+aim-walk step (samp.dll gives `ControlGunMove` its own timestep); the
+on-rails wheel spin; its buoyancy threshold (`floatfps` takes the same span);
+the climb's clamp (`climb1`-`2`); the bike lean target, the abandoned bike's
+substeps and the takeoff pitch (experiments there); `AddParticle`'s general
+gate (`effectsfps` gates the per-frame emitters at their callers); the frame
+limits and the footprints' height.
+
+Tests: fixes_test checks the INI (a missing key on, `0`, `1`, a comment that
+makes it neither, `classicHandling`) and that `wheelfps` stands down while
+`swimfps` stays; crashfix_dll_test checks every row on the stock bytes, the
+carry (1000 ms in 600 frames at 600 fps, the same integer twice, `ecx` and the
+x87 stack as `_ftol` leaves them), the steering, the kick count, an
+aircraft's turn per second, the damper, the wave, the step thunks, the 30 fps
+steps, fat, ammo, shots, the chainsaw, the HUD flash, footprints, the aim
+hold and samp.dll's object site.
