@@ -48,6 +48,8 @@ stub = (b'\x68' + struct.pack('<I', name) + b'\xFF\x15' + struct.pack('<I', lla)
 assert len(stub) == 48
 stub += b'crashfix_dll_test.dll\0run\0'
 d[off(entry):off(entry) + len(stub)] = stub
+for i in range(nsec):                               # the tests write code: stock maps it read-only
+    struct.pack_into('<I', d, opt + optsz + 40 * i + 36, struct.unpack_from('<I', d, opt + optsz + 40 * i + 36)[0] | 0x80000000)
 open(sys.argv[2], 'wb').write(d)
 PY
 cd "$work"

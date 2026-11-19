@@ -2456,6 +2456,27 @@ __declspec(dllexport) int __cdecl run(void)
         }
     }
 
+    printf("== anisotropic magnification (anisomag): MAGFILTER linear for an anisotropic texture\n");
+    {
+        /* the hook's return lands on `pop eax; ret`: eax is the MAGFILTER it pushed */
+        uint8_t *back = (uint8_t *)0x7FDFAE, saved[2] = {back[0], back[1]};
+        DWORD old;
+        VirtualProtect(back, 2, PAGE_EXECUTE_READWRITE, &old);
+        back[0] = 0x58, back[1] = 0xC3;
+        static uint32_t rw[0x40];                       /* [edi+0xC9894C] lands in rw[0] */
+        uint32_t entry = hook_of("anisomag"), edi = (uint32_t)rw - 0xC9894C, pushed[3];
+        uint32_t filters[3] = {3, 2, 1};
+        for (int i = 0; i < 3; i++) {
+            __asm__ volatile("push %%ebx\n\tmov %2, %%ebx\n\tcall *%1\n\tpop %%ebx"
+                             : "=a"(pushed[i]) : "r"(entry), "r"(filters[i]), "D"(edi) : "ecx", "edx", "memory", "cc");
+            filters[i] = rw[0];
+        }
+        back[0] = saved[0], back[1] = saved[1];
+        VirtualProtect(back, 2, old, &old);
+        ok(pushed[0] == 2 && filters[0] == 2, "anisotropic (3) magnifies linearly (2), and RW's copy says so");
+        ok(pushed[1] == 2 && filters[1] == 2 && pushed[2] == 1 && filters[2] == 1, "linear and point pass through");
+    }
+
     printf("== faults.c: a fault in the game's code, with its callers, in faults.log\n");
     faults_test(path);
 

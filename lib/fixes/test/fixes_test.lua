@@ -35,6 +35,8 @@ local function get(va, n) local t = {} for i = 1, n do t[i] = mem[va + i - 1] or
 local function same(a, b) for i = 1, #b do if a[i] ~= b[i] then return false end end return true end
 local SETUP, RESET = 0x6D6517, 0x6D0E43
 put(SETUP, 0x75, 0x08); put(RESET, 0x75, 0x13)   -- stock: the automobile-only guards
+local MODES, VMS = 0x745BC9, 0x7459E1
+put(MODES, 0x7A, 0x6D); put(VMS, 0x7A, 0x71)    -- stock: the aspect ratio filters' jp
 
 local function getU32(va)
     return (mem[va] or 0) + (mem[va + 1] or 0) * 0x100 + (mem[va + 2] or 0) * 0x10000 + (mem[va + 3] or 0) * 0x1000000
@@ -97,6 +99,7 @@ local env = setmetatable({
     end,
     script_name = function() end, script_version = function() end,
     getWorkingDirectory = function() return 'ML' end,
+    getGameDirectory = function() return 'GAME' end,
     addEventHandler = function(name, f) events[name] = f end,
     getModuleHandle = function(name)
         if name == 'samp.dll' then return sampBase end
@@ -184,6 +187,52 @@ ok(chat[#chat]:find('textcache off: 1 site', 1, true), '/fixes textcache off tak
 env.fixesCommand('textcache on')
 ok(chat[#chat]:find('textcache on: 0 site', 1, true), 'on again: nothing to hook here (no d3dx9_25.dll): ' .. tostring(chat[#chat]))
 ok(printed[#printed]:find('text cache', 1, true), 'and said why: ' .. tostring(printed[#printed]))
+print('\n== widemodes: on by default, and /fixes widemodes off puts both filters back')
+ok(same(get(MODES, 2), {0x90, 0x90}) and same(get(VMS, 2), {0x90, 0x90}), 'both filters NOPed by default')
+env.fixesCommand('widemodes off')
+ok(same(get(MODES, 2), {0x7A, 0x6D}) and same(get(VMS, 2), {0x7A, 0x71}), 'both filters stock again')
+ok(chat[#chat]:find('2 site', 1, true), 'and said: ' .. tostring(chat[#chat]))
+env.fixesCommand('widemodes on')
+ok(same(get(MODES, 2), {0x90, 0x90}) and same(get(VMS, 2), {0x90, 0x90}), 'and NOPed again')
+print('\n== poollimits: copied beside gta_sa.exe, replaced when it changed, taken out when off')
+do
+    local disk = {['ML\\lib\\fixes\\poollimits.asi'] = 'ASI-v2'}
+    local realOpen = env.io.open
+    env.io = {open = function(path, mode)
+        if path:find('poollimits', 1, true) then
+            if mode == 'rb' then
+                local d = disk[path]
+                if not d then return nil end
+                return {read = function() return d end, close = function() end}
+            end
+            return {write = function(_, data) disk[path] = data end, close = function() end}
+        end
+        return realOpen(path, mode)
+    end}
+    env.os = setmetatable({remove = function(path) disk[path] = nil; return true end,
+        rename = function(from, to)
+            if not disk[from] then return nil end
+            disk[to], disk[from] = disk[from], nil
+            return true
+        end}, {__index = os})
+    local notice = env.fixPoolLimits(true)
+    ok(disk['GAME\\poollimits.asi'] == 'ASI-v2' and notice and notice:find('installed', 1, true), 'installed: ' .. tostring(notice))
+    ok(env.fixPoolLimits(true) == nil, 'in place: nothing to say')
+    disk['GAME\\poollimits.asi'] = 'ASI-v1'
+    notice = env.fixPoolLimits(true)
+    ok(disk['GAME\\poollimits.asi'] == 'ASI-v2' and disk['GAME\\poollimits.asi.old'] == 'ASI-v1'
+        and notice and notice:find('updated', 1, true), 'an older copy renamed away and replaced: ' .. tostring(notice))
+    env.fixPoolLimits(true)
+    ok(disk['GAME\\poollimits.asi.old'] == nil, 'the renamed copy is deleted on the next run')
+    notice = env.fixPoolLimits(false)
+    ok(disk['GAME\\poollimits.asi'] == nil and notice and notice:find('taken out', 1, true), 'off takes our copy out: ' .. tostring(notice))
+    disk['GAME\\poollimits.asi'] = 'SOMEONE-ELSES'
+    ok(env.fixPoolLimits(false) == nil and disk['GAME\\poollimits.asi'] == 'SOMEONE-ELSES', 'off leaves a copy that is not ours')
+    disk['ML\\lib\\fixes\\poollimits.asi'] = nil
+    ok(env.fixPoolLimits(true) == nil and disk['GAME\\poollimits.asi'] == 'SOMEONE-ELSES', 'no bundled copy: nothing touched')
+    env.io, env.os = {open = realOpen}, nil
+end
+
 env.fixesCommand('plates maybe')
 ok(chat[#chat]:find('on|off', 1, true), 'a bad value gets the usage')
 
@@ -1122,6 +1171,17 @@ ok(same(get(0x550F82, 4), {0x50, 0x34, 0x03, 0x00}) and same(get(0x550FBA, 2), {
 for _, n in ipairs({'value_550F82_8000', 'patch_550FBA', 'placeableMatrixArraySize'}) do
     local line = findPrinted(n)
     ok(line and line:find('owned by samp.dll', 1, true) and not line:find('refusing', 1, true), 'named, not refused: ' .. tostring(line))
+end
+
+print('\n== MTA patches: poollimits.asi\'s bigger pools are its')
+stockMta()
+put(0x550F82, 0x00, 0x7D, 0x00, 0x00)                      -- 32000
+put(0x550FBA, 0x0F, 0x27)                                  -- 9999
+env.applyGamePatches('late')
+ok(same(get(0x550F82, 4), {0x00, 0x7D, 0x00, 0x00}) and same(get(0x550FBA, 2), {0x0F, 0x27}), 'not shrunk to MTA\'s 8000 and 4096')
+for _, n in ipairs({'value_550F82_8000', 'patch_550FBA'}) do
+    local line = findPrinted(n)
+    ok(line and line:find('owned by poollimits.asi', 1, true), 'named, not refused: ' .. tostring(line))
 end
 
 print('\n== GTA frame delay: SA-MP 0.3.DL\'s 2 ms wait is written over, and given back off')
@@ -2120,7 +2180,7 @@ env.doesFileExist = function(path) return path == 'GAME\\skygfx.ini' end
 allocs = 0
 ok(env.fixFogRestore() == false and allocs == 0 and same(get(FOG_A, 7), hex(FOG_A_STOCK)), 'skygfx.ini: not applied')
 ok(printed[#printed]:find('skygfx.ini is here', 1, true), 'said: ' .. tostring(printed[#printed]))
-env.getGameDirectory, env.doesFileExist = nil, nil
+env.getGameDirectory, env.doesFileExist = function() return 'GAME' end, nil
 
 print('\n== fog restore: a site that is not stock and no hook: refused, nothing written')
 fogSession(); fogStock()
@@ -2437,7 +2497,8 @@ do
     env.fixesCommand('cleo remove')
     ok(said('No Car Speed FPS Fix .cs file', from), 'nothing left to remove')
 
-    env.getGameDirectory, env.findFirstFile, env.findNextFile, env.findClose, env.os = nil, nil, nil, nil, nil
+    env.findFirstFile, env.findNextFile, env.findClose, env.os = nil, nil, nil, nil
+    env.getGameDirectory = function() return 'GAME' end
     env.io = envIo
     os.execute('rm -rf "' .. dir .. '"')
     putU32(0xA8B42C, 0); FPS.cleoState = nil

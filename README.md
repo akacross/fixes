@@ -82,6 +82,16 @@ Game bugs:
 - An unfocused window pauses the game: with `unfocused` on it keeps running
   behind another window, and the cursor stays where you put it.
 - Textures are filtered anisotropically, 16x or the most the device offers.
+  Up close they magnify linearly: anisotropic magnification is a feature many
+  Direct3D 9 drivers lack, and it could leave close-up textures such as wheels
+  white.
+- A big server map fills the game's pools: the stock 2500 dummies (4000 under
+  SA-MP R1) and 13000 buildings run out and the game crashes at 0x538103.
+  `poollimits.asi`, which fixes copies beside `gta_sa.exe`, raises 23 pool
+  sizes before the game builds them (90000 buildings, 25000 dummies, 101500
+  collisions...). It raises them again after SA-MP writes its own, and never
+  lowers a bigger one. The game's code has to be patched before any script
+  runs, so this one part is an ASI. It takes effect from the next launch.
 
 From SA-MixSets (Junior_Djjr), the fixes fixes did not have and SA-MP allows:
 - A car's shadow and its headlight glow on the ground move in steps: they
@@ -184,6 +194,7 @@ keeping the paths:
 moonloader/fixes.lua
 moonloader/lib/fixes/text_cache.dll
 moonloader/lib/fixes/crashfix.dll
+moonloader/lib/fixes/poollimits.asi        (fixes copies it beside gta_sa.exe)
 moonloader/lib/signature_scanner/        (the whole folder)
 ```
 
@@ -265,6 +276,8 @@ that averted a crash says so.
 | `skygrad` | on | the sky drawn dithered, without colour bands |
 | `novsyncreset` | on | the Frame Limiter and loading screens do not reset the graphics device for vsync |
 | `anisotropic` | on | anisotropic texture filtering, 16x or the device's most |
+| `poollimits` | on | bigger pools through poollimits.asi beside gta_sa.exe, from the next launch |
+| `widemodes` | on | 16:9 and the other resolutions the game hides are listed |
 | `unfocused` | off | the game keeps running while another window has focus |
 | `smoothshadows`, `weaponicon`, `doubleskid`, `boatradio`, `boatfoam` | on | SA-MixSets' fixes above |
 | `scrollreload` | off | the mouse wheel does not cancel a reload (changes weapon switching) |
@@ -280,12 +293,14 @@ Options are saved in `moonloader/config/fixes.json`.
 
 ## Build the DLLs
 
-`lib/fixes/native/build.sh` builds `lib/fixes/text_cache.dll` and
-`lib/fixes/crashfix.dll` with mingw (i686-w64-mingw32). Under Wine,
+`lib/fixes/native/build.sh` builds `lib/fixes/text_cache.dll`,
+`lib/fixes/crashfix.dll` and `lib/fixes/poollimits.asi` with mingw
+(i686-w64-mingw32). Under Wine,
 `lib/fixes/test/text_cache_dll_test.sh` tests the text cache against the real
 d3dx9_25.dll, and `lib/fixes/test/crashfix_dll_test.sh` runs the crash fixes
 against gta_sa.exe's own code, and `position_guard_test.sh` and
-`fps_fixes_test.sh` run the position guard and the frame-rate code.
+`fps_fixes_test.sh` run the position guard and the frame-rate code, and
+`poollimits_test.sh` loads the ASI in a copy of gta_sa.exe.
 `luajit lib/fixes/test/fixes_test.lua` tests the script.
 
 ## Credits

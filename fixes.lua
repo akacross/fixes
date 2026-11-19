@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.1")
+script_version("0.27.2")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -555,12 +555,14 @@ local gamePatches = {
     {   -- NOP the last `jp reject` of the height/width whitelist, which only
         -- allows 0.8, 0.75, 0.6 and 0.625 and therefore drops every 16:9 mode.
         -- The 640x480 minimum and the VRAM check are left in place
+        -- (option widemodes). The game saves the resolution as a place in this
+        -- list, so the extra modes can move a saved one to another mode
         name = "GetVideoModeList aspect ratio filter",
-        va = 0x745BC9, from = hexBytes("7A 6D"), to = nops(2)
+        va = 0x745BC9, from = hexBytes("7A 6D"), to = nops(2), option = "widemodes"
     },
     {
         name = "FillAvailableVMs aspect ratio filter",
-        va = 0x7459E1, from = hexBytes("7A 71"), to = nops(2)
+        va = 0x7459E1, from = hexBytes("7A 71"), to = nops(2), option = "widemodes"
     },
     {   -- NOP the `m_nVehicleType != VEHICLE_TYPE_AUTOMOBILE` guard around
         -- CustomCarPlate_BeforeRenderingStart / _AfterRenderingStop so bikes,
@@ -729,7 +731,7 @@ end
 -- "mtapatches".
 local MTA_PATCHES = {     -- va, name, stock, theirs
     {0x8A5A84, "value_8A5A84_127", "16 00 00 00", "7F 00 00 00"},
-    {0x550F82, "value_550F82_8000", "00 7D 00 00", "40 1F 00 00"},
+    {0x550F82, "value_550F82_8000", "80 0C 00 00", "40 1F 00 00"},
     {0x742685, "jmp_742685", "0F 84", "90 E9"},
     {0x7399B0, "disableRemoveAllProjectiles", "53", "C3"},
     {0x4629E0, "disableGenerateRoadblocks", "6A", "C3"},
@@ -750,7 +752,7 @@ local MTA_PATCHES = {     -- va, name, stock, theirs
     {0x559760, "ret_559760", "6A", "C3"},
     {0x53BC78, "disableMenuAfterAltTab", "01", "00"},
     {0x6F2089, "patch_6F2089", "E8 02 93 EA FF", "58 90 90 90 90"},
-    {0x550FBA, "patch_550FBA", "0F 27", "00 10"},
+    {0x550FBA, "patch_550FBA", "F4 01", "00 10"},
     {0x5E68A0, "jmp_5E68A0", "74", "EB"},
     {0x561FA4, "disableWantedHelis", "74 03", "90 90"},
     {0x53BFF6, "disableWantedUpdateEachFrame", "E8 65 63 02 00", "90 90 90 90 90"},
@@ -810,6 +812,8 @@ local SAMP_WRITES = {          -- what samp.dll writes at a site of these: R5, D
 }
 local MTA_OWNERS = {           -- another mod's bytes at a site of these
     [0x7469A0] = {bytes = hexBytes("30 C0 90 90"), by = "SilentPatch (xor al,al: the same non-exclusive mouse)"},
+    [0x550F82] = {bytes = hexBytes("00 7D 00 00"), by = "poollimits.asi (32000, more than MTA's 8000)"},
+    [0x550FBA] = {bytes = hexBytes("0F 27"), by = "poollimits.asi (9999, more than MTA's 4096)"},
 }
 -- Data the game sets during init, before any script: its stock value is that,
 -- not the exe file's. Any other value was set on purpose and stands down.
@@ -940,7 +944,7 @@ local OPTIONS = {
             return (stopFrameCap() and 1 or 0) + fixCrashes("game"), 0
         end},
     anisotropic = {default = true, label = "anisotropic texture filtering, 16x or the most the device offers",
-        apply = function(on) return fixAnisotropic(on) and 1 or 0, 0 end},
+        apply = function(on) return (fixAnisotropic(on) and 1 or 0) + fixCrashes("game"), 0 end},
     mtapatches = {default = true, label = "MTA's multiplayer patches (73 sites, as crashes.asi applies them with SA-MP)"},
     wheelfps = {default = true, label = "the coasting slow-down off the throttle is the same at any fps (cars stop dead at high fps)",
         apply = function(on)
@@ -1058,6 +1062,11 @@ local OPTIONS = {
     novsyncreset = {default = true,
         label = "the Frame Limiter and loading screens do not reset the device for vsync (a failed reset crashed at 0x7F9A3C)"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
+    poollimits = {default = true,
+        label = "bigger pools (90000 buildings, 101500 collisions...) through poollimits.asi beside gta_sa.exe, from the next launch",
+        apply = function(on) fixPoolLimits(on); return 1, 0 end},
+    widemodes = {default = true,
+        label = "16:9 and the other resolutions the game hides are listed (a saved resolution may move to another mode; SA-MP draws a bigger radar at 16:10 and wider)"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
     smoothshadows = {default = true, label = "car shadows and headlight glows move smoothly on the ground (MixSets)"},
     weaponicon = {default = true, label = "the HUD weapon icon square, not stretched (MixSets)"},
@@ -1971,6 +1980,79 @@ function fixAnisotropic(on)
         on and (level .. "x") or "off", AF.CTOR, level, okSweep and tostring(count) or "no",
         verified and "in place" or "WRITE DID NOT STICK"), verified and "info" or "warn")
     return verified
+end
+end
+
+--------------------------------------------------------------------------------
+-- Bigger pools (option poollimits)
+--------------------------------------------------------------------------------
+-- The game builds its pools in CGame::Initialise, before any script runs, so
+-- their sizes can only be raised by code that loads earlier: lib\fixes\
+-- poollimits.asi (lib/fixes/native/poollimits.c), which this copies beside
+-- gta_sa.exe for the ASI loader. A copy that changed is replaced, the loaded
+-- one renamed away first (Windows renames a loaded DLL but will not overwrite
+-- it). Off renames our copy away. Either takes effect at the next launch.
+do   -- a block: the chunk is at Lua's 200 locals
+local PL = {NAME = "poollimits.asi", BUILDINGS = 0xB74498, DUMMIES = 0xB744A0}  -- CPools::ms_p*Pool
+
+-- -> "90000 buildings, 25000 dummies", the sizes the game built its pools with
+function PL.sizes()
+    local function size(ptr)
+        local okPool, pool = pcall(readU32, ptr)
+        if not okPool or pool == 0 then return "?" end
+        local okSize, n = pcall(readU32, pool + 8)               -- CPool::m_nSize
+        return okSize and tostring(n) or "?"
+    end
+    return ("%s buildings, %s dummies"):format(size(PL.BUILDINGS), size(PL.DUMMIES))
+end
+
+function PL.read(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a")
+    f:close()
+    return data
+end
+
+function PL.write(path, data)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    f:write(data)
+    f:close()
+    return PL.read(path) == data
+end
+
+-- -> a line for chat when the next launch changes something, or nil
+function fixPoolLimits(on)
+    local dst = getGameDirectory() .. "\\" .. PL.NAME
+    local ours = PL.read(getWorkingDirectory() .. "\\lib\\fixes\\" .. PL.NAME)
+    local there = PL.read(dst)
+    os.remove(dst .. ".old")
+    local now = PL.sizes() .. " (stock: 13000, 2500)"
+    if not on then
+        if there and there == ours and os.rename(dst, dst .. ".old") then
+            log("[fixes] pool limits off: poollimits.asi taken out; the pools are stock from the next launch", "info")
+            return "poollimits.asi taken out: the pools are stock from the next launch"
+        end
+        log("[fixes] pool limits off; this session's pools: " .. now, "info")
+        return nil
+    end
+    if not ours then
+        log("[fixes] pool limits: lib\\fixes\\poollimits.asi is missing; nothing to install", "warn")
+        return nil
+    end
+    if there == ours then
+        log("[fixes] pool limits: poollimits.asi in place; this session's pools: " .. now, "info")
+        return nil
+    end
+    if there then os.rename(dst, dst .. ".old") end
+    if not PL.write(dst, ours) then
+        log("[fixes] pool limits: could not write " .. dst, "warn")
+        return nil
+    end
+    log(("[fixes] pool limits: poollimits.asi %s beside gta_sa.exe; this session's pools: %s, bigger from the next launch")
+        :format(there and "updated" or "installed", now), "info")
+    return "poollimits.asi " .. (there and "updated" or "installed") .. ": restart the game for the bigger pools"
 end
 end
 
@@ -5131,6 +5213,7 @@ function main()
         if not optionOn(p) then revertGamePatch(p) end
     end
     reportGameInitState()
+    local poolNotice = fixPoolLimits(options.poollimits)
     applyGamePatches("early")
     local worked = fixAnimationWipe()            -- gta_sa.exe code too: before any ped changes its skin
     noteFix("animation wipes", worked, animWipe and animWipe.owner)
@@ -5166,6 +5249,7 @@ function main()
 
     -- Past here we need the game and SA-MP actually initialised.
     while not isSampAvailable() do wait(0) end
+    if poolNotice then say(poolNotice) end
 
     -- First: a server sends its removed buildings as soon as it accepts the
     -- connection.

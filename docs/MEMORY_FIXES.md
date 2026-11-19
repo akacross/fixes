@@ -542,6 +542,13 @@ the `(WIDESCREEN)` suffix to the `"%lu x %lu x %lu %s"` label.
 `GetVideoModeList` still enforces the separate 640x480 minimum and the VRAM
 budget check at 0x745BF6; neither is touched.
 
+Both sit behind the `widemodes` option (on by default). The game saves the
+resolution as an index into this list, so the extra modes can move a saved
+resolution to another mode. At 16:10 and wider, SA-MP's HUD scale fix
+(samp.dll+0xA2400, `/hudscalefix`) draws the radar at 96 x 82 with its own
+HUD scale. To someone who didn't change anything, that looks like fixes
+resized the radar.
+
 `crashes.asi` carries the same pair in its `display.allResolutions` module,
 guarded by the same expected bytes `7A 6D` / `7A 71`, and `SAMPGraphicRestore.asi`
 (installed here) writes exactly `90 90` to both - so these normally land as
@@ -2547,9 +2554,19 @@ pool that exist already (SA-MP's and scripts' own) keep what they have.
 Mipmaps are not made: a texture with none gets the filter and nothing to
 blend between.
 
+Filter 7 sets the same value, `D3DTEXF_ANISOTROPIC`, as both `MINFILTER` and
+`MAGFILTER`. Anisotropic magnification is an optional cap
+(`D3DPTFILTERCAPS_MAGFANISOTROPIC`) that many drivers lack. DXVK accepts it,
+but on native Direct3D 9 a texture seen up close (wheels, for one) can come out
+white. crashfix row `anisomag` (0x7FDFA7, 7 bytes, `push ebx` / `mov
+[edi+0xC9894C], ebx`) pushes and records `D3DTEXF_LINEAR` for the mag filter
+when the value is anisotropic, and passes every other value through. The
+`anisotropic` option switches the row along with the levels.
+
 **Tests.** `fixes_test.lua`: refused on a device with none; 8 and 16; both
 loaded textures set and a free slot skipped; off puts 1 back; another
-instruction at the site refused.
+instruction at the site refused. `crashfix_dll_test.c`: anisomag pushes and
+records 2 for 3, and passes 2 and 1 through.
 
 
 ## 51. Running behind another window (option unfocused)
@@ -2876,3 +2893,65 @@ x87 stack as `_ftol` leaves them), the steering, the kick count, an
 aircraft's turn per second, the damper, the wave, the step thunks, the 30 fps
 steps, fat, ammo, shots, the chainsaw, the HUD flash, footprints, the aim
 hold and samp.dll's object site.
+
+
+## 57. Bigger pools (option poollimits)
+
+The game creates its pools in `CGame::Initialise` (`CPools::Initialise` at
+0x550F10 and a few others), before MoonLoader runs any script. Each pool's
+size is the operand of a `push` in front of its `CPool` constructor. A stock
+exe has 13000 buildings. A large server map fills that, and
+`CFileLoader::LoadObjectInstance` then reads the null building the full pool
+returns and crashes at 0x538103.
+
+A script runs too late to change those sizes, so the code is an ASI:
+`lib/fixes/native/poollimits.c`, built by `build.sh` into
+`lib/fixes/poollimits.asi` (reproducibly, no timestamp). Its `DllMain` writes
+23 operands, only where the stock value is still there:
+
+| site | pool | stock | raised |
+|---|---|---|---|
+| 0x550F82 | PtrNodeDouble | 3200 | 32000 |
+| 0x550FBA | EntryInfoNode | 500 | 9999 |
+| 0x550FF2 | Peds | 140 | 999 |
+| 0x55105F | Buildings | 13000 | 90000 |
+| 0x551097 | Objects | 350 | 9999 |
+| 0x5510CF | Dummies | 2500 | 25000 |
+| 0x551107 | ColModel | 10150 | 101500 |
+| 0x55113F / 0x551177 | Tasks / Events | 500 / 200 | 9999 |
+| 0x5511AF–0x5512BC | the route, task allocator and attractor pools | 16–64 | 99 |
+| 0x411458 | CColStore | 255 | 2550 |
+| 0x405F26 | a CStreaming pool | 256 | 2560 |
+| 0x552C3F, 0x5B8FE4, 0x5DA08E, 0x5DA0CA, 0x5DA106 | other pools | 400, 50, 4096, 1024, 4096 | 999, 99, 9999 |
+
+These are the values a limits-patched exe carried.
+
+SA-MP R1 writes its own sizes into `CPools::Initialise` after the ASI loads
+and before the game builds the pools: Dummies 4000, Buildings 20000, Objects
+3000, PtrNodeDouble 8000, EntryInfoNode 5000, and a byte that makes Peds 240
+(1008 over ours). A URP map fills the 4000 dummies, and `CDummy::operator new`
+(0x5326E0) returns the null that crashed at 0x538103 (`EDX` = 0xFA0 there).
+So the ASI also takes over `CGame::Init1`'s call of `CPools::Initialise`
+(0x5BF85B, stock `E8 B0 16 F9 FF`). `pl_init_pools` raises each CPools site to
+at least its value, keeping anything bigger, then jumps to 0x550F10. The entry
+itself is left to whoever hooks it (something in this game already does).
+Each run writes `poollimits.log` beside the exe, with a section for the raise
+at `CPools::Initialise`.
+
+`fixPoolLimits(on)`, at the start of `main`, copies the bundled ASI beside
+`gta_sa.exe` when it is missing, or replaces it when it differs. A loaded copy
+is renamed to `.old` first (Windows renames a loaded DLL but won't overwrite
+it), and `.old` is deleted on the next run. Off renames our copy away and
+leaves anyone else's. A change takes effect at the next launch, and chat says
+so once SA-MP is up. The log line gives the sizes the game built its building
+and dummy pools with (`CPool::m_nSize` through 0xB74498 and 0xB744A0).
+
+MTA's `value_550F82_8000` and `patch_550FBA` would shrink two of these (to 8000
+and 4096). They name poollimits.asi as the owner of 32000 and 9999 and stand
+down.
+
+**Tests.** `poollimits_test.sh` loads the ASI in a copy of the stock exe. It
+checks the DllMain writes, the call going through `pl_init_pools`, SA-MP R1's
+smaller sizes raised back, and bigger ones kept. `fixes_test.lua` covers install, in place, replace (old copy
+renamed, then deleted), off (ours taken out, someone else's left), no bundled
+copy, and the two MTA patches standing down.
