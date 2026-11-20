@@ -4,12 +4,13 @@
 # Usage: poollimits_test.sh [path/to/gta_sa.exe]
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+. "$here/native_env.sh"   # CC, PY, run_exe, winpath: Linux (Wine) or Windows (native)
 exe="${1:-$(cd "$here/../../.." && pwd)/../gta_sa.exe}"
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)"; trap 'rc=$?; cd /; rm -rf "$work"; exit $rc' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
-i686-w64-mingw32-gcc -O2 -shared -static -s -Wall -o "$work/poollimits.asi" "$here/../native/poollimits.c"
-i686-w64-mingw32-gcc -O2 -Wall -shared -static -o "$work/test.dll" "$here/poollimits_test.c"
-python3 -I - "$exe" "$work/gta_sa.exe" <<'PY'
+"$CC" -O2 -shared -static -s -Wall -o "$work/poollimits.asi" "$here/../native/poollimits.c"
+"$CC" -O2 -Wall -shared -static -o "$work/test.dll" "$here/poollimits_test.c"
+"$PY" -I - "$exe" "$work/gta_sa.exe" <<'PY'
 import struct, sys
 d = bytearray(open(sys.argv[1], 'rb').read())
 pe = struct.unpack_from('<I', d, 0x3C)[0]
@@ -47,5 +48,5 @@ d[off(entry):off(entry) + len(stub)] = stub
 open(sys.argv[2], 'wb').write(d)
 PY
 cd "$work"
-wine gta_sa.exe
+run_exe gta_sa.exe
 cat poollimits.log

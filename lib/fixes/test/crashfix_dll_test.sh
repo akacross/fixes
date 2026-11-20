@@ -6,14 +6,15 @@
 # luajit and i686-w64-mingw32-gcc.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+. "$here/native_env.sh"   # CC, PY, run_exe, winpath: Linux (Wine) or Windows (native)
 ml="$(cd "$here/../../.." && pwd)"
 exe="${1:-$ml/../gta_sa.exe}"
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)"; trap 'rc=$?; cd /; rm -rf "$work"; exit $rc' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
-i686-w64-mingw32-gcc -O2 -Wall -shared -static -o "$work/crashfix_dll_test.dll" "$here/crashfix_dll_test.c"
+"$CC" -O2 -Wall -shared -static -o "$work/crashfix_dll_test.dll" "$here/crashfix_dll_test.c"
 luajit "$here/fixes_test.lua" --fog-bytes "$work/fog.bin" >/dev/null
-python3 -I "$here/row_branch_test.py" "$exe" "$here/../native"
-python3 -I - "$exe" "$work/gta_sa.exe" <<'PY'
+"$PY" -I "$here/row_branch_test.py" "$exe" "$here/../native"
+"$PY" -I - "$exe" "$work/gta_sa.exe" <<'PY'
 import struct, sys
 d = bytearray(open(sys.argv[1], 'rb').read())
 pe = struct.unpack_from('<I', d, 0x3C)[0]
@@ -53,4 +54,4 @@ for i in range(nsec):                               # the tests write code: stoc
 open(sys.argv[2], 'wb').write(d)
 PY
 cd "$work"
-wine gta_sa.exe
+run_exe gta_sa.exe

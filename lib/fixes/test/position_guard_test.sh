@@ -4,9 +4,10 @@
 # i686-w64-mingw32-gcc.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+. "$here/native_env.sh"   # CC, PY, run_exe, winpath: Linux (Wine) or Windows (native)
+work="$(mktemp -d)"; trap 'rc=$?; cd /; rm -rf "$work"; exit $rc' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
-i686-w64-mingw32-gcc -O2 -Wall -static -o "$work/position_guard_test.exe" "$here/position_guard_test.c"
+"$CC" -O2 -Wall -static -o "$work/position_guard_test.exe" "$here/position_guard_test.c"
 luajit "$here/fixes_test.lua" --guard-bytes "$work/guard.bin" >/dev/null
 cd "$work"
-wine position_guard_test.exe
+run_exe position_guard_test.exe

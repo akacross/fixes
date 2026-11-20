@@ -3,10 +3,11 @@
 # in a throwaway prefix, never the game's (faults_lua_test.c).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+. "$here/native_env.sh"   # CC, PY, run_exe, winpath: Linux (Wine) or Windows (native)
 game="$(cd "$here/../../../.." && pwd)"
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)"; trap 'rc=$?; cd /; rm -rf "$work"; exit $rc' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
-i686-w64-mingw32-gcc -O2 -Wall -static -o "$work/faults_lua_test.exe" "$here/faults_lua_test.c"
+"$CC" -O2 -Wall -static -o "$work/faults_lua_test.exe" "$here/faults_lua_test.c"
 cp "$game/lua51.dll" "$work/"
 cd "$work"
-wine faults_lua_test.exe 'Z:'"${work//\//\\}" 'Z:'"${work//\//\\}"'\faults.log'
+run_exe faults_lua_test.exe "$(winpath "$work")" "$(winpath "$work")\faults.log"

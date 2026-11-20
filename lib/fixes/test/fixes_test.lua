@@ -21,6 +21,7 @@
 io.stdout:setvbuf('line')
 
 local here = (debug.getinfo(1, 'S').source:sub(2):match('(.*[/\\])') or './')
+local shell = dofile(here .. '../../akacross/test/shell.lua')   -- cmd.exe or sh, see shell.lua
 local root = here .. '../../../'
 
 local passed, failed = 0, 0
@@ -2411,7 +2412,7 @@ do
         putU32(0xA8B42C, SCRIPT_A)
         put(0xC2B9CC, 0xC5, 0x20, 0x70, 0x3E)                         -- what it wrote last (0.2345)
     end
-    local dir = os.tmpname(); os.remove(dir); os.execute('mkdir -p "' .. dir .. '/cleo"')
+    local dir = os.tmpname(); os.remove(dir); shell.mkdirp(dir .. '/cleo')
     local NAME = 'Car Speed FPS Fix (Junior_Djjr).cs'
     local function writeFile() local out = assert(io.open(dir .. '/cleo/' .. NAME, 'wb')); out:write(cs); out:close() end
     writeFile()
@@ -2500,7 +2501,7 @@ do
     env.findFirstFile, env.findNextFile, env.findClose, env.os = nil, nil, nil, nil
     env.getGameDirectory = function() return 'GAME' end
     env.io = envIo
-    os.execute('rm -rf "' .. dir .. '"')
+    shell.rmrf(dir)
     putU32(0xA8B42C, 0); FPS.cleoState = nil
 end
 

@@ -4,9 +4,10 @@
 # i686-w64-mingw32-gcc.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+. "$here/native_env.sh"   # CC, PY, run_exe, winpath: Linux (Wine) or Windows (native)
+work="$(mktemp -d)"; trap 'rc=$?; cd /; rm -rf "$work"; exit $rc' EXIT
 export WINEPREFIX="$work/prefix" WINEDEBUG=-all
-i686-w64-mingw32-gcc -O2 -Wall -msse2 -mfpmath=sse -static -o "$work/fps_fixes_test.exe" "$here/fps_fixes_test.c"
+"$CC" -O2 -Wall -msse2 -mfpmath=sse -static -o "$work/fps_fixes_test.exe" "$here/fps_fixes_test.c"
 luajit "$here/fixes_test.lua" --fps-bytes "$work/fps.bin" >/dev/null
 cd "$work"
-wine fps_fixes_test.exe
+run_exe fps_fixes_test.exe

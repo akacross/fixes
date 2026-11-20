@@ -3,9 +3,13 @@ past its first instruction become its jump and NOPs, so a jump there runs
 the middle of our jump (planesteer4 at 0x6CB1B1 did, and faulted).
     python3 -I row_branch_test.py <gta_sa.exe> <lib/fixes/native>
 Needs objdump."""
-import bisect, glob, os, re, subprocess, sys
+import bisect, glob, os, re, shutil, subprocess, sys
 
 exe, native = sys.argv[1], sys.argv[2]
+# binutils comes with the MinGW toolchain the other native tests need
+if shutil.which('objdump') is None:
+    print('skip: no objdump (binutils, part of the MinGW toolchain)')
+    sys.exit(77)
 # A branch from inside the row itself is replaced with it; shadow's jump
 # sits in the padding before the function and the entry hops back to it.
 ALLOWED = {('shadow', 0x70BDA0)}

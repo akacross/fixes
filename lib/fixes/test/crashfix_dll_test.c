@@ -1262,11 +1262,23 @@ static void faults_test(const char *exe)
     RemoveVectoredExceptionHandler(recover);
 }
 
+/* Sleep(1) and Sleep(4) as asked: Windows' default timer rounds every sleep up
+ * to its ~15.6 ms tick, which made the stream timer's 4 ms file no longer the
+ * longest. 1 ms resolution for this process; under Wine sleeps are already
+ * that fine. Looked up, so the build needs no -lwinmm. */
+static void fine_timer(void)
+{
+    HMODULE winmm = LoadLibraryA("winmm.dll");
+    FARPROC begin = winmm ? GetProcAddress(winmm, "timeBeginPeriod") : NULL;
+    if (begin) ((unsigned (WINAPI *)(unsigned))begin)(1);
+}
+
 __declspec(dllexport) int __cdecl run(void)
 {
     char path[MAX_PATH];
     GetModuleFileNameA(NULL, path, sizeof path);
     if (!read_game(path)) { printf("not run from gta_sa.exe at 0x400000\n"); return 2; }
+    fine_timer();
 
     printf("== every hook goes in on the stock bytes and comes out leaving them\n");
     int all_in = 1, all_out = 1;
