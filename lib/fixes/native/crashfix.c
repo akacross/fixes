@@ -15,7 +15,8 @@
  *   - misc47 and misc48 keep eax, which the code after misc48 stores.
  *   - colliding pops the distance it skips; translation leaves through the
  *     function's own epilogue and checks the index against the frame count.
- *   - FindTextureCB keeps the game's lookup, with the remap copy bounded.
+ *   - FindTextureCB keeps the game's lookup, with the remap copy bounded, and
+ *     calls wherever the game's three lookup calls in it point (VehFuncs).
  *   - the train's rail distance wraps by the length the game's loop uses.
  *   - RwMatrixMultiply checks all three matrices and returns its destination.
  *   - CPlaceName clears bInVehicle in its copy of the flags, not on the ped.
@@ -272,15 +273,26 @@ void *cf_frame_fallback(void *found, uint32_t calledFrom, void *clump, int id)
 typedef uint8_t *(__cdecl *FindNamedTexture)(void *dict, const char *name);
 typedef void *(__cdecl *GetCurrentDictionary)(void);
 
-/* The game's lookup; its copy of a "remap" name into 32 bytes is bounded. */
+/* Where the call at `site` in the game's FindTextureCB goes now: a mod may
+ * have pointed it elsewhere (VehFuncs takes 0x4C7533 to search its
+ * vehicle2..5.txd). The original target when it is not a call. */
+static FindNamedTexture find_texture_call(uint32_t site)
+{
+    const uint8_t *p = (const uint8_t *)site;
+    if (p[0] != 0xE8) return (FindNamedTexture)0x7F39F0;
+    return (FindNamedTexture)(site + 5 + *(const int32_t *)(p + 1));
+}
+
+/* The game's lookup; its copy of a "remap" name into 32 bytes is bounded.
+ * Each RwTexDictionaryFindNamedTexture goes where the game's own call at
+ * that point goes, so a mod hooking one of those calls keeps working. */
 uint8_t *__cdecl cf_find_texture(const char *name)
 {
-    FindNamedTexture find = (FindNamedTexture)0x7F39F0;
     GetCurrentDictionary current = (GetCurrentDictionary)0x7F3A90;
     if (!name) return NULL;
-    uint8_t *tex = find(*(void **)0xB4E688, name);                  /* the vehicle TXD */
+    uint8_t *tex = find_texture_call(0x4C7520)(*(void **)0xB4E688, name);   /* the vehicle TXD */
     if (tex) return tex;
-    tex = find(current(), name);
+    tex = find_texture_call(0x4C7533)(current(), name);
     if (strncmp(name, "remap", 5)) return tex;
     if (tex) {
         tex[0x10] = '#';
@@ -294,7 +306,7 @@ uint8_t *__cdecl cf_find_texture(const char *name)
     }
     memcpy(remap, name, n + 1);
     remap[0] = '#';
-    return find(current(), remap);
+    return find_texture_call(0x4C757A)(current(), remap);
 }
 
 /* ------------------------------------------------------------------------ */

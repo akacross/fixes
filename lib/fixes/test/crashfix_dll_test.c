@@ -230,6 +230,14 @@ typedef Texture *(__cdecl *FindNamedFn)(void *dict, const char *name);
 typedef void *(__cdecl *ForAllFn)(void *dict, void *(__cdecl *cb)(Texture *, void *), void *data);
 typedef void *(__cdecl *AddFn)(void *dict, Texture *tex);
 typedef Texture *(__cdecl *FindTextureCBFn)(const char *name);
+
+/* VehFuncs' way: the call at 0x4C7533 also searches an extra vehicle TXD */
+static Dictionary vehfuncsExtra;
+static Texture *__cdecl vehfuncs_find(void *dict, const char *name)
+{
+    Texture *tex = ((FindNamedFn)0x7F39F0)(dict, name);
+    return tex ? tex : ((FindNamedFn)0x7F39F0)(&vehfuncsExtra, name);
+}
 typedef uint32_t (__attribute__((thiscall)) *GetSoundFn)(void *self, uint32_t sound, uint32_t slot, uint32_t *size, uint16_t *rate);
 typedef uint8_t (__attribute__((thiscall)) *IsLoadedFn)(void *self, uint32_t bank, uint32_t slot);
 typedef void (__attribute__((thiscall)) *EnableFn)(void *prim, uint32_t on);
@@ -1431,6 +1439,23 @@ __declspec(dllexport) int __cdecl run(void)
         longName[sizeof longName - 1] = 0;
         memcpy(longName, "remap", 5);
         ok(cb(longName) == NULL && averted("misc39") == 1, "a remap name past 31 characters: nothing, no overrun");
+        static Texture rim;
+        memset(&rim, 0, sizeof rim);
+        strcpy(rim.name, "rotiform");
+        dictionary(&vehfuncsExtra);
+        add(&vehfuncsExtra, &rim);
+        ok(cb("rotiform") == NULL, "a texture only in a TXD the game does not search: nothing");
+        {
+            uint8_t *call = (uint8_t *)0x4C7533, saved[5];
+            DWORD prot;
+            memcpy(saved, call, 5);
+            VirtualProtect(call, 5, PAGE_EXECUTE_READWRITE, &prot);
+            *(int32_t *)(call + 1) = (int32_t)((uint32_t)vehfuncs_find - (0x4C7533 + 5));
+            ok(cb("rotiform") == &rim, "a mod's hook on the call at 0x4C7533 is kept (VehFuncs' vehicle2.txd)");
+            ok(cb("vehiclegrunge256") == &paint, "the vehicle TXD still first with that hook");
+            memcpy(call, saved, 5);
+            VirtualProtect(call, 5, prot, &prot);
+        }
         uint32_t before = averted("misc33");
         static uint8_t notADictionary[0x20];
         ok(findNamed(notADictionary, "#emapbody") == &remapped && averted("misc33") == before + 1,

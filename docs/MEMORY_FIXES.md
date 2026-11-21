@@ -1824,7 +1824,11 @@ displacement (misc5, assocgroups, colliding, misc50-52) accept it rewritten.
 - misc48 left its clamp in eax, which the code after it stores as the slot's
   sound id (-1); misc47 and misc48 keep eax.
 - FindTextureCB is the game's lookup with the remap copy bounded; MTA's also
-  walks parent dictionaries.
+  walks parent dictionaries. Each of its three RwTexDictionaryFindNamedTexture
+  calls (0x4C7520, 0x4C7533, 0x4C757A) goes where the game's own call there
+  points now. VehFuncs takes 0x4C7533 to search its vehicle2..5.txd; calling
+  0x7F39F0 directly skipped that, and rims textured from vehicle2.txd came out
+  without their textures.
 - train wraps by the track length the game's loop uses, with `fmodf`.
 - RwMatrixMultiply checks all three matrices and returns dst.
 - placename clears bInVehicle in its copy of the flags, not on the ped.
