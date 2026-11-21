@@ -1895,6 +1895,15 @@ __declspec(dllexport) int __cdecl run(void)
         ok(fabsf(call_fpu(hook_of("heli1"), 1.0f, 1) - (1.0f + *(float *)0x858CDC * 0.5f)) < 1e-6f,
            "heli1: the takeoff rate times timestep / 1.6667");
         unret(0x6C4F2F);
+        ret_at(0x6B0434);
+        union { uint32_t u; float f; } push = {0};
+        carry_call(hook_of("rollwheels"), 3.0f);
+        push.u = carry_ecx;
+        ok(fabsf(push.f - *(float *)0x8D3170 * 0.5f) < 1e-9f && (carry_sw >> 11 & 7) == 7,
+           "rollwheels: the push onto the wheels in ecx times timestep / 1.6667, the x87 stack as it was");
+        call_site(hook_of("rollwheels"), 0x10, 0, 0, 0);
+        ok(site_ret == 0x10, "rollwheels: eax (the status) kept");
+        unret(0x6B0434);
         ret_at(0x6D2777);
         ok(fabsf(call_fpu(hook_of("boatwater"), 2.0f, 1) - 2.0f * *(float *)0x871DDC * 0.5f) < 1e-6f,
            "boatwater: the resistance scaled");

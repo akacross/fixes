@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.4")
+script_version("0.27.5")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -968,7 +968,7 @@ local OPTIONS = {
     pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke, the fight stance, the target lock and the other task timers last as long, drowning hurts and a drunk steers late at any fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     vehiclefps = {default = true,
-        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a burning vehicle and an alarm last as long at any fps; steering, the gearbox's kick, suspension, wheels, hydraulics, forks, sinking, a damaged plane and bike leans as at 30 fps (HighFpsFixes)",
+        label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a car on its side rolls back onto its wheels as at 30 fps; a burning vehicle and an alarm last as long at any fps; steering, the gearbox's kick, suspension, wheels, hydraulics, forks, sinking, a damaged plane and bike leans as at 30 fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     effectsfps = {default = true,
         label = "particles, rain, splashes, explosion fuel and the water cannon at 30 a second; camera shake, fog and glass by the timestep (MTA); fire spread, explosions, lightning, the engine note, the jetpack and SA-MP's moving objects as at 30 fps (HighFpsFixes)",

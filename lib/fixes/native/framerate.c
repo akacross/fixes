@@ -81,6 +81,8 @@
     FJ(boatwater, "vehiclefps", "CVehicle::ApplyBoatWaterResistance scaled", 0x6D2771, 6, "\xD8\x0D\xDC\x1D\x87\x00") \
     FJ(heli1, "vehiclefps", "CHeli::ProcessFlyingCarStuff: the takeoff rate scaled", 0x6C4F29, 6, "\xD8\x05\xDC\x8C\x85\x00") \
     FJ(heli2, "vehiclefps", "CHeli::ProcessFlyingCarStuff: the RC takeoff rate scaled", 0x6C4F37, 6, "\xD8\x05\xD8\x9C\x85\x00") \
+    FJ(rollwheels, "vehiclefps", "CAutomobile::ProcessSuspension: the push back onto the wheels scaled", 0x6B042E, 6, \
+        "\x8B\x0D\x70\x31\x8D\x00") \
     FJ(chassis1, "vehiclefps", "CDoor::Process: a swinging chassis's impulse scaled", 0x6F42D5, 6, "\xD9\x05\x28\x23\x87\x00") \
     FJ(chassis2, "vehiclefps", "CDoor::Process: a driverless chassis's impulse scaled", 0x6F434E, 6, "\xD9\x05\x2C\x23\x87\x00") \
     FJ(doorangle, "vehiclefps", "CDoor::Process: a swinging part's angle by the timestep", 0x6F4422, 8, \
@@ -472,6 +474,16 @@ __asm__(
 "    SCALED\n"
 "    faddp st(1), st\n"
 "    GO 0x6C4F3D\n"
+
+/* CAutomobile::ProcessSuspension: a slow car on its side gets this push a
+ * frame, so at 300 fps it rolled over and kept rolling; ecx gets it scaled */
+"HOOK rollwheels\n"
+"    fld dword ptr ds:0x8D3170\n"
+"    SCALED\n"
+"    push eax\n"
+"    fstp dword ptr [esp]\n"
+"    pop ecx\n"
+"    GO 0x6B0434\n"
 
 /* CDoor::Process: the chassis impulse, with a driver and without; any
  * part's angle */
