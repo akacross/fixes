@@ -97,7 +97,7 @@ From SA-MixSets (Junior_Djjr), the fixes fixes did not have and SA-MP allows:
 - A car's shadow and its headlight glow on the ground move in steps: they
   follow the car smoothly (`smoothshadows`).
 - The HUD fist and weapon icons are stretched, 58 wide against 47 high: they
-  are drawn square (`weaponicon`).
+  are drawn square (`weaponicon`, off by default).
 - The mouse wheel cancels a reload (`scrollreload`, off by default: it
   changes weapon switching).
 - A truck with double rear wheels lays one skidmark and one dust trail per
@@ -279,7 +279,8 @@ that averted a crash says so.
 | `poollimits` | on | bigger pools through poollimits.asi beside gta_sa.exe, from the next launch |
 | `widemodes` | on | 16:9 and the other resolutions the game hides are listed |
 | `unfocused` | off | the game keeps running while another window has focus |
-| `smoothshadows`, `weaponicon`, `doubleskid`, `boatradio`, `boatfoam` | on | SA-MixSets' fixes above |
+| `smoothshadows`, `doubleskid`, `boatradio`, `boatfoam` | on | SA-MixSets' fixes above |
+| `weaponicon` | off | the HUD weapon icon drawn square (SA-MixSets) |
 | `scrollreload` | off | the mouse wheel does not cancel a reload (changes weapon switching) |
 | `faultlog` | on | the fault log above |
 | `streamtime` | off | the model loading timer above |

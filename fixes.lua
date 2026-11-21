@@ -1069,7 +1069,7 @@ local OPTIONS = {
         label = "16:9 and the other resolutions the game hides are listed (a saved resolution may move to another mode; SA-MP draws a bigger radar at 16:10 and wider)"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
     smoothshadows = {default = true, label = "car shadows and headlight glows move smoothly on the ground (MixSets)"},
-    weaponicon = {default = true, label = "the HUD weapon icon square, not stretched (MixSets)"},
+    weaponicon = {default = false, label = "the HUD weapon icon square, not stretched (MixSets)"},
     scrollreload = {default = false, label = "the mouse wheel does not cancel a reload (MixSets; changes weapon switching)"},
     doubleskid = {default = true, label = "trucks with double rear wheels leave both skidmarks (MixSets)"},
     boatradio = {default = true, label = "a boat's driver keeps the boat pose when the radio changes (MixSets)"},

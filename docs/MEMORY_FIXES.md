@@ -2609,8 +2609,9 @@ the engine off (MTA's), the display modes' aspect filter.
 - `smoothshadows` (0x70C6A9, 0x70C2D6, fixes.lua). A car's headlight glow on
   the ground and its shadow are stored with a 0.4 and a 0.1 snap, so they
   move in steps; 0 makes them follow the car.
-- `weaponicon` (0x58D94D, 0x58D896, fixes.lua). The HUD fist and weapon
-  icons are drawn 58 wide against 47 high; both read the 47 beside it.
+- `weaponicon` (0x58D94D, 0x58D896, fixes.lua, off by default). The HUD fist
+  and weapon icons are drawn 58 wide against 47 high; both read the 47 beside
+  it.
 - `scrollreload` (0x60B4FA, fixes.lua, off by default). The mouse wheel no
   longer cancels a reload; MixSets enables it on SA-MP only for roleplay
   servers.
