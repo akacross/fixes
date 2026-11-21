@@ -90,8 +90,11 @@ Game bugs:
   `poollimits.asi`, which fixes copies beside `gta_sa.exe`, raises 23 pool
   sizes before the game builds them (90000 buildings, 25000 dummies, 101500
   collisions...). It raises them again after SA-MP writes its own, and never
-  lowers a bigger one. The game's code has to be patched before any script
-  runs, so this one part is an ASI. It takes effect from the next launch.
+  lowers a bigger one. It also raises the list of entities to draw from 1000
+  to 7500, so objects keep drawing on object-heavy servers
+  (SAMPGraphicRestore.asi's and flickr.asi's patch: neither is needed for
+  it). The game's code has to be patched before any script runs, so this one
+  part is an ASI. It takes effect from the next launch.
 
 From SA-MixSets (Junior_Djjr), the fixes fixes did not have and SA-MP allows:
 - A car's shadow and its headlight glow on the ground move in steps: they

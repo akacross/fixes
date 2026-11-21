@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.3")
+script_version("0.27.4")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -1063,7 +1063,7 @@ local OPTIONS = {
         label = "the Frame Limiter and loading screens do not reset the device for vsync (a failed reset crashed at 0x7F9A3C)"},
     windowed = {default = true, label = "Alt+Enter switches to windowed mode"},
     poollimits = {default = true,
-        label = "bigger pools (90000 buildings, 101500 collisions...) through poollimits.asi beside gta_sa.exe, from the next launch",
+        label = "bigger pools (90000 buildings, 101500 collisions, 7500 object instances...) through poollimits.asi beside gta_sa.exe, from the next launch",
         apply = function(on) fixPoolLimits(on); return 1, 0 end},
     widemodes = {default = true,
         label = "16:9 and the other resolutions the game hides are listed (a saved resolution may move to another mode; SA-MP draws a bigger radar at 16:10 and wider)"},

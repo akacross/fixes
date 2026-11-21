@@ -217,7 +217,7 @@ patches plus 7 code hooks; only some of that transfers.
   and entities stop rendering. It is an init-time constant, so per "How early is
   early" above it cannot be patched from here. Re-`Init`ing the list at runtime
   is not a workaround either - it would orphan the streaming links of everything
-  already in the list. **Replaced by `objectpool.asi`**
+  already in the list. **poollimits.asi raises it now (section 57)**; before that, `objectpool.asi`
   (`/mnt/data/Projects/objectpool/`), a ~4.5 KB single-purpose ASI that does only
   this, with the same validate-before-write discipline used here. Note the value
   is a **byte** count and must be a multiple of 12, or `CStreaming::Init2`'s
@@ -2951,12 +2951,27 @@ leaves anyone else's. A change takes effect at the next launch, and chat says
 so once SA-MP is up. The log line gives the sizes the game built its building
 and dummy pools with (`CPool::m_nSize` through 0xB74498 and 0xB744A0).
 
+It also raises `ms_rwObjectInstances` (0x9654F0), the list `CStreaming::Init2`
+builds of the entities to draw: 12 bytes a link, stock 12000 bytes (1000
+links). When it runs out, entities stop being drawn. The byte count sits twice,
+the `push 2EE0h` before its `operator new` (0x5B8E55) and the `mov ecx, 2EE0h`
+of the loop that threads the free list (0x5B8EB0). Both go to 90000 (7500
+links), together or not at all, and only while `ms_bIsInitialised` (0x9654B8)
+is clear: the loop counts down by 12 to exactly zero, so two different sizes
+or one that is not a multiple of 12 is left alone. A smaller size another
+module wrote (SilentPatch writes 15000 over a stock one) is raised again at
+`pl_init_pools`, which runs before `CStreaming::Init2`; a bigger one is kept.
+SAMPGraphicRestore.asi and flickr.asi write the same 90000, so neither is
+needed for it.
+
 MTA's `value_550F82_8000` and `patch_550FBA` would shrink two of these (to 8000
 and 4096). They name poollimits.asi as the owner of 32000 and 9999 and stand
 down.
 
 **Tests.** `poollimits_test.sh` loads the ASI in a copy of the stock exe. It
 checks the DllMain writes, the call going through `pl_init_pools`, SA-MP R1's
-smaller sizes raised back, and bigger ones kept. `fixes_test.lua` covers install, in place, replace (old copy
+smaller sizes raised back, and bigger ones kept, and the object-instance list:
+raised, a smaller one raised back, a bigger one kept, and two different sizes
+or one that is not a multiple of 12 left alone. `fixes_test.lua` covers install, in place, replace (old copy
 renamed, then deleted), off (ours taken out, someone else's left), no bundled
 copy, and the two MTA patches standing down.

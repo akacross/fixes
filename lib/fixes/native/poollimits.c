@@ -13,7 +13,8 @@
  * pl_init_pools first, which raises each CPools site to at least its value and
  * then jumps to 0x550F10 (whoever hooks its entry gets it as before). A size
  * is only ever raised: a module that set a bigger one keeps it. A line per
- * site goes to poollimits.log beside the exe.
+ * site goes to poollimits.log beside the exe. The object-instance list
+ * (SAMPGraphicRestore's and flickr.asi's patch) is raised the same way.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -55,6 +56,17 @@ static const Site sites[] = {
     {0x5DA106, 4, 0x1000, 9999, "a pool (0x5DA105)"},
 };
 
+/* CStreaming::Init2's store for ms_rwObjectInstances, 12 bytes a link: the
+ * byte count of its operator new and of the loop that threads the free list.
+ * Stock 1000 links; when they run out, entities stop being drawn. Both always
+ * hold the same multiple of 12, or the loop never ends. */
+#define OI_ALLOC 0x5B8E55                           /* push imm32 */
+#define OI_LOOP 0x5B8EB0                            /* mov ecx, imm32 */
+#define OI_STOCK 12000u
+#define OI_VALUE 90000u                             /* 7500 links */
+#define STREAMING_INITIALISED 0x9654B8
+_Static_assert(OI_VALUE % 12 == 0, "the link store must be a multiple of 12 bytes");
+
 #define INIT_CALL 0x5BF85B                          /* CGame::Init1: call CPools::Initialise */
 static const uint8_t INIT_CALL_STOCK[5] = {0xE8, 0xB0, 0x16, 0xF9, 0xFF};
 uint32_t pl_init_target = 0x550F10;
@@ -82,11 +94,40 @@ static int write_site(const Site *s)
     return s->len == 1 ? write_bytes(s->va, &b, 1) : write_bytes(s->va, &s->value, 4);
 }
 
+/* Both object-instance sizes to at least OI_VALUE, together or not at all */
+static void raise_instances(FILE *log)
+{
+    if (*(const uint8_t *)(OI_ALLOC - 1) != 0x68 || *(const uint8_t *)(OI_LOOP - 1) != 0xB9) {
+        if (log) fprintf(log, "0x%06X object instances: not a push and a mov ecx; left alone\n", OI_ALLOC);
+        return;
+    }
+    if (*(const uint8_t *)STREAMING_INITIALISED) {
+        if (log) fprintf(log, "0x%06X object instances: CStreaming::Init2 has run; left alone\n", OI_ALLOC);
+        return;
+    }
+    uint32_t a = *(const uint32_t *)OI_ALLOC, b = *(const uint32_t *)OI_LOOP, v = OI_VALUE;
+    if (a != b || a % 12) {
+        if (log) fprintf(log, "0x%06X object instances: %u and %u bytes, not one multiple of 12; left alone\n",
+                         OI_ALLOC, a, b);
+    } else if (a >= v) {
+        if (log && a != v) fprintf(log, "0x%06X object instances: %u links, more than ours; kept\n", OI_ALLOC, a / 12);
+    } else if (!write_bytes(OI_ALLOC, &v, 4)) {
+        if (log) fprintf(log, "0x%06X object instances: the write did not stick\n", OI_ALLOC);
+    } else if (!write_bytes(OI_LOOP, &v, 4)) {
+        write_bytes(OI_ALLOC, &a, 4);
+        if (log) fprintf(log, "0x%06X object instances: the second write did not stick; put back\n", OI_ALLOC);
+    } else if (log) {
+        fprintf(log, "0x%06X object instances: %u -> %u links%s\n", OI_ALLOC, a / 12, v / 12,
+                a == OI_STOCK ? "" : " (another module's)");
+    }
+}
+
 /* Before CPools::Initialise: every CPools site to at least its value */
 void __cdecl pl_raise_pools(void)
 {
     FILE *log = fopen(log_path, "a");
     int raised = 0, kept = 0;
+    raise_instances(log);
     for (int i = CPOOLS_FIRST; i <= CPOOLS_LAST; i++) {
         const Site *s = &sites[i];
         uint32_t found = read_site(s);
@@ -144,6 +185,8 @@ static void apply(void)
             fprintf(log, "0x%06X %s: the write did not stick\n", s->va, s->what);
         }
     }
+
+    if (us10) raise_instances(log);
 
     int hooked = 0;
     if (us10 && memcmp((void *)INIT_CALL, INIT_CALL_STOCK, 5) == 0) {
