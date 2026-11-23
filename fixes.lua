@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.5")
+script_version("0.27.6")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -564,6 +564,37 @@ local gamePatches = {
         name = "FillAvailableVMs aspect ratio filter",
         va = 0x7459E1, from = hexBytes("7A 71"), to = nops(2), option = "widemodes"
     },
+    -- World lights (headlights, lamps) go in D3D light slots 1-6, but the car
+    -- paint pipeline sets its specular light in slot 1 just before drawing, so a
+    -- headlight never reaches another car's paint. The specular light moves to
+    -- slot 7 (MTA): RwD3D9SetLight and both RwD3D9EnableLight calls (option lightslot).
+    -- SilentPatch moves it to slot 8 itself.
+    {name = "car paint specular light: RwD3D9SetLight slot", va = 0x5D9A88, option = "lightslot",
+        from = hexBytes("01"), to = hexBytes("07"),
+        conflicts = {{bytes = hexBytes("08"), by = "SilentPatch"}}},
+    {name = "car paint specular light: RwD3D9EnableLight(TRUE) slot", va = 0x5D9A91, option = "lightslot",
+        from = hexBytes("01"), to = hexBytes("07"),
+        conflicts = {{bytes = hexBytes("08"), by = "SilentPatch"}}},
+    {name = "car paint specular light: RwD3D9EnableLight(FALSE) slot", va = 0x5D9F1F, option = "lightslot",
+        from = hexBytes("01"), to = hexBytes("07"),
+        conflicts = {{bytes = hexBytes("08"), by = "SilentPatch"}}},
+    -- A car past ms_cullCompsDist (20 m, 50 m for big ones, by the draw
+    -- distance) seen from near its level skips the parts on its far side,
+    -- glass included, so a far window or door vanishes as the angle changes.
+    -- Each callback's `fcomp [cull distance]` reads FLT_MAX (0x863A3C) instead
+    -- (option farsideparts).
+    {name = "CVisibilityPlugins::RenderVehicleHiDetailCB far-side cull distance", va = 0x73328E, option = "farsideparts",
+        from = hexBytes("2C 80 C8 00"), to = hexBytes("3C 3A 86 00")},
+    {name = "CVisibilityPlugins::RenderTrainHiDetailCB far-side cull distance", va = 0x73337E, option = "farsideparts",
+        from = hexBytes("2C 80 C8 00"), to = hexBytes("3C 3A 86 00")},
+    {name = "CVisibilityPlugins::RenderVehicleHiDetailCB_BigVehicle far-side cull distance", va = 0x73346C, option = "farsideparts",
+        from = hexBytes("28 80 C8 00"), to = hexBytes("3C 3A 86 00")},
+    {name = "CVisibilityPlugins::RenderVehicleHiDetailAlphaCB far-side cull distance", va = 0x734006, option = "farsideparts",
+        from = hexBytes("2C 80 C8 00"), to = hexBytes("3C 3A 86 00")},
+    {name = "CVisibilityPlugins::RenderTrainHiDetailAlphaCB far-side cull distance", va = 0x7342C6, option = "farsideparts",
+        from = hexBytes("2C 80 C8 00"), to = hexBytes("3C 3A 86 00")},
+    {name = "CVisibilityPlugins::RenderVehicleHiDetailAlphaCB_BigVehicle far-side cull distance", va = 0x7343F6, option = "farsideparts",
+        from = hexBytes("28 80 C8 00"), to = hexBytes("3C 3A 86 00")},
     {   -- NOP the `m_nVehicleType != VEHICLE_TYPE_AUTOMOBILE` guard around
         -- CustomCarPlate_BeforeRenderingStart / _AfterRenderingStop so bikes,
         -- trailers, planes and boats get custom plates too. The two sites move
@@ -1065,6 +1096,19 @@ local OPTIONS = {
     poollimits = {default = true,
         label = "bigger pools (90000 buildings, 101500 collisions, 7500 object instances...) through poollimits.asi beside gta_sa.exe, from the next launch",
         apply = function(on) fixPoolLimits(on); return 1, 0 end},
+    lightslot = {default = true, label = "headlights and other world lights reach a car's paint (its specular light moved to slot 7, MTA)"},
+    mirroraa = {default = true, label = "mirrors work with anti-aliasing on (their buffer made without multisampling, MTA)",
+        apply = function() return fixCrashes("game"), 0 end},
+    widesky = {default = true, label = "the sky widens with a wide FOV, so its sides never show (San Andreas Online)",
+        apply = function() return fixCrashes("game"), 0 end},
+    glassdepth = {default = true,
+        label = "a car's glass drawn after its solid parts and writing no depth, so windows and the doors behind them never vanish with the angle",
+        apply = function() return fixCrashes("game"), 0 end},
+    glasssort = {default = true,
+        label = "a car's glass, lights and other see-through parts drawn farthest first by each part's own distance (needs glasslist)",
+        apply = function(on) return setCrashFixGlassSort(on) and 1 or 0, 0 end},
+    farsideparts = {default = true,
+        label = "a car's far-side parts (windows, doors) drawn at any distance and angle, not culled past 20 m"},
     widemodes = {default = true,
         label = "16:9 and the other resolutions the game hides are listed (a saved resolution may move to another mode; SA-MP draws a bigger radar at 16:10 and wider)"},
     background = {default = true, label = "the game keeps running in the background and the pause menu"},
@@ -3333,6 +3377,7 @@ pcall(ffi.cdef, [[
     int CrashFix_SetSampSite(uint32_t va);
     int CrashFix_SetSampObjectSite(uint32_t va);
     void CrashFix_SetShadows(int volumetric);
+    void CrashFix_SetGlassSort(int on);
     int CrashFix_Install(int i, uint32_t* found);
     int CrashFix_Uninstall(int i);
     int CrashFix_Installed(int i);
@@ -3378,7 +3423,7 @@ end
 -- What a hook is by its option: "crash", "glass", "ped", "sky", "stream", "draw" or "frame" (the frame-rate fixes)
 local crashFixKind
 do
-    local kinds = {crashfix = "crash", glasslist = "glass", pedmatrix = "ped", skygrad = "sky", streamtime = "stream", parkedcol = "parked",
+    local kinds = {crashfix = "crash", glasslist = "glass", glassdepth = "glass", pedmatrix = "ped", skygrad = "sky", widesky = "sky", mirroraa = "sky", streamtime = "stream", parkedcol = "parked",
         drawcount = "draw"}
     function crashFixKind(option) return kinds[option] or "frame" end
 end
@@ -3394,6 +3439,7 @@ function fixCrashes(part)
         return 0
     end
     lib.CrashFix_SetShadows(options.volshadows and 1 or 0)
+    lib.CrashFix_SetGlassSort(options.glasssort and 1 or 0)
     local changed = 0
     for i = 0, lib.CrashFix_Count() - 1 do
         local key = ffi.string(lib.CrashFix_Key(i))
@@ -3464,6 +3510,12 @@ function setCrashFixShadows(on)
     return true
 end
 
+function setCrashFixGlassSort(on)
+    if not crashFixLib then return false end
+    crashFixLib.CrashFix_SetGlassSort(on and 1 or 0)
+    return true
+end
+
 -- -> in place, owned elsewhere, refused, off; the hooks of `kind` ("crash"
 -- if nil, "frame", "glass", "ped", "sky")
 local function crashFixCounts(kind)
@@ -3520,8 +3572,10 @@ local function crashFixTick(now)
         if e and n ~= e.seen and (not e.said or now - e.said >= CRASHFIX_QUIET) then
             e.seen, e.said = n, now
             if crashFixKind(e.option) == "glass" then
-                log(string.format("[fixes] glass list %s (%s) grew for a car with more see-through parts (%d so far)",
-                    ffi.string(crashFixLib.CrashFix_Key(i)), e.name, n), "info")
+                log(string.format("[fixes] glass list %s (%s) grew for %s (%d so far)",
+                    ffi.string(crashFixLib.CrashFix_Key(i)), e.name,
+                    e.name:find("entity list", 1, true) and "more than 200 cars and see-through objects on screen"
+                        or "a car with more see-through parts", n), "info")
             elseif crashFixKind(e.option) == "sky" then
                 log(string.format("[fixes] sky fix %s: the shaders could not be made; the stock sky is drawn",
                     ffi.string(crashFixLib.CrashFix_Key(i))), "warn")

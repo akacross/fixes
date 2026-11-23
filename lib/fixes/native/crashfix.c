@@ -1636,6 +1636,7 @@ __asm__(
 #include "glasslist.c"
 #include "sky.c"
 #include "aniso.c"
+#include "mirror.c"
 #include "faults.c"
 #include "stream.c"
 #include "drawcount.c"
@@ -1666,7 +1667,7 @@ typedef struct {
 #define ROW(k, name, va, len, mi, stock) {#k, name, va, len, mi, stock, cf_hook_##k, &cf_n_##k, "crashfix"},
 #define FROW(k, option, name, va, len, stock) {#k, name, va, len, -1, stock, cf_hook_##k, &cf_n_##k, option},
 #define PROW(k, option, kind, name, va, len, stock, to) {#k, name, va, len, -1, stock, NULL, &cf_n_##k, option, kind, to},
-static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) HFPS(FROW, PROW) GLASSLIST(PROW) SKY(FROW, PROW) ANISO(FROW, PROW) STREAM(FROW) DRAWCOUNT(FROW, PROW) PARKED(FROW) };
+static Hook hooks[] = { HOOKS(ROW) PEDMATRIX(FROW, PROW) FRAMERATE(FROW, PROW) VIGILANTE(FROW, PROW) MIXSETS(FROW, PROW) HFPS(FROW, PROW) GLASSLIST(PROW) GLASSDEPTH(FROW, PROW) SKY(FROW, PROW) ANISO(FROW, PROW) MIRROR(FROW, PROW) STREAM(FROW) DRAWCOUNT(FROW, PROW) PARKED(FROW) };
 #define HOOK_COUNT ((int)(sizeof hooks / sizeof hooks[0]))
 
 /* Whether the row `key` is in place (the hooks that depend on another's) */
@@ -1767,6 +1768,8 @@ __declspec(dllexport) int __cdecl CrashFix_SetSampObjectSite(uint32_t va)
 __declspec(dllexport) const char *__cdecl CrashFix_Option(int i) { return i >= 0 && i < HOOK_COUNT ? hooks[i].option : NULL; }
 
 __declspec(dllexport) void __cdecl CrashFix_SetShadows(int volumetric) { cf_volumetric_shadows = volumetric != 0; }
+
+__declspec(dllexport) void __cdecl CrashFix_SetGlassSort(int on) { cf_glass_sort = on != 0; }
 
 /* Where a jmp or call written over a site goes: E9/E8 rel32, or FF 25/FF 15
  * through a pointer (SA-MP's hooks keep theirs in the padding before the

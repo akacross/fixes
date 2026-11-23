@@ -38,6 +38,10 @@ local SETUP, RESET = 0x6D6517, 0x6D0E43
 put(SETUP, 0x75, 0x08); put(RESET, 0x75, 0x13)   -- stock: the automobile-only guards
 local MODES, VMS = 0x745BC9, 0x7459E1
 put(MODES, 0x7A, 0x6D); put(VMS, 0x7A, 0x71)    -- stock: the aspect ratio filters' jp
+local FARSIDE = {[0x73328E] = 0x2C, [0x73337E] = 0x2C, [0x73346C] = 0x28, [0x734006] = 0x2C, [0x7342C6] = 0x2C, [0x7343F6] = 0x28}
+for va, low in pairs(FARSIDE) do put(va, low, 0x80, 0xC8, 0x00) end   -- stock: fcomp [ms_cull(Big)CompsDist]
+local LIGHTSLOT = {0x5D9A88, 0x5D9A91, 0x5D9F1F}
+for _, va in ipairs(LIGHTSLOT) do put(va, 0x01) end   -- stock: light slot 1
 
 local function getU32(va)
     return (mem[va] or 0) + (mem[va + 1] or 0) * 0x100 + (mem[va + 2] or 0) * 0x10000 + (mem[va + 3] or 0) * 0x1000000
@@ -195,6 +199,36 @@ ok(same(get(MODES, 2), {0x7A, 0x6D}) and same(get(VMS, 2), {0x7A, 0x71}), 'both 
 ok(chat[#chat]:find('2 site', 1, true), 'and said: ' .. tostring(chat[#chat]))
 env.fixesCommand('widemodes on')
 ok(same(get(MODES, 2), {0x90, 0x90}) and same(get(VMS, 2), {0x90, 0x90}), 'and NOPed again')
+print('\n== farsideparts: on by default, the six cull distances read FLT_MAX; off puts them back')
+local function farside(stock)
+    for va, low in pairs(FARSIDE) do
+        if not same(get(va, 4), stock and {low, 0x80, 0xC8, 0x00} or {0x3C, 0x3A, 0x86, 0x00}) then return false end
+    end
+    return true
+end
+ok(farside(false), 'all six read 0x863A3C by default')
+env.fixesCommand('farsideparts off')
+ok(farside(true) and chat[#chat]:find('6 site', 1, true), 'off: all six stock again: ' .. tostring(chat[#chat]))
+env.fixesCommand('farsideparts on')
+ok(farside(false), 'and on again')
+
+print('\n== lightslot: the car paint specular light in slot 7; off puts slot 1 back')
+local function slots(want)
+    for _, va in ipairs(LIGHTSLOT) do if mem[va] ~= want then return false end end
+    return true
+end
+ok(slots(0x07), 'all three use slot 7 by default')
+env.fixesCommand('lightslot off')
+ok(slots(0x01) and chat[#chat]:find('3 site', 1, true), 'off: slot 1 again: ' .. tostring(chat[#chat]))
+env.fixesCommand('lightslot on')
+ok(slots(0x07), 'and 7 again')
+for _, va in ipairs(LIGHTSLOT) do put(va, 0x08) end      -- SilentPatch's slot 8
+env.fixesCommand('lightslot off')
+ok(slots(0x08) and chat[#chat]:find('3 left alone', 1, true), "SilentPatch's slot 8 is left alone: " .. tostring(chat[#chat]))
+env.fixesCommand('lightslot on')
+ok(slots(0x08), 'and on does not write over it')
+for _, va in ipairs(LIGHTSLOT) do put(va, 0x07) end
+
 print('\n== poollimits: copied beside gta_sa.exe, replaced when it changed, taken out when off')
 do
     local disk = {['ML\\lib\\fixes\\poollimits.asi'] = 'ASI-v2'}
@@ -1474,6 +1508,7 @@ do
         CrashFix_Address = function(i) return cf.hooks[i + 1].va end,
         CrashFix_SetSampSite = function(va) cf.sampSite = va; cf.hooks[#cf.hooks].va = va; return 1 end,
         CrashFix_SetShadows = function(on) cf.shadows = on end,
+        CrashFix_SetGlassSort = function(on) cf.glasssort = on end,
         CrashFix_Install = function(i, found)
             local h = cf.hooks[i + 1]
             cf.installs[#cf.installs + 1] = h.key

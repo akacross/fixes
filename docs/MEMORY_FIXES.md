@@ -2263,7 +2263,8 @@ another hook and log like the others.
 |---|---|---|
 | `stencilveh`, `stencilobj` | 0x70FC87, 0x710471 | `CStencilShadows::RenderForVehicle` / `RenderForObject` transform the col's whole shadow mesh (`CCollisionData+0x24` vertices) into room for 2048 points; past that they write off the end and crash at 0x80D5EF. More than 2048 (unsigned) leaves through the function's epilogue (0x7102D8, 0x710AB2), at the same stack depth: the only call between leaves 8 bytes for its `ret 8`. The vehicle hook stores the pending float first and runs `test eax,eax` last, for the `jle` after. Only reached with volumetric shadows on (`volshadows`); off, GetFxQuality returns 0 to the whole shadow manager |
 | `ikchain` | 0x6183B2 | `IKChain_c::Init` indexes the ped's frames with `RpHAnimIDGetIndex`, -1 for a bone the skin lacks, and crashes at 0x6183CA (head tracking, gun pointing). SA:O checks at the entry; fixes checks where the game looks the effector up, after its own early returns, so only a chain the game would have built is counted: every bone from the effector to the pivot through `BoneNodeManager_c::ms_boneInfos` (0x8D26D0) must be in the hierarchy, or the function returns false (0x6184A3) and `IKChainManager_c::AddIKChain` puts the chain back |
-| `glass1`-`glass6` (option `glasslist`) | 0x733D35, 0x734092, 0x734141, 0x734211, 0x734356, 0x734482 | the six calls to `CLinkList::InsertSorted` for `CVisibilityPlugins::m_alphaList` (0xC88070), which `CRenderer::RenderOneNonRoad` clears and draws per vehicle: 20 links, and past them the game draws a part at once, unsorted. A full list gets as many links again (at least 20) from a pool of 980 in the DLL, never freed; the growth counts on the row of the site that asked (its return address). Once the pool is gone the game's fallback stands |
+| `alpha1`-`alpha6` (option `glasslist`) | 0x733D35, 0x734092, 0x734141, 0x734211, 0x734356, 0x734482 | the six calls to `CLinkList::InsertSorted` for `CVisibilityPlugins::m_alphaList` (0xC88070), which `CRenderer::RenderOneNonRoad` clears and draws per vehicle: 20 links, and past them the game draws a part at once, unsorted. A full list gets as many links again (at least 20) from a pool of 980 in the DLL, never freed; the growth counts on the row of the site that asked (its return address). Once the pool is gone the game's fallback stands |
+| `alpha7`, `alpha8` (option `glasslist`) | 0x733DF5, 0x7345F2 | the two calls to `CLinkList::InsertSorted` for `m_alphaEntityList` (0xC88120, 200 links), in `InsertObjectIntoSortedList` and `InsertEntityIntoSortedList`. Every visible car not touching water goes there (`RenderEverythingBarRoads`) and is drawn later by `RenderEntity`, with the alpha test at 100 and the directional light off (`RenderFadingInEntities`). A car that finds the list full is drawn at once instead, with the alpha test at 140: its glass and the tinted covers of its lights are thrown away, and it is lit from the side. As the count on screen crosses 200, cars flip between the two. A full list gets as many links again (at least 200) from a pool of 1800. Open Limit Adjuster's `AlphaEntityList` grows it inside `InsertSorted`, which leaves these nothing to do |
 
 **Changed from SA:O**: the IK check sits after the game's own checks (above);
 the glass links come from a static pool instead of the heap, so there is no
@@ -2984,3 +2985,180 @@ raised, a smaller one raised back, a bigger one kept, and two different sizes
 or one that is not a multiple of 12 left alone. `fixes_test.lua` covers install, in place, replace (old copy
 renamed, then deleted), off (ours taken out, someone else's left), no bundled
 copy, and the two MTA patches standing down.
+
+
+## 58. A car's far-side parts (option farsideparts)
+
+Each part of a car goes through a `CVisibilityPlugins` render callback, which
+skips it (`ShouldCullVehicleAtomic` in gta-reversed) when all three hold:
+
+- the car is further away than `ms_cullCompsDist` (0xC8802C: (20 m × the LOD
+  multiplier)², set each frame in `SetRenderWareCamera`), or
+  `ms_cullBigCompsDist` (0xC88028, 50 m) for big vehicles;
+- the camera is near the car's level (`gAngleWithHorizontal` < 0.2, 0xC88020);
+- the part faces away from the camera: the dot product of the camera vector
+  with the car's forward or right axis, by the part's front, rear, left, right
+  and door flags (`GetDotProductWithCameraVector`, 0x7326D0), is above 0.
+
+This assumes the body hides the far side, but glass doesn't. Through a car's
+near windows, the far windows and doors are missing, and they pop in and out
+as the angle crosses the threshold.
+
+Six callbacks compare the distance with `fcomp dword [cull distance]`. Each
+operand is pointed at 0x863A3C, the exe's own `FLT_MAX` in `.rdata`:
+
+| site | callback | stock operand |
+|---|---|---|
+| 0x73328C | RenderVehicleHiDetailCB | 0xC8802C |
+| 0x73337C | RenderTrainHiDetailCB | 0xC8802C |
+| 0x73346A | RenderVehicleHiDetailCB_BigVehicle | 0xC88028 |
+| 0x734004 | RenderVehicleHiDetailAlphaCB | 0xC8802C |
+| 0x7342C4 | RenderTrainHiDetailAlphaCB | 0xC8802C |
+| 0x7343F4 | RenderVehicleHiDetailAlphaCB_BigVehicle | 0xC88028 |
+
+The patch writes the 4 operand bytes at site + 2. The distance is never above
+`FLT_MAX`, so nothing is culled this way. The cost is a few more draw calls
+per car between 20 m and the LOD distance.
+
+The headlight-beam culling leak (0x6E1425, the same bug as SilentPatch's
+"lightbeam fix") is a different cause: it hides windows seen from inside at
+night.
+
+**Tests.** `fixes_test.lua`: all six read 0x863A3C by default, off puts all six
+back, on applies them again.
+
+
+## 59. A car's see-through parts in depth order (option glasssort)
+
+A car's see-through parts (glass, lights, rotors) go into
+`CVisibilityPlugins::m_alphaList` (0xC88070), which is filled and drawn per
+vehicle: `InsertSorted` keeps it ascending, and `RenderOrderedList` (0x7337A0)
+draws from the tail, farthest first. The key isn't the part's distance,
+though. It's `gVehicleDistanceFromCamera + dot`, where `dot` comes from
+`GetDotProductWithCameraVector`:
+
+- front and rear parts measure along the car's forward axis;
+- side parts measure along its right axis;
+- other parts get 0, and alpha-flagged parts get -0.0001.
+
+So a side window and a taillight are ordered by numbers on unrelated axes. The
+parts write depth, so whichever is drawn first hides the other behind it, and
+the order flips as the camera angle changes. Through a car's windows, a far
+window or a taillight blinks out.
+
+All six inserts already go through `cf_insert_alpha` (section on
+`glasslist`). With `cf_glass_sort` set (`CrashFix_SetGlassSort`, from the
+option), it copies the entry and gives it the squared distance from
+`*ms_pCameraPosn` (0xC88050) to the part's world bounding sphere
+(`RpAtomicGetWorldBoundingSphere`, 0x749330). Only `m_alphaList` is re-keyed,
+and it holds one vehicle's parts at a time. The callback ignores the
+distance it is handed. The option needs `glasslist`, whose rows own the six
+sites.
+
+The rows were `glass1`-`glass6` until the frame-rate fixes' falling-glass
+rows took the same keys (and HighFpsFixes' `world.fallingGlass` stand-down
+names those). They are `alpha1`-`alpha8` now.
+
+**Tests.** `crashfix_dll_test.c`: two parts whose game keys say the near one
+is far come out nearest first by squared distance (1, 100) with the sort on,
+and keep the game's keys with it off. The alpha entity list grows by 200
+links from its own pool on the first insert past its own.
+
+
+## 60. Headlights on car paint (option lightslot)
+
+The game puts its temporary world lights (headlights, lamps, explosions) in
+D3D light slots 1-6 (`CPointLights` through `RwD3D9SetLight`). The vehicle
+env-map pipeline, while setting up a car's paint, puts its specular light in
+slot 1 and enables it (0x5D9A80-0x5D9A92), then disables it after
+(0x5D9F1C). So whatever world light was in slot 1 is gone when the car is
+drawn. From MTA (`InitHooks_Rendering`): the slot operand of those three
+calls goes from 1 to 7, and D3D9 has 8 slots.
+
+| site | call | stock | ours |
+|---|---|---|---|
+| 0x5D9A88 | `RwD3D9SetLight(1, &specular)` | 01 | 07 |
+| 0x5D9A91 | `RwD3D9EnableLight(1, TRUE)` | 01 | 07 |
+| 0x5D9F1F | `RwD3D9EnableLight(1, FALSE)` | 01 | 07 |
+
+SilentPatch makes the same change with slot 8. Its 08 at the three sites
+stands the option down, logged as owned by SilentPatch.
+
+**Tests.** `fixes_test.lua`: all three are 7 by default, off puts 1 back, on
+applies them again.
+
+
+## 61. The sky at wide FOVs (option widesky)
+
+`CClouds::RenderSkyPolys` builds the five sky quads 1.4 camera distances to
+either side (`fmul [0x859994]` at 0x714841 and 0x71485E). That is about 109
+degrees, so a wider FOV (an FOV changer, a scripted camera) shows the quads'
+open ends. 0x859994 is a constant other code reads too, so, as San Andreas
+Online does, only those two operands are pointed at `cf_sky_width` (rows
+`skywide1`, `skywide2`, KIND_PTR). Row `skywidth` (0x714650, the function's
+first instruction `mov eax, [0xB6F03C]`) calls `cf_sky_widen` first, which
+sets it to 2 tan(FOV / 2) from `CDraw::ms_fFOV` (0x8D5038) when that is wider
+than 1.4. At the stock 70 degrees that is 1.4004, so the sky is unchanged.
+
+**Tests.** `crashfix_dll_test.c`: 30 degrees and a bad FOV give 1.4, 70 gives
+1.4004, 100 gives 2.3835, and both rows point at `cf_sky_width`.
+
+
+## 62. Mirrors with anti-aliasing (option mirroraa)
+
+`CMirrors::CreateBuffer` (0x7230A0) creates the mirror's render-target
+raster. Its one call is in `CMirrors::BeforeConstructRenderList` (0x72701D).
+With multisampling on, RwD3D9's multisample type and quality (0xC9C050,
+0xC9C054) carry into that raster, which then can't be used as a texture, so
+the mirror shows nothing or garbage. From MTA: the call goes through
+`cf_mirror_buffer` (row `mirroraa`, KIND_CALL). It zeroes both values, calls
+`CreateBuffer` and puts them back.
+
+**Tests.** `crashfix_dll_test.c`: a stub at 0x7230A0 sees type and quality 0
+during the call, and 4x / quality 2 are back afterwards.
+
+MTA's other water change isn't ported. Its "alternate water order" draws the
+water after everything even with the camera underwater, raises the underwater
+threshold from 0.0 to 0.5, and draws grass in two passes, underwater plants
+before the water and the rest after. Above water, SA already draws the water
+after the entities and the grass. MTA turns the alternate order on only when
+a server customises the water, because the stock order looks better through
+glass. Its grass split check is commented out ("causes some foliage not
+generating", MTA PR #2679), so both passes would draw all the grass.
+
+
+## 63. A car's glass after its solid parts (option glassdepth)
+
+A car's alpha-list parts are whole atomics: a door is its panel and its glass
+together, and the body carries the windscreen. `RenderAlphaAtomics` draws
+them farthest first, one key per part, and every mesh writes depth. No key
+orders a body and a door that overlap, even each part's own distance
+(section 59). From some angles the far door comes after the windscreen, the
+windscreen's depth rejects it, and through the glass the far door is gone and
+the ground shows (2026-11-23 screenshots: the Cheetah from the front and the
+rear quarter). Taking the glass's depth away alone isn't enough: a part drawn
+after the glass then paints over it, and the window seems gone instead.
+
+So the car's `RenderAlphaAtomics` (row `glasszpass`, its call in
+`CRenderer::RenderOneNonRoad`, 0x553318) runs twice. Row `glassz` takes over
+the car paint pipeline's per-mesh switch to blending
+(`CCustomCarEnvMapPipeline::CustomPipeRenderCB`, 0x5D9E23,
+`_rwD3D9RenderStateVertexAlphaEnable`: vertex alpha or material alpha under
+255) and picks what each pass draws:
+
+1. Opaque meshes are drawn as before. A blended mesh is masked:
+   `D3DRS_COLORWRITEENABLE` 0 through `RwD3D9SetRenderState` (0x7FC2D0), and
+   no depth through `fpRenderStateSet` (`RwEngineInstance` + 0x20).
+2. Only blended meshes are drawn, with no depth writes, over everything of the
+   car's behind them. This pass starts masked, so a part drawn by another
+   pipeline appears once, in pass 1.
+
+Afterwards the colour mask and depth writes are put back to what they were.
+Both setters go through RenderWare's state cache. The alpha-list atomics are
+drawn twice, the second time with most meshes masked.
+
+**Tests.** `crashfix_dll_test.c`, with stand-ins for both game functions and
+both state setters, and a list of one glass mesh and one panel. Outside the
+list, glass draws as the game draws it. In the list, pass 1 draws the panel
+with depth and pass 2 the glass without. Colour and depth writes are as they
+were afterwards, including off before and a partial colour mask.

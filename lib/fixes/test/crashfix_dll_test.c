@@ -1281,6 +1281,27 @@ static void fine_timer(void)
     if (begin) ((unsigned (WINAPI *)(unsigned))begin)(1);
 }
 
+/* glassdepth: a fake RenderWare state table, stand-ins for RwD3D9Set/GetRenderState
+ * and an alpha list of one glass mesh and one panel */
+static uintptr_t gd_zwrite = 1;
+static uint32_t gd_colour = 0xF;
+static char gd_log[64];
+static int gd_n;
+static int __cdecl gd_state_set(int state, void *value) { if (state == 8) gd_zwrite = (uintptr_t)value; return 1; }
+static int __cdecl gd_state_get(int state, void *value) { if (state == 8) *(uintptr_t *)value = gd_zwrite; return 1; }
+static void __cdecl gd_d3d_set(uint32_t state, uint32_t value) { if (state == 168) gd_colour = value; }
+static void __cdecl gd_d3d_get(uint32_t state, uint32_t *value) { if (state == 168) *value = gd_colour; }
+static void gd_draw(char kind)                      /* what a draw would leave on screen */
+{
+    if (gd_n < 60) gd_log[gd_n++] = gd_colour ? kind : '-', gd_log[gd_n++] = gd_zwrite ? 'z' : '.';
+    gd_log[gd_n] = 0;
+}
+static void __cdecl gd_pass(void)
+{
+    cf_glass_alpha(1); gd_draw('G');                /* glass */
+    cf_glass_alpha(0); gd_draw('P');                /* a door panel */
+}
+
 __declspec(dllexport) int __cdecl run(void)
 {
     char path[MAX_PATH];
@@ -1804,8 +1825,8 @@ __declspec(dllexport) int __cdecl run(void)
         }
         int all = 1;
         for (int i = 0; i < 20; i++) all &= insertAtomic((void *)(uintptr_t)(0x1000 + i), 100.0f - i) != 0;
-        ok(all && cf_glass_used == 0 && averted("glass1") == 0, "20 parts: the game's own links");
-        ok(insertAtomic((void *)0x2000, 50.5f) != 0 && cf_glass_used == 20 && averted("glass1") == 1,
+        ok(all && cf_glass_used == 0 && averted("alpha1") == 0, "20 parts: the game's own links");
+        ok(insertAtomic((void *)0x2000, 50.5f) != 0 && cf_glass_used == 20 && averted("alpha1") == 1,
            "the 21st: 20 links more, counted on its site's row");
         int n = 0, sorted = 1;
         float last = -1.0f;
@@ -1815,7 +1836,7 @@ __declspec(dllexport) int __cdecl run(void)
         }
         ok(n == 21 && sorted, "21 in the list, nearest first");
         for (int i = 0; i < 19; i++) insertAtomic((void *)0x3000, 10.0f + i);
-        ok(insertAtomic((void *)0x4000, 1.0f) != 0 && cf_glass_used == 60 && averted("glass1") == 2, "the 41st: 40 more");
+        ok(insertAtomic((void *)0x4000, 1.0f) != 0 && cf_glass_used == 60 && averted("alpha1") == 2, "the 41st: 40 more");
         static AlphaList other;
         other.usedHead.next = &other.usedTail, other.usedTail.prev = &other.usedHead;
         other.freeHead.next = &other.freeTail, other.freeTail.prev = &other.freeHead;
@@ -1823,10 +1844,135 @@ __declspec(dllexport) int __cdecl run(void)
         ok(cf_insert_alpha(&other, NULL, &info) == NULL && cf_glass_used == 60, "another list full: the game's NULL");
         cf_glass_used = GLASS_POOL;
         for (int i = 0; i < 39; i++) insertAtomic((void *)0x5000, 5.0f);
-        ok(insertAtomic((void *)0x6000, 5.0f) == 0 && averted("glass1") == 2,
+        ok(insertAtomic((void *)0x6000, 5.0f) == 0 && averted("alpha1") == 2,
            "the pool used up: the game draws that part at once, as before");
         cf_glass_used = GLASS_POOL - 5;
         ok(insertAtomic((void *)0x7000, 5.0f) != 0 && cf_glass_used == GLASS_POOL, "the last 5 links");
+    }
+
+    printf("== glasslist: the alpha entity list grows too, so a car past its 200 is not drawn at once\n");
+    {
+        static AlphaLink links[3];
+        AlphaList *list = ENTITY_LIST;
+        list->usedHead.next = &list->usedTail, list->usedTail.prev = &list->usedHead;
+        list->freeHead.next = &list->freeTail, list->freeTail.prev = &list->freeHead;
+        for (int i = 2; i >= 0; i--) {
+            links[i].prev = &list->freeHead, links[i].next = list->freeHead.next;
+            links[i].next->prev = &links[i], list->freeHead.next = &links[i];
+        }
+        static const struct { void *object, *render; float distance; } car = {(void *)0x1234, NULL, 5.0f};
+        int all = 1;
+        for (int i = 0; i < 3; i++) all &= cf_insert_alpha(list, NULL, &car) != NULL;
+        ok(all && cf_entity_used == 0, "3 cars: the list's own links");
+        ok(cf_insert_alpha(list, NULL, &car) != NULL && cf_entity_used == 200, "the 4th: 200 links more, from its own pool");
+        int n = 0;
+        for (AlphaLink *l = list->usedHead.next; l != &list->usedTail; l = l->next) n++;
+        ok(n == 4, "4 in the list");
+    }
+
+    printf("== glasssort: a car's see-through parts ordered by their own distance from the camera\n");
+    {
+        typedef uint8_t (__cdecl *InsertAtomicFn)(void *atomic, float distance);
+        const InsertAtomicFn insertAtomic = (InsertAtomicFn)0x733D10;
+        static AlphaLink links[4];
+        static uint8_t frame[0xB0], nearPart[0x60], farPart[0x60];
+        static float cam[3] = {0, 0, 0};
+        *(void **)(frame + 0xA0) = frame;                               /* its own root, not dirty */
+        uint8_t *parts[2] = {nearPart, farPart};
+        for (int i = 0; i < 2; i++) {
+            *(void **)(parts[i] + 4) = frame;
+            float *sphere = (float *)(parts[i] + 0x2C);                 /* worldBoundingSphere */
+            sphere[0] = i ? 10.0f : 1.0f, sphere[1] = sphere[2] = 0, sphere[3] = 0.5f;
+        }
+        const float **camera = (const float **)0xC88050;
+        const float *cameraBefore = *camera;
+        *camera = cam;
+        AlphaList *list = ALPHA_LIST;
+        for (int sort = 1; sort >= 0; sort--) {
+            list->usedHead.next = &list->usedTail, list->usedTail.prev = &list->usedHead;
+            list->freeHead.next = &list->freeTail, list->freeTail.prev = &list->freeHead;
+            for (int i = 3; i >= 0; i--) {
+                links[i].prev = &list->freeHead, links[i].next = list->freeHead.next;
+                links[i].next->prev = &links[i], list->freeHead.next = &links[i];
+            }
+            cf_glass_sort = sort;
+            insertAtomic(nearPart, 100.0f);                             /* the game's keys say near is far */
+            insertAtomic(farPart, 1.0f);
+            AlphaLink *first = list->usedHead.next;
+            if (sort)
+                ok(first->object == nearPart && first->distance == 1.0f && first->next->object == farPart
+                   && first->next->distance == 100.0f, "on: nearest first by squared distance (1, 100); the far part is drawn first");
+            else
+                ok(first->object == farPart && first->distance == 1.0f && first->next->object == nearPart,
+                   "off: the game's keys as they came");
+        }
+        *camera = cameraBefore;
+    }
+
+    printf("== widesky: the sky's width follows the FOV, never under the stock 1.4\n");
+    {
+        float *fov = (float *)0x8D5038, before = *fov;
+        float widths[4];
+        const float fovs[4] = {30.0f, 70.0f, 100.0f, 0.0f};
+        for (int i = 0; i < 4; i++) { *fov = fovs[i]; cf_sky_widen(); widths[i] = cf_sky_width; }
+        *fov = before;
+        ok(widths[0] == 1.4f && widths[3] == 1.4f, "30 degrees and a bad FOV: the stock 1.4");
+        ok(fabsf(widths[1] - 1.40042f) < 1e-4f && fabsf(widths[2] - 2.38351f) < 1e-4f, "70: 1.4004, 100: 2.3835 (2 tan(FOV / 2))");
+        ok(hooks[find("skywide1")].to == &cf_sky_width && hooks[find("skywide2")].to == &cf_sky_width, "both fmuls read it");
+    }
+
+    printf("== mirroraa: the mirror buffer made with multisampling off, then put back\n");
+    {
+        static volatile uint32_t seenType = 0xFFFFFFFF, seenQuality = 0xFFFFFFFF;
+        uint8_t *fn = (uint8_t *)0x7230A0, saved[32];
+        memcpy(saved, fn, sizeof saved);
+        uint8_t stub[16] = {0xA1, 0x50, 0xC0, 0xC9, 0x00, 0xA3, 0, 0, 0, 0,     /* mov eax,[type] / mov [seenType],eax */
+                            0xA1, 0x54, 0xC0, 0xC9, 0x00, 0x90};               /* mov eax,[quality] */
+        *(uint32_t *)(stub + 6) = (uint32_t)&seenType;
+        DWORD old;
+        VirtualProtect(fn, 32, PAGE_EXECUTE_READWRITE, &old);
+        memcpy(fn, stub, sizeof stub);
+        fn[16] = 0xA3, *(uint32_t *)(fn + 17) = (uint32_t)&seenQuality, fn[21] = 0xC3;   /* mov [seenQuality],eax / ret */
+        uint32_t *type = (uint32_t *)0xC9C050, *quality = (uint32_t *)0xC9C054;
+        uint32_t beforeType = *type, beforeQuality = *quality;
+        *type = 4, *quality = 2;
+        cf_mirror_buffer();
+        uint32_t afterType = *type, afterQuality = *quality;
+        *type = beforeType, *quality = beforeQuality;
+        memcpy(fn, saved, sizeof saved);
+        VirtualProtect(fn, 32, old, &old);
+        ok(seenType == 0 && seenQuality == 0, "CreateBuffer sees no multisampling");
+        ok(afterType == 4 && afterQuality == 2, "and 4x / quality 2 are back after it");
+    }
+
+    printf("== glassdepth: a car's alpha list twice, its solid parts then its glass\n");
+    {
+        uint8_t *fns[4] = {(uint8_t *)0x7FE0A0, (uint8_t *)0x733E90, (uint8_t *)0x7FC2D0, (uint8_t *)0x7FC320};
+        void *to[4] = {NULL, (void *)gd_pass, (void *)gd_d3d_set, (void *)gd_d3d_get};
+        uint8_t saved[4][8];
+        DWORD old[4];
+        for (int i = 0; i < 4; i++) {
+            memcpy(saved[i], fns[i], 8);
+            VirtualProtect(fns[i], 8, PAGE_EXECUTE_READWRITE, &old[i]);
+            if (!to[i]) fns[i][0] = 0xC3;                                   /* ret */
+            else fns[i][0] = 0xB8, *(uint32_t *)(fns[i] + 1) = (uint32_t)to[i], fns[i][5] = 0xFF, fns[i][6] = 0xE0;
+        }
+        static uint8_t engine[0x40];
+        *(void **)(engine + 0x20) = (void *)gd_state_set, *(void **)(engine + 0x24) = (void *)gd_state_get;
+        uint8_t **enginePtr = (uint8_t **)0xC97B24, *engineBefore = *enginePtr;
+        *enginePtr = engine;
+        gd_zwrite = 1, gd_colour = 0xF, gd_n = 0;
+        cf_glass_alpha(1); gd_draw('G');
+        ok(!strcmp(gd_log, "Gz"), "outside the list: glass drawn as the game draws it");
+        gd_n = 0;
+        cf_render_car_alpha();
+        ok(!strcmp(gd_log, "-.Pz" "G.-."), "pass 1 the panel with depth, pass 2 the glass without");
+        ok(gd_zwrite == 1 && gd_colour == 0xF, "and colour and depth writes as they were");
+        gd_zwrite = 0, gd_colour = 0x7, gd_n = 0;
+        cf_render_car_alpha();
+        ok(gd_zwrite == 0 && gd_colour == 0x7, "off before, off after; a colour mask is kept");
+        *enginePtr = engineBefore;
+        for (int i = 0; i < 4; i++) memcpy(fns[i], saved[i], 8), VirtualProtect(fns[i], 8, old[i], &old[i]);
     }
 
     printf("== MTA's frame-rate fixes: the 30 Hz tick, sleep frames, turn damping\n");

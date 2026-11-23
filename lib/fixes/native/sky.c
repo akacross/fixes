@@ -21,8 +21,14 @@
 /* ------------------------------------------------------------------------ */
 #define SKY(FJ, FP) \
     FJ(skydither, "skygrad", "CClouds::RenderSkyPolys: the sky's gradient dithered, so it shows no colour bands", \
-        0x7154A8, 5, "\xE9\xA3\xCC\x00\x00")
+        0x7154A8, 5, "\xE9\xA3\xCC\x00\x00") \
+    FJ(skywidth, "widesky", "CClouds::RenderSkyPolys: the sky's width follows the FOV", 0x714650, 5, "\xA1\x3C\xF0\xB6\x00") \
+    FP(skywide1, "widesky", KIND_PTR, "CClouds::RenderSkyPolys: a sky quad's width", 0x714843, 4, "\x94\x99\x85\x00", \
+        &cf_sky_width) \
+    FP(skywide2, "widesky", KIND_PTR, "CClouds::RenderSkyPolys: a sky quad's width", 0x714860, 4, "\x94\x99\x85\x00", \
+        &cf_sky_width)
 
+extern float cf_sky_width;
 SKY(FDECLARE_J, FDECLARE_P)
 
 typedef struct { float x, y, z, nx, ny, nz; uint32_t color; float u, v; } SkyVertex;     /* RwIm3DVertex */
@@ -128,10 +134,37 @@ void __cdecl cf_sky_flush(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* The hook body                                                            */
+/* The sky's width (San Andreas Online's)                                   */
+/* ------------------------------------------------------------------------ */
+/* The five sky quads reach 1.4 camera distances either side (0x859994, a
+ * constant others read too): about 109 degrees, so a wider FOV shows their
+ * open ends. Their two fmuls read cf_sky_width, set at the top of
+ * RenderSkyPolys to 2 tan(FOV / 2) when that is wider (room for a rolled
+ * camera as well). */
+#define DRAW_FOV (*(const float *)0x8D5038)         /* CDraw::ms_fFOV */
+float cf_sky_width = 1.4f;
+
+void __cdecl cf_sky_widen(void)
+{
+    float fov = DRAW_FOV, width = 1.4f;
+    if (fov > 0.0f && fov < 179.0f) {
+        float wide = 2.0f * tanf(fov * 0.008726646f);   /* pi / 360 */
+        if (wide > width) width = wide;
+    }
+    cf_sky_width = width;
+}
+
+/* ------------------------------------------------------------------------ */
+/* The hook bodies                                                          */
 /* ------------------------------------------------------------------------ */
 __asm__(
 ".intel_syntax noprefix\n"
 "HOOK skydither\n"
 "    jmp _cf_sky_flush\n"
+"HOOK skywidth\n"
+"    pushad\n"
+"    call _cf_sky_widen\n"
+"    popad\n"
+"    mov eax, dword ptr ds:0xB6F03C\n"
+"    GO 0x714655\n"
 ".att_syntax\n");

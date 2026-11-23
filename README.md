@@ -74,6 +74,23 @@ Game bugs:
   bone shrinks to nothing, or the ped is not drawn (MTA's checks).
 - A car's glass and other see-through parts past 20 draw unsorted: the list
   grows (San Andreas Online's fix).
+- Cars lose their glass and the tinted covers of their lights, and are lit
+  differently, as the camera moves. A car that found the 200-entry alpha
+  entity list full was drawn at once with a stricter alpha test, which throws
+  the glass away. That list grows too (`glasslist`).
+- A window, or the door behind it, vanishes depending on the angle. A car's
+  see-through parts are now drawn in two passes: the solid parts first, then
+  the glass on top without writing depth (`glassdepth`). Each part is also
+  sorted by its own distance from the camera (`glasssort`).
+- A car further than 20 m away skips the windows and doors on its far side,
+  so you could see through it. They are always drawn now (`farsideparts`).
+- The sky's sides show at a wide FOV: the sky widens with the FOV
+  (`widesky`, San Andreas Online's).
+- Mirrors show nothing with anti-aliasing on: their buffer is made without
+  multisampling (`mirroraa`, MTA's).
+- Headlights and other world lights don't light a car's paint: the paint's
+  own light moves out of their slot (`lightslot`, MTA's; SilentPatch does the
+  same and fixes leaves it to SilentPatch).
 - The sky shows lines across its gradient (colour bands): it is drawn
   dithered, so the steps blend.
 - Switching the Frame Limiter on could crash: the game reset the graphics
@@ -274,9 +291,15 @@ that averted a crash says so.
 | `camerafps` | on | the on-foot and aim cameras as at 30 fps (HighFpsFixes) |
 | `weaponfps` | on | spray, flame and extinguisher particles, ammo and damage, the chainsaw and tear gas as at 30 fps (HighFpsFixes) |
 | `pedmatrix` | on | a ped with broken bone matrices is not drawn stretched across the screen |
-| `glasslist` | on | a car's see-through parts drawn in order past 20 |
+| `glasslist` | on | a car's see-through parts drawn in order past 20, and the alpha entity list grows past 200 |
+| `glassdepth` | on | a car's glass drawn after its solid parts without writing depth |
+| `glasssort` | on | a car's see-through parts sorted by their own distance from the camera |
+| `farsideparts` | on | a car's far-side parts drawn at any distance |
 | `parkedcol` | on | a parked car standing still skips the collision step |
 | `skygrad` | on | the sky drawn dithered, without colour bands |
+| `widesky` | on | the sky widens with the FOV |
+| `mirroraa` | on | mirrors work with anti-aliasing on |
+| `lightslot` | on | headlights and other world lights reach a car's paint |
 | `novsyncreset` | on | the Frame Limiter and loading screens do not reset the graphics device for vsync |
 | `anisotropic` | on | anisotropic texture filtering, 16x or the device's most |
 | `poollimits` | on | bigger pools through poollimits.asi beside gta_sa.exe, from the next launch |
@@ -333,9 +356,11 @@ against gta_sa.exe's own code, and `position_guard_test.sh` and
   **Junior_Djjr** (MIT).
 - The dithered sky follows skygrad.asi by **FraGae**; the code and shaders
   are fixes' own.
-- The shadow-mesh and IK-chain crash fixes and the glass list are from
-  [San Andreas Online](https://github.com/Dryxio/san-andreas-online)
+- The shadow-mesh and IK-chain crash fixes, the glass list and the wide sky
+  are from [San Andreas Online](https://github.com/Dryxio/san-andreas-online)
   (GPL-3.0), an MTA fork.
+- The mirror buffer and the car paint light slot follow
+  [MTA:SA](https://github.com/multitheftauto/mtasa-blue)'s.
 
 ## License
 
