@@ -25,13 +25,20 @@ Crashes:
 - A NaN, infinite or off-map position from anywhere (a server, another
   player's sync, a script) sending you to an endless white loading screen:
   the game itself puts it back before a ped, car or object is placed, and
-  your own ped and car stay where they were. No SA-MP version or library
+  your own ped and car stay where they were, including after a respawn
+  replaced your ped. A server teleport that passed the check is kept: the
+  ped is never put back at 0, 0, 0, where it was created. No SA-MP version or library
   involved. Only x and y are held to the map (20000); height may go to
   1000000, so objects a server keeps underground or in the sky are left
   alone.
 - A camera gone NaN (after a fall or a teleport): the world stopped drawing
-  and the screen flashed until a respawn. It is set up again behind you on
-  the next frame.
+  and the screen flashed until a respawn. The ped it follows goes back to
+  its own last good position first, so the camera is not rebuilt from the
+  NaN, and the camera is set up again behind it on the next frame.
+- Respawning at Blueberry (0, 0), falling from the sky, after a fall death.
+  Three seconds after a death the game ran its single-player "wasted"
+  respawn to the closest hospital, but SA-MP keeps that list empty, so the
+  point was unset. That respawn no longer runs; the server's spawn stands.
 - Spectating a ped that has no task: the camera crashed every frame (SA-MP
   swallowed it as "Warning(s007) ... at 0x523E6B") and was left half
   updated.

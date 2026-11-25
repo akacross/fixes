@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.6")
+script_version("0.27.7")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -637,10 +637,23 @@ local gamePatches = {
         -- into PoliceRestartPoints (0xA43390); SA-MP drives this through
         -- SetSpawnInfo. NOPing the `mov [0xA4326C],cx` write-back pins
         -- NumberOfHospitalRestarts so every call rewrites slot 0. Side effect:
-        -- hospital restart points stop registering, which does not matter when
-        -- the server owns respawns
+        -- hospital restart points stop registering. The wasted respawn below
+        -- reads that list: with the count at 0 its point is never written,
+        -- so the patch after this one keeps that respawn from running
         name = "CRestart::AddHospitalRestartPoint overflow",
         va = 0x460773, from = hexBytes("66 89 0D 6C 32 A4 00"), to = nops(7)
+    },
+    {   -- CGameLogic::Update, three seconds after the ped dies: a dead ped
+        -- (state 0x37) and a dying ped that is stuck (state 0x36, flag 0x20)
+        -- call KillPlayer and set GameState to WASTED, and the wasted case
+        -- then teleports to the closest hospital. Both branches jump to the
+        -- arrest test instead. SA-MP respawns the player itself
+        name = "CGameLogic::Update dead ped does not start a wasted respawn",
+        va = 0x442CEF, from = hexBytes("74 0E"), to = hexBytes("EB 2D")
+    },
+    {
+        name = "CGameLogic::Update dying ped does not start a wasted respawn",
+        va = 0x442CFD, from = hexBytes("74 1F"), to = hexBytes("EB 1F")
     },
     {   -- CRenderer::AddEntityToRenderList stores into ms_aVisibleEntityPtrs
         -- (1000 slots) unchecked; past 1000 it overwrites the counts after it,
@@ -2365,9 +2378,16 @@ end
 -- (servers keep objects at z -10000 or high in the sky), by the
 -- float's bits (one unsigned compare also catches NaN and inf).
 -- A bad position on the player's ped or its vehicle takes the last good one
--- the check saw for it, so a bad teleport does not happen; on anything else
--- it takes the RenderWare frame's (the last one drawn), else 0, 0, 0. The
--- speeds are zeroed; NaN or inf speeds alone are zeroed too. Each is counted. SA-MP's version, other mods and the RPC path do not matter.
+-- the check saw for it, so a bad teleport does not happen. The player is that
+-- ped even after a respawn replaced it. A position of exactly 0, 0, 0 is the
+-- ped's birthplace, not a teleport: it is never stored over a real one, and a
+-- bad position does not come back to it while a teleport is known. The
+-- RenderWare frame is tried first when it holds a real position (SA-MP writes
+-- the teleport there in the same Add). Anything else takes that frame, else
+-- 0, 0, 0. The speeds are zeroed; NaN or inf speeds alone are zeroed too.
+-- Each is counted. SA-MP's version and other mods do not matter. A player
+-- teleport RPC that passed the range check is written into the ped's slot
+-- before SA-MP applies it.
 -- Option "positionguard".
 local PG = {
     XY_MAX = 0x469C4000,           -- 20000.0
@@ -2377,7 +2397,7 @@ local PG = {
         {va = 0x544A30, from = hexBytes("64 A1 00 00 00 00")},  -- CPhysical::Add: mov eax, fs:[0]
         {va = 0x542560, from = hexBytes("83 EC 2C 55 8B E9")},  -- RemoveAndAdd: sub esp,2Ch / push ebp / mov ebp,ecx
     },
-    BLOCK_SIZE = 0x200,            -- counters, two position slots, the last bad one, then the code at ROUTINE
+    BLOCK_SIZE = 0x300,            -- counters, two position slots, the last bad one, then the code at ROUTINE
     ROUTINE = 0x40,
     SAMPLE = 0x28,                 -- the last bad position: {entity, x, y, z}
     PLAYER = 0xB7CD98,             -- CWorld::Players[0].m_pPed
@@ -2427,6 +2447,14 @@ function PG.code(block, player)
     jump("0F 84", "speeds", true)
     emit("3B F0")                          -- cmp esi, eax
     jump("75", "car")
+    -- 0, 0, 0 is where a ped is born. It must not replace a teleport.
+    emit("8B 07 0B 47 04 0B 47 08")        -- or x, y, z
+    jump("75", "saveped")
+    emit("83 3D", PED)
+    emit("00")                             -- cmp dword [ped], 0
+    jump("74", "saveped")
+    jump("E9", "speeds", true)
+    label("saveped")
     emit("89 35", PED)                     -- mov [ped], esi
     emit("BA", PED_POS)                    -- mov edx, ped's x, y, z
     jump("EB", "keep")
@@ -2444,20 +2472,57 @@ function PG.code(block, player)
     emit("8B 07 A3", BAD_POS)              -- mov eax, [edi] / mov [x], eax
     emit("8B 47 04 A3", BAD_POS + 4)
     emit("8B 47 08 A3", BAD_POS + 8)
+    -- The current player, even when a respawn replaced the ped the slot
+    -- remembers. A stored teleport (anything but 0, 0, 0) is put back.
+    -- The birthplace is not: a real frame position is the teleport then.
+    emit("A1", player)                     -- mov eax, [player]
+    emit("3B F0")                          -- cmp esi, eax
+    jump("75", "saved")
+    emit("83 3D", PED)
+    emit("00")                             -- cmp dword [ped], 0: nothing saved yet
+    jump("74", "frame")
+    emit("A1", PED_POS)
+    emit("0B 05", PED_POS + 4)
+    emit("0B 05", PED_POS + 8)             -- the stored x, y, z
+    jump("74", "frame")                    -- origin: not a teleport
+    emit("89 35", PED)                     -- mov [ped], esi
+    emit("BA", PED_POS)
+    jump("E9", "copy", true)
+    label("saved")
     emit("BA", PED_POS)
     emit("3B 35", PED)                     -- cmp esi, [ped]: put its last good one back
     jump("74", "copy")
     emit("BA", CAR_POS)
     emit("3B 35", CAR)
     jump("74", "copy")
+    label("frame")
     emit("8B 46 18 85 C0")                 -- mov eax, [esi+18h] (m_pRwObject) / test eax, eax
-    jump("74", "zero")
+    jump("74", "fallback")
     emit("8B 40 04 85 C0")                 -- mov eax, [eax+4] (its frame) / test eax, eax
-    jump("74", "zero")
+    jump("74", "fallback")
     emit("8D 50 40")                       -- lea edx, [eax+40h]: the frame's position
     jump("E8", "valid", true)
     emit("85 C0")
+    jump("75", "fallback")
+    emit("8B 02 0B 42 04 0B 42 08")        -- a frame at 0, 0, 0 is not a teleport
+    jump("74", "fallback")
+    emit("A1", player)
+    emit("3B F0")
+    jump("75", "copy")
+    emit("89 35", PED)                     -- the frame's position is the new last good one
+    emit("8B 02 A3", PED_POS)
+    emit("8B 42 04 A3", PED_POS + 4)
+    emit("8B 42 08 A3", PED_POS + 8)
+    jump("EB", "copy")
+    label("fallback")
+    emit("A1", player)
+    emit("3B F0")
     jump("75", "zero")
+    emit("83 3D", PED)
+    emit("00")
+    jump("74", "zero")
+    emit("BA", PED_POS)
+    jump("EB", "copy")
     label("copy")
     emit("8B 02 89 07 8B 42 04 89 47 04 8B 42 08 89 47 08")   -- x, y, z from edx
     jump("EB", "stop")
@@ -2565,6 +2630,21 @@ function fixPositionGuard()
     log(string.format("[fixes] 0x%X, 0x%X position guard: NaN, inf and off-map positions put back before a ped, " ..
         "car or object is placed (code at 0x%X)", PG.SITES[1].va, PG.SITES[2].va, PG.block), "info")
     return true
+end
+
+-- A player teleport that passed the range check. Written before SA-MP applies
+-- it, so a ped that is born at 0, 0, 0 and then goes bad comes back to the
+-- teleport. Exact origin is not stored. The slot pointer is the current
+-- player, or 1 when that ped does not exist yet: the bad path only copies
+-- the coordinates for the player.
+function PG.noteTeleport(x, y, z)
+    if not (posGuard and posGuard.block) then return end
+    if x == 0 and y == 0 and z == 0 then return end
+    local slot = posGuard.block + 8
+    local ped = readU32(PG.PLAYER)
+    ffi.cast("uint32_t*", slot)[0] = ped ~= 0 and ped or 1
+    local xyz = ffi.cast("float*", slot + 4)
+    xyz[0], xyz[1], xyz[2] = x, y, z
 end
 
 -- Off: each site that jumps to an entry of ours gets its bytes back.
@@ -4020,13 +4100,14 @@ local function checkAnimation(bs)
     if name < 1 or name > ANIM_NAME_MAX then return ("an animation name of %d bytes"):format(name) end
 end
 
--- nil, or what is wrong with the position
+-- nil and the coordinates, or what is wrong with the position
 local function checkPosition(bs)
     local x, y, z = raknetBitStreamReadFloat(bs), raknetBitStreamReadFloat(bs), raknetBitStreamReadFloat(bs)
     if x ~= x or y ~= y or z ~= z then return "a NaN position" end
     if math.abs(x) > POS_XY_MAX or math.abs(y) > POS_XY_MAX or z < POS_Z_MIN or z > POS_Z_MAX then
         return ("a position off the world (%.0f, %.0f, %.0f)"):format(x, y, z)
     end
+    return nil, x, y, z
 end
 
 -- a 32-byte menu line holding its terminator
@@ -4113,11 +4194,11 @@ local function screenRpc(id, bs)
             noteRpc("menu", "dropped a server menu with " .. why)
             return false
         end
-    elseif (id == RPC_SET_PLAYER_POS or id == RPC_SET_PLAYER_POS_FIND_Z or id == RPC_SET_VEHICLE_POS)
-            and options.rpcpositions ~= false then
+    elseif id == RPC_SET_PLAYER_POS or id == RPC_SET_PLAYER_POS_FIND_Z or id == RPC_SET_VEHICLE_POS then
         local vehicle = id == RPC_SET_VEHICLE_POS and raknetBitStreamReadInt16(bs)
-        local why = checkPosition(bs)
-        if why then
+        local why, x, y, z = checkPosition(bs)
+        if not why and not vehicle then PG.noteTeleport(x, y, z) end
+        if why and options.rpcpositions ~= false then
             noteRpc("pos", ("dropped a server teleport of %s to %s"):format(
                 vehicle and ("vehicle " .. vehicle) or "the player", why))
             return false
@@ -4211,11 +4292,20 @@ end
         return true
     end
 
+    -- CTimer::m_snTimeInMilliseconds, cast once: code() reads it every frame
+    -- to decide whether it is time to look, with or without a parachute
+    -- (a cast a call allocates).
+    local gameMsPtr
+    local function gameMs()
+        gameMsPtr = gameMsPtr or ffi.cast("uint32_t*", 0xB7CB84)
+        return gameMsPtr[0]
+    end
+
     -- The running PLCHUTE's sites, or nil and why. Every frame while it runs
     -- (its code goes when it ends), else every LOOK_EVERY.
     local function code()
         if not running then
-            local now = readU32(0xB7CB84)                           -- CTimer::m_snTimeInMilliseconds
+            local now = gameMs()
             -- (a timer that went back, a new game, looks at once)
             if lookedAt and now >= lookedAt and now - lookedAt < LOOK_EVERY then
                 return nil, "no PLCHUTE running"
@@ -5151,15 +5241,34 @@ end
             d.reason or "no death report", d.weapon, d.by), "info")
     end
 
+    -- CWorld::Players[0].m_pPed, cast once for the session: getCharPointer
+    -- boxes a new cdata on every call.
+    local playerSlot
+    local function playerPed()
+        playerSlot = playerSlot or ffi.cast("uint32_t*", 0xB7CD98)
+        return playerSlot[0]
+    end
+
+    -- The player ped's health, armour and state, cast once per ped and
+    -- again only when the ped pointer changes (a respawn); readable() is
+    -- asked then, not every frame.
+    local watched, hpPtr, arPtr, statePtr
+
     -- From the main loop, every frame
     function deathFrame()
         if not DEATH.on then return end
         local now = clock()
         if DEATH.dying and now - DEATH.dying.t > DEATH.WAIT then report() end
-        local okP, ped = pcall(getCharPointer, PLAYER_PED)
-        if not okP or not ped or ped == 0 or not readable(ped, 0x770) then return end
-        local hp, ar = ffi.cast("float*", ped + 0x540)[0], ffi.cast("float*", ped + 0x548)[0]
-        local state = readU32(ped + 0x530)
+        local ped = playerPed()
+        if ped == 0 then watched = nil; return end
+        if watched ~= ped then
+            if not readable(ped, 0x770) then return end
+            watched = ped
+            hpPtr = ffi.cast("float*", ped + 0x540)
+            arPtr = ffi.cast("float*", ped + 0x548)
+            statePtr = ffi.cast("uint32_t*", ped + 0x530)
+        end
+        local hp, ar, state = hpPtr[0], arPtr[0], statePtr[0]
         local dead = hp <= 0 or state == 54 or state == 55
         local frames = DEATH.frames
         -- a snapshot at most every EVERY ms, and always the frame it dies in

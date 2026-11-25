@@ -1901,6 +1901,7 @@ do
         0x44000000, 0x44000100, 0x45000000
     env.PLAYER_PED = 1
     env.getCharPointer = function() return PED end
+    putU32(0xB7CD98, PED)          -- CWorld::Players[0].m_pPed, which deathtrace reads
     env.getCharCoordinates = function() return 1500.0, -1600.0, 13.5 end
     env.getCharSpeed = function() return 0.25 end
     env.getCharPointerHandle = function(p) return p end

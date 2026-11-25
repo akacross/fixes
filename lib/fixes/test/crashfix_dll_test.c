@@ -1684,7 +1684,7 @@ __declspec(dllexport) int __cdecl run(void)
     printf("== a camera gone NaN (camnan)\n");
     {
         typedef void (__attribute__((thiscall)) *InitFn)(void *);
-        static uint8_t cam[0x238], clean[0x238], ent[0x40];
+        static uint8_t cam[0x238], clean[0x238], ent[0x80];
         static float mat[16] = {1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 100, 200, 10, 0};    /* forward (0, 2): not unit */
         ((InitFn)0x50E490)(cam);
         *(uint16_t *)(cam + 0x0C) = 18;
@@ -1694,6 +1694,7 @@ __declspec(dllexport) int __cdecl run(void)
         ok(!memcmp(cam, clean, sizeof cam) && averted("camnan") == 0, "a camera with no NaN: left");
 
         *(float **)(ent + 0x14) = mat;
+        ent[0x36] = 3;                                      /* a ped */
         *(void **)(cam + 0x21C) = ent;
         *(float *)(cam + 0xA0) = NAN;                       /* the true beta */
         *(float *)(cam + 0x194) = INFINITY;                 /* the front */
@@ -1722,15 +1723,38 @@ __declspec(dllexport) int __cdecl run(void)
         ok(averted("camnan") == 3 && *(uint32_t *)(cam + 0x21C) == 0x7FC00010, "a pointer with a NaN's bits: left");
         *(void **)(cam + 0x21C) = NULL;
         *player = ent;
-        mat[13] = NAN;                                      /* the ped nowhere: no source from it */
+        mat[13] = NAN;                                      /* the ped nowhere: put back where it last was */
         *(float *)(cam + 0xA4) = NAN;
         *(float *)(cam + 0x1A0) = 5;
         cf_cam_check(cam);
-        ok(averted("camnan") == 4 && src[1] == 5, "a target nowhere: the source left");
+        ok(averted("camnan") == 4 && mat[13] == 200 && src[1] == 196,
+           "a target nowhere: the ped put back, the camera behind it");
         mat[13] = 200;
         *(float *)(cam + 0xA4) = NAN;
         cf_cam_check(cam);
         ok(averted("camnan") == 5 && src[1] == 196, "no target: the player's ped");
+
+        LONG walks = cf_n_readable;
+        for (int i = 0; i < 5; i++) cf_cam_check(cam);
+        ok(cf_n_readable == walks, "a known target with a known matrix: no VirtualQuery a frame");
+        static uint8_t other[0x80], building[0x80];
+        static float otherMat[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, NAN, 50, 10, 0};
+        static float buildingMat[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, NAN, 60, 10, 0};
+        *(float **)(other + 0x14) = otherMat, other[0x36] = 3;
+        *(float **)(building + 0x14) = buildingMat, building[0x36] = 1;
+        *(float *)(building + 0x44) = NAN;                  /* not a speed: a building has none */
+        *(void **)(cam + 0x21C) = other;
+        cf_cam_check(cam);
+        ok(isnan(otherMat[12]) && otherMat[13] == 50, "another ped, never seen finite: not given the first one's position");
+        *(void **)(cam + 0x21C) = building;
+        cf_cam_check(cam);
+        ok(isnan(buildingMat[12]) && isnan(*(float *)(building + 0x44)), "a building: left as it is");
+        mat[13] = NAN;
+        *(void **)(cam + 0x21C) = ent;
+        cf_cam_check(cam);
+        ok(mat[13] == 200, "the first ped, back on: its own last position");
+        mat[13] = 200;
+        *(void **)(cam + 0x21C) = NULL;
 
         static int32_t got_ecx;
         static float got_st0;

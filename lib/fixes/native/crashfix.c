@@ -378,12 +378,74 @@ static int readable(const void *p, size_t n);
 /* A CCam's floats by offset: its angles and speeds, bump, vectors, distances */
 static const uint16_t CAM_FLOATS[][2] = {{0x2C, 0x110}, {0x118, 0x120}, {0x124, 0x208}, {0x220, 0x22C}};
 
+/* The last finite position of each entity a camera follows. A fall leaves a
+ * ped at NaN, and follow-ped writes that NaN back into the camera after this
+ * hook returns, so zeroing the camera's floats does not hold: the entity goes
+ * back to its own last position first. Its memory is checked when it takes a
+ * slot and when its matrix moves, not every frame. Peds, vehicles and
+ * objects only (their speeds sit at +0x44). */
+#define FOLLOWED_SLOTS 4
+typedef struct { const uint8_t *who; const float *matrix; float pos[3]; int ok, have; } Followed;
+static Followed followed[FOLLOWED_SLOTS];
+static int followed_next;
+
+static Followed *followed_slot(const uint8_t *e)
+{
+    for (int i = 0; i < FOLLOWED_SLOTS; i++)
+        if (followed[i].who == e) return &followed[i];
+    Followed *f = &followed[followed_next];
+    followed_next = (followed_next + 1) % FOLLOWED_SLOTS;
+    memset(f, 0, sizeof *f);
+    f->who = e;
+    if (readable(e, 0x5C)) {
+        int type = e[0x36] & 7;                                   /* CEntity::m_nType */
+        f->ok = type == 2 || type == 3 || type == 4;
+    }
+    return f;
+}
+
+/* -> where the entity's position is read and written, or NULL */
+static float *followed_position(Followed *f, uint8_t *e)
+{
+    const float *mat = *(const float **)(e + 0x14);               /* CPlaceable::m_matrix */
+    if (!mat) return (float *)(e + 4);
+    if (mat != f->matrix) {
+        if (!readable(mat, 0x40)) return NULL;
+        f->matrix = mat;
+    }
+    return (float *)mat + 12;
+}
+
+static void repair_followed(uint8_t *e)
+{
+    Followed *f = followed_slot(e);
+    if (!f->ok) return;
+    float *pos = followed_position(f, e);
+    if (!pos) return;
+    if (valid_position(pos)) {
+        memcpy(f->pos, pos, sizeof f->pos);
+        f->have = 1;
+        return;
+    }
+    if (!f->have) return;                                       /* never invent the origin */
+    memcpy(pos, f->pos, sizeof f->pos);
+    for (int i = 0; i < 6; i++) {                               /* move and turn speed */
+        float *speed = (float *)(e + 0x44 + 4 * i);
+        if ((*(uint32_t *)speed & 0x7F800000u) == 0x7F800000u) *speed = 0.0f;
+    }
+}
+
 /* A camera with a NaN or an infinity feeds it back to itself every frame and
- * the world is not drawn. Its bad floats are zeroed and it is set up again
- * as a change of mode does (CCam::Init, its mode kept), behind its target. */
+ * the world is not drawn. The followed ped is put back first (the rest of
+ * CCam::Process would rebuild the camera from it), then the bad floats are
+ * zeroed and it is set up again as a change of mode does (CCam::Init, its
+ * mode kept), behind its target. */
 void cf_cam_check(uint8_t *cam)
 {
     int bad = 0;
+    uint8_t *target = *(uint8_t **)(cam + 0x21C);
+    if (!target) target = *(uint8_t **)0xB7CD98;                   /* the player's ped */
+    if (target) repair_followed(target);
     for (int r = 0; r < 4; r++)
         for (int o = CAM_FLOATS[r][0]; o < CAM_FLOATS[r][1]; o += 4)
             if ((*(uint32_t *)(cam + o) & 0x7F800000u) == 0x7F800000u) *(float *)(cam + o) = 0.0f, bad = 1;
@@ -391,8 +453,7 @@ void cf_cam_check(uint8_t *cam)
     uint16_t mode = *(uint16_t *)(cam + 0x0C);
     ((void (__attribute__((thiscall)) *)(void *))0x50E490)(cam);
     *(uint16_t *)(cam + 0x0C) = mode;
-    const uint8_t *target = *(uint8_t **)(cam + 0x21C);
-    if (!target) target = *(uint8_t **)0xB7CD98;                   /* the player's ped */
+    {
     const float *m = target && readable(target, 0x18) ? *(const float **)(target + 0x14) : NULL;
     if (m && readable(m, 0x40)) {
         float fx = m[4], fy = m[5], len = sqrtf(fx * fx + fy * fy);
@@ -403,6 +464,7 @@ void cf_cam_check(uint8_t *cam)
             front[0] = fx * 0.9701425f, front[1] = fy * 0.9701425f, front[2] = -0.2425356f;    /* (4, -1) normalised */
             memcpy(cam + 0x1A8, source, 12);                          /* the source before looking behind */
         }
+    }
     }
     InterlockedIncrement(&cf_n_camnan);
 }
@@ -1683,9 +1745,12 @@ static int samp_hook(void)
     return -1;
 }
 
+volatile LONG cf_n_readable;                    /* VirtualQuery walks, for the tests */
+
 static int readable(const void *p, size_t n)
 {
     MEMORY_BASIC_INFORMATION mbi;
+    InterlockedIncrement(&cf_n_readable);
     const uint8_t *at = p, *end = at + n;
     while (at < end) {
         if (!VirtualQuery(at, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT

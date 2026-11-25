@@ -101,7 +101,7 @@ int main(int argc, char **argv)
     if (block != (uint8_t *)BASE) { printf("VirtualAlloc at 0x%08X failed\n", BASE); return 2; }
     size_t n = fread(block, 1, 0x10000, f);
     fclose(f);
-    ok(n > 0x10 && n < 0x200, "guard.bin read, smaller than its 0x200 block");
+    ok(n > 0x10 && n < 0x300, "guard.bin read, smaller than its 0x300 block");
 
     static Entity e;
     static Matrix m;
@@ -235,6 +235,23 @@ int main(int argc, char **argv)
         set3(&pm, 0x30, 0.0f, 0.0f, 2147483647.0f);
         call(&ped);
         ok(is3(&pm, 0x30, 1600.0f, -1700.0f, 14.0f), "the latest good one, after a legal teleport");
+        {
+            static Entity respawned;
+            static Matrix rm;
+            static Frame rf;
+            static RwObject rrw;
+            memset(&respawned, 0, sizeof respawned);
+            *(Matrix **)(respawned.b + 0x14) = &rm;
+            *(RwObject **)(respawned.b + 0x18) = &rrw;
+            *(Frame **)(rrw.b + 4) = &rf;
+            set3(&rf, 0x40, nan, nan, nan);
+            set3(&rm, 0x30, nan, nan, nan);
+            *player = &respawned;                           /* a new ped, the saved one left behind */
+            call(&respawned);
+            ok(is3(&rm, 0x30, 1600.0f, -1700.0f, 14.0f),
+               "a respawned ped gets the last good position, not 0, 0, 0");
+            *player = &ped;
+        }
         set3(&cm, 0x30, 2500.0f, 2500.0f, 10.0f);
         call(&car);
         set3(&cm, 0x30, inf, 0.0f, 0.0f);
@@ -245,6 +262,44 @@ int main(int argc, char **argv)
         set3(&om, 0x30, nan, 0.0f, 0.0f);
         call(&other);
         ok(is3(&om, 0x30, 0.0f, 0.0f, 0.0f), "anything else: no slot, no frame, 0, 0, 0");
+
+        printf("== 0, 0, 0 does not replace a known teleport\n");
+        set3(&pf, 0x40, nan, nan, nan);
+        set3(&pm, 0x30, 1294.0f, -1403.0f, 53.0f);
+        call(&ped);
+        set3(&pm, 0x30, 0.0f, 0.0f, 0.0f);
+        call(&ped);
+        ok(is3(&pm, 0x30, 0.0f, 0.0f, 0.0f), "the ped may stand at the origin");
+        set3(&pm, 0x30, nan, nan, nan);
+        call(&ped);
+        ok(is3(&pm, 0x30, 1294.0f, -1403.0f, 53.0f),
+           "a bad position comes back to the teleport, not 0, 0, 0");
+
+        printf("== an origin slot gives way to the frame's teleport\n");
+        {
+            static Entity born;
+            static Matrix bm;
+            static Frame bf;
+            static RwObject brw;
+            volatile uint32_t *slot = (volatile uint32_t *)(BASE + 8);
+            slot[0] = slot[1] = slot[2] = slot[3] = 0;     /* no teleport stored */
+            memset(&born, 0, sizeof born);
+            *(Matrix **)(born.b + 0x14) = &bm;
+            *(RwObject **)(born.b + 0x18) = &brw;
+            *(Frame **)(brw.b + 4) = &bf;
+            *player = &born;
+            set3(&bm, 0x30, 0.0f, 0.0f, 0.0f);
+            set3(&bf, 0x40, nan, nan, nan);
+            call(&born);                                    /* the birthplace is the first thing stored */
+            set3(&bf, 0x40, 1296.0f, -1413.0f, 54.0f);
+            set3(&bm, 0x30, nan, nan, nan);
+            call(&born);
+            ok(is3(&bm, 0x30, 1296.0f, -1413.0f, 54.0f), "the frame's teleport, not the birthplace");
+            set3(&bf, 0x40, nan, nan, nan);
+            set3(&bm, 0x30, nan, nan, nan);
+            call(&born);
+            ok(is3(&bm, 0x30, 1296.0f, -1413.0f, 54.0f), "and that teleport is what the next bad one comes back to");
+        }
         *player = NULL;
         set3(&pm, 0x30, 1.0f, 2.0f, 3.0f);
         call(&ped);

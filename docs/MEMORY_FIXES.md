@@ -654,9 +654,24 @@ through `SetSpawnInfo`, so a server that resets spawn info repeatedly walks the
 counter up without limit.
 
 Killing the write-back pins the index at whatever it currently is (0 in
-practice), so every call rewrites slot 0 and nothing overflows. The trade-off is
-that hospital restart points effectively stop registering, which is a non-issue
-under SA-MP because the server owns respawns.
+practice), so every call rewrites slot 0 and nothing overflows. The count
+staying 0 means `FindClosestHospitalRestartPoint` (0x460850) leaves its
+output unwritten: the loop is skipped (`jbe` at 0x460959) and a closest
+index of -1 returns without a store (0x460A0E).
+
+That output is the wasted respawn. `CGameLogic::Update` (0x442AD0), three
+seconds after the ped is dead, calls it and teleports the player there
+(`RestorePlayerStuffDuringResurrection`, health back to the maximum, then
+`Teleport` of that point plus 1 on z). With the list empty the point is
+whatever was on the stack. On 2026-11-24 16:38 the ped was at 1288.6,
+-1399.5 when it died, and the next life started at exactly 0, 0, falling
+from 180 with health 100: Blueberry, not the server's teleport.
+
+Two branches enter that flow. A dead ped (`m_nPedState == 0x37`, `je` at
+0x442CEF) and a dying ped that is stuck (`0x36` and flag 0x20, `je` at
+0x442CFD) both become unconditional jumps to the arrest test at 0x442D1E.
+`KillPlayer` and the `GameState = WASTED` store (0x442D11) are not reached.
+The server's respawn is the one that stands.
 
 MiTurboFix makes the same patch once SA-MP is up, so with both installed this
 lands as `already`.
@@ -1802,7 +1817,7 @@ that thunk.
 | contact | 0x6080B2 | a ped's contact entity destroyed under it |
 | pathnodes | 0x156F966 | path nodes that failed to allocate |
 | los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end): \|x\|, \|y\| over 16000 as MTA's, \|z\| over 1000000 (MTA's -5000 tripped at a server's z -10000; only x and y enter the sector walk) |
-| camnan | 0x526FC0 | a camera with a NaN or an infinity in its floats (it feeds it back to itself every frame, nothing is drawn and every line of sight starts nowhere): the bad floats zeroed, `CCam::Init` as on a change of mode with the mode kept, the source 4 behind and 1 above its target (or the player's ped) |
+| camnan | 0x526FC0 | a camera with a NaN or an infinity in its floats (it feeds it back to itself every frame, nothing is drawn and every line of sight starts nowhere): the followed entity is put back to its own last finite position first, so the rest of `CCam::Process` does not rebuild the NaN (kept per entity in four slots, peds, vehicles and objects only, its memory checked when it takes a slot or its matrix moves, not every frame), then the bad floats are zeroed, `CCam::Init` as on a change of mode with the mode kept, the source 4 behind and 1 above its target (or the player's ped) |
 | followtask | 0x523E6B | `CCam::Process_FollowPed_SA` asks the followed ped for its active primary task (0x681720) and reads its type without a null check: spectating a ped with none faulted every frame (SA-MP swallowed it as s007, 512 times on 2026-11-18, and the camera was left half done). With none it goes on past the use-gun check (0x523EA0), as for another task |
 
 **SA-MP moves the model infos.** SA-MP R5 copies
@@ -1975,10 +1990,13 @@ position is `m_matrix->pos` (+0x30) or, with no matrix, `m_placement` (+4).
 Each good position the check sees on the player's ped (`[0xB7CD98]`,
 `CWorld::Players[0].m_pPed`) or its vehicle (`m_pVehicle`, +0x58C) is kept
 in a slot, so a bad one on either puts the last good one back: the teleport
-does not happen, as with the RPC check. Anything else takes the RenderWare
-frame's (`m_pRwObject` +0x18, its frame +4, the frame's position +0x40, the
-last one drawn) if that one is good, else 0, 0, 0. SA-MP updates the frame
-in the same teleport, which is why the player, before the slots, landed at
+does not happen, as with the RPC check. An exact 0, 0, 0 is where a ped is
+born. It is not stored over a real position, and a bad position does not
+come back to it while the slot holds a teleport. A player teleport RPC that
+passed the range check is written into that slot before SA-MP applies it.
+With no such slot, the RenderWare frame (`m_pRwObject` +0x18, its frame +4,
+the frame's position +0x40) is used when it holds a real position: SA-MP
+updates the frame in the same teleport. Anything else takes that frame, else
 0, 0, 0. The move and turn speeds (+0x44-0x5B) are zeroed. A good position
 with a NaN or inf speed has the speeds zeroed. Both are counted; the log
 says when either count rises. The block: the two counters, the ped's slot
@@ -1999,7 +2017,7 @@ every other way in. Option `rpcpositions` (on by default) is that RPC check:
 `/fixes rpcpositions off` lets such a teleport through, to test the guard.
 
 **Tests.** `position_guard_test.sh` runs the routine on fake entities under
-Wine (35): good positions and the limits kept, NaN, inf, x 25000, z -20000
+Wine: good positions and the limits kept, NaN, inf, x 25000, z -20000
 and z 2147483647 put back from the frame, a bad frame or none gives 0, 0, 0,
 no matrix reads `m_placement`, NaN and inf speeds zeroed (a huge finite one
 kept); the player's ped stays where it was when its frame is bad too, takes
