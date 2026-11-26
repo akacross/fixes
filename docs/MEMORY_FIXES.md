@@ -1819,6 +1819,8 @@ that thunk.
 | los, losclear | 0x56BA00, 0x56A490 | a line of sight from or to outside the world (moved next to the other end): \|x\|, \|y\| over 16000 as MTA's, \|z\| over 1000000 (MTA's -5000 tripped at a server's z -10000; only x and y enter the sector walk) |
 | camnan | 0x526FC0 | a camera with a NaN or an infinity in its floats (it feeds it back to itself every frame, nothing is drawn and every line of sight starts nowhere): the followed entity is put back to its own last finite position first, so the rest of `CCam::Process` does not rebuild the NaN (kept per entity in four slots, peds, vehicles and objects only, its memory checked when it takes a slot or its matrix moves, not every frame), then the bad floats are zeroed, `CCam::Init` as on a change of mode with the mode kept, the source 4 behind and 1 above its target (or the player's ped) |
 | followtask | 0x523E6B | `CCam::Process_FollowPed_SA` asks the followed ped for its active primary task (0x681720) and reads its type without a null check: spectating a ped with none faulted every frame (SA-MP swallowed it as s007, 512 times on 2026-11-18, and the camera was left half done). With none it goes on past the use-gun check (0x523EA0), as for another task |
+| chokesrc | 0x4C0403 | `CEventHandler::ComputeDamageResponse` (0x4C0170): a spray can, extinguisher or tear gas hurting a ped reads the source ped's intelligence (`[ebp+47Ch]`) without a null check, so damage whose ped is gone (a gas cloud outliving the player who threw it) faults. With no source ped it skips the choke (0x4C05B9), as MTA's `FixTearGasCrash` (`CMultiplayerSA_1.3.cpp`, missed in the first review) and gta-reversed do |
+| soundlen | 0x4EF33D | `CAESound::UpdatePlayTime` (0x4EF2E0) wraps a looping sound's play time with `idiv` by its length, which is 0 for a missing or empty sound: an integer divide by zero. A length of 0 puts the time at the loop's start, as gta-reversed's `AESound_UpdatePlayTime_DivisionByZero` does |
 
 **SA-MP moves the model infos.** SA-MP R5 copies
 `CModelInfo::ms_modelInfoPtrs` (0xA9B0C8) to its own 65535-entry array and
@@ -2797,6 +2799,15 @@ resets its speeds each frame, so `ProcessCollision` skips `CheckCollision`).
 Only abandoned and wrecked vehicles can get there; a vehicle never leaves the
 moving list.
 
+An object's `ProcessControl` and `ProcessCollision` are summed by its type
+(`+0x13C`: game, mission (2 or 6, SA-MP's), temporary, other), whether it is
+attached to another entity (`m_pAttachedTo` at +0xFC) and moving or still, and
+its collision also by model (`+0x22`, ids under 20000). The eight models whose
+collision took longest get a line each, the longest first:
+
+    collision objects mission attached still: 11.00 a frame, 0.120000 ms
+    collision objects model 19327: 4.00 a frame, 0.050000 ms
+
     19:22:01 fps=299 ms=3.34 draws=1588 world=1.051
       control vehicles under 30 m still empty: 14.20 a frame, 0.031000 ms
       collision peds 30-100 m moving on foot: 9.10 a frame, 0.120000 ms
@@ -2854,6 +2865,18 @@ collision on (0x20000 clear), not be flagged to process even if stationary
 speed and takes the game's path the same frame. Peds and objects always take
 it. `CrashFix_ParkedSkips` counts the skipped calls.
 
+Option `parkedcreep` (on by default) also takes a car whose twelve speeds
+(move, turn and both friction speeds) are all under 1e-6 once its still count
+(+0xB8) is 10, the stock game's fake-physics count: they are zeroed (as the
+game's `ResetMoveSpeed` and `ResetTurnSpeed` would at 30 fps) and the call
+skipped. At that size a car moves under 1e-7 m a frame either way. drawcount's
+run on 2026-11-26 found about 12-19 cars a frame turned away with every move
+and turn speed under 1e-6 (`largest under 1e-6`), about 0.1 ms of collision. A
+first version that took a z creep alone never fired in game. On 2026-11-26 it
+took about 14 cars a frame and their collision fell from 0.11 to 0.003 ms a
+frame, with parked cars looking normal in game. `CrashFix_ParkedCreeps` counts them; with `drift` on, world.log's
+parked line gains `creep zeroed`.
+
 ## 56. HighFpsFixes' frame-rate fixes (options timerfps, camerafps, weaponfps)
 
 HighFpsFixes (sonochiwa's sa-high-fps-fixes, MIT, 1.9.0) fixes many
@@ -2889,7 +2912,7 @@ with one value on it.
 | `vehiclefps` | `carsteer1`-`2`, `bikesteer1`-`2`, `planesteer1`-`4` | the steering and control surfaces ease to the pad by `0.2 * timestep` a frame; `1 - (1 - 0.3333)^ratio` closes per second what a 30 fps step does. `planesteer4` is the rudder's `fmul [0.2]` alone (0x6CB1B1): a plane's two paths jump to it with `gap * timestep` already on st0 (0x6CB238, 0x6CB24D), so it takes the share over the timestep. In 0.27.0 it took 0x6CB1AD's 10 bytes, as HighFpsFixes does, and those jumps ran our jump's last byte: with crashfix.dll at 0x75350000 a `je` to 0x6CB143, an `xchg` with a heap byte and a fault reading 0x74 at 0x6CB14C (2026-11-18, once) |
 | `turnfps` | `flyturn1`-`3` | `FlyingControl` raises each axis's turn resistance to `timestep²`, so an aircraft held far more turn per second at high fps (and with `turndamping`'s 0.99 turned faster than at 30). The first timestep is 1.6667 |
 | `vehiclefps` | `springdamp`, `loadlean` | `ApplySpringDampening` takes `min(timestep * level, 0.25)` a frame: at 30 fps a level over 0.15 is capped, at high fps it is not (a third more damping). The level becomes the one that takes per second what the capped step does. `loadlean` keeps each entity's speeds at the start of `CPhysical::ProcessControl`, and the damper bites the speed the frame has added so far as a 30 fps step does, so the body leans as far under a cornering or braking load |
-| `vehiclefps` | `carrest`, `bikerest`, `trailerrest`, `objsleep`, `trailersleep` | `m_fMovingSpeed` (a distance per frame) as a 30 fps step's against the rest limit; an object's and a trailer's still frames counted per 30 fps step (cars and bikes have `carsleep`, `bikesleep`) |
+| `vehiclefps` | `carrest`, `bikerest`, `trainrest`, `objsleep`, `trainsleep` | `m_fMovingSpeed` (a distance per frame) as a 30 fps step's against the rest limit; an object's and a train's still frames counted per 30 fps step (cars and bikes have `carsleep`, `bikesleep`) |
 | `vehiclefps` | `movingparts` | `UpdateMovingCollision` truncated each frame's step of the forks, blade, bed and ramps: 300 units a second for 480 at 300 fps, nothing above 500. The 30 fps step per 30 fps step, its fraction kept per vehicle |
 | `vehiclefps` | `sink1`-`2`, `boatwaves`, `boatengine`, `hydraise`, `hydlower` | a car under water and a burnt-out boat sink per 30 fps step; a boat's wave slam from the rise over a 30 fps step; a coasting propeller's 0.95; a hydraulic car's stance steps per 30 fps step |
 | `vehiclefps` | `planeloss1`-`3` | a damaged part costs a slewed control `1 - 0.2 * status` a frame; each part's share settles where a 30 fps step does, under this frame's slew |

@@ -214,6 +214,23 @@ __attribute__((noinline)) static uint32_t call_regs(uint32_t entry, float x, int
     return reg_eax;
 }
 
+/* Call a hook with the dividend in eax and the divisor in edi -> edx */
+uint32_t div_target, div_in, div_by, div_rem;
+__attribute__((noinline)) static uint32_t call_div(uint32_t entry, int32_t dividend, int32_t divisor)
+{
+    div_target = entry, div_in = (uint32_t)dividend, div_by = (uint32_t)divisor;
+    __asm__ volatile(
+        "push %%edi\n\t"
+        "mov _div_by, %%edi\n\t"
+        "mov _div_in, %%eax\n\t"
+        "mov $0x7777, %%edx\n\t"
+        "call *_div_target\n\t"
+        "mov %%edx, _div_rem\n\t"
+        "pop %%edi\n"
+        ::: "memory", "eax", "ecx", "edx");
+    return div_rem;
+}
+
 /* A thiscall function of four arguments, x the second */
 typedef uint32_t (__attribute__((thiscall)) *Thiscall4)(void *self, uint32_t a, uint32_t b, uint32_t c, uint32_t d);
 static uint32_t call_thiscall4(uint32_t entry, uint32_t x) { return ((Thiscall4)entry)(NULL, 0, x, 0, 0); }
@@ -525,6 +542,7 @@ static uint32_t __cdecl phase_game_present(void *camera, void *window, uint32_t 
 static volatile int world_calls;
 static void *volatile world_this;
 static void __thiscall world_game(void *entity) { world_calls++; world_this = entity; }
+static void __thiscall world_slow(void *entity) { world_calls++; world_this = entity; Sleep(2); }
 
 /* fn with the entity in esi and ecx, edi and ebx set: -> they come back */
 static __attribute__((noinline)) int world_keeps(void (*fn)(void), void *entity)
@@ -677,6 +695,48 @@ static void phase_test(void)
     detail = CrashFix_DrawWorldDetail();
     ok(strstr(detail, "collision vehicles status physics: ") && strstr(detail, "collision vehicles status abandoned: ")
        && strstr(detail, "collision vehicles status abandoned fake physics: "), "a vehicle's collision also by its status and fake physics");
+    ok(CrashFix_DrawWorldDetail()[0] == 0, "and they start again");
+
+    /* objects: by type, attachment and movement; their collision by model */
+    we[0x36] = 4, we[0x13C] = 1;
+    *(void **)(we + 0xFC) = NULL;
+    ok(cf_world_object(we) == 0, "a game object, loose and still");
+    we[0x13C] = 6;
+    *(void **)(we + 0xFC) = &wplayer;
+    *(float *)(we + 0x48) = 0.1f;
+    ok(cf_world_object(we) == 4 + 2 + 1, "a mission object (type 6 too), attached, moving");
+    we[0x13C] = 3, *(float *)(we + 0x48) = 0;
+    *(void **)(we + 0xFC) = NULL;
+    ok(cf_world_object(we) == 8, "a temporary object");
+    we[0x13C] = 0;
+    ok(cf_world_object(we) == 12, "any other type");
+    we[0x36] = 2;
+    ok(cf_world_object(we) == -1, "a vehicle: no object bucket");
+    we[0x36] = 4, we[0x13C] = 2;
+    *(void **)(we + 0xFC) = &wplayer;
+    for (int id = 1000; id < 1010; id++) {
+        *(uint16_t *)(we + 0x22) = (uint16_t)id;
+        world_keeps(cf_w_collision_stub, we);
+    }
+    world_keeps(cf_w_control_stub, we);
+    *(uint16_t *)(we + 0x22) = 500;
+    wvt[0x2C / 4] = world_slow;
+    world_keeps(cf_w_collision_stub, we);
+    wvt[0x2C / 4] = world_game;
+    we[0x13C] = 1;
+    *(void **)(we + 0xFC) = NULL;
+    *(uint16_t *)(we + 0x22) = 25000;
+    world_keeps(cf_w_collision_stub, we);
+    detail = CrashFix_DrawWorldDetail();
+    ok(strstr(detail, "collision objects mission attached still: 11.00 a frame, ")
+       && strstr(detail, "control objects mission attached still: 1.00 a frame, 0.")
+       && strstr(detail, "collision objects game still: 1.00 a frame, 0."), "an object's update and collision by type, attachment and movement");
+    int models = 0;
+    for (const char *at = detail; (at = strstr(at, "collision objects model ")); at++) models++;
+    const char *first = strstr(detail, "collision objects model ");
+    ok(models == 8 && first && !strncmp(first, "collision objects model 500: 1.00 a frame, ", strlen("collision objects model 500: 1.00 a frame, ")),
+       "its collision by model: the 8 longest, the longest first");
+    ok(!strstr(detail, "model 25000") && !strstr(detail, "collision peds"), "a model id past the table: no line; nothing else ran");
     ok(CrashFix_DrawWorldDetail()[0] == 0, "and they start again");
     *framecount = wasframe;
     *player = wasplayer;
@@ -1071,6 +1131,43 @@ static void parked_test(void)
     parked_calls = 0;
     ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
     ok(parked_calls == 0, "a still wreck: skipped too");
+
+    /* parkedcreep: a creep in z alone after 10 still frames */
+    car[0x36] = 2 | (4 << 3);
+    static const struct { uint8_t count; float z, x, turn, friction; int on; int skip; const char *what; } Z[] = {
+        {10, -5e-7f, 0, 0, 0, 1, 1, "on, 10 still frames, z -5e-7: skipped, zeroed"},
+        {10, -5e-7f, 1e-7f, 3e-7f, -2e-7f, 1, 1, "every speed under 1e-6: skipped, all zeroed"},
+        {10, -5e-7f, 0, 0, 0, 0, 0, "off: the game's path"},
+        {9, -5e-7f, 0, 0, 0, 1, 0, "9 still frames: the game's path"},
+        {10, 2e-6f, 0, 0, 0, 1, 0, "z 2e-6: the game's path"},
+        {10, 5e-7f, 0, 2e-6f, 0, 1, 0, "a turn of 2e-6: the game's path"},
+        {10, 5e-7f, 0, 0, 2e-6f, 1, 0, "a friction speed of 2e-6: the game's path"},
+    };
+    int zeach = 1;
+    for (size_t i = 0; i < sizeof Z / sizeof Z[0]; i++) {
+        memset(car + 0x40, 0, 0x40);
+        car[0xB8] = Z[i].count;
+        *(float *)(car + 0x4C) = Z[i].z, *(float *)(car + 0x44) = Z[i].x;
+        *(float *)(car + 0x54) = Z[i].turn, *(float *)(car + 0x60) = Z[i].friction;
+        CrashFix_SetParkedCreep(Z[i].on);
+        uint32_t creeps = CrashFix_ParkedCreeps();
+        parked_calls = 0;
+        ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+        int skipped = parked_calls == 0, zeroed = 1;
+        for (int j = 0; j < 12; j++) zeroed &= ((uint32_t *)(car + 0x44))[j] == 0;
+        if (skipped != Z[i].skip || zeroed != Z[i].skip || CrashFix_ParkedCreeps() - creeps != (uint32_t)Z[i].skip) {
+            zeach = 0;
+            printf("  wrong: %s\n", Z[i].what);
+        }
+    }
+    ok(zeach, "parkedcreep: only speeds all under 1e-6, after 10 still frames, while on");
+    car[0xB8] = 10;
+    memset(car + 0x40, 0, 0x40);
+    CrashFix_SetParkedCreep(1);
+    parked_calls = 0;
+    ((void (__attribute__((thiscall)) *)(void *))0x54DFB0)(car);
+    ok(parked_calls == 0, "parkedcreep on: a car with every speed zero is skipped as before");
+    CrashFix_SetParkedCreep(0);
     write_code(0x54DFB8, keep, 8);
     CrashFix_Uninstall(k);
     ok(!memcmp((void *)0x54DFB0, file_at(0x54DFB0), 16), "out: the entry stock");
@@ -1679,6 +1776,35 @@ __declspec(dllexport) int __cdecl run(void)
         call_site(hook_of("followtask"), (uint32_t)task, 0, 0, 0);
         unret(0x523E72);
         ok(site_ret == 0x2BD && averted("followtask") == 1, "a task: its type asked, as the game does");
+    }
+
+    printf("== a choking weapon with no source ped (chokesrc)\n");
+    {
+        static const uint8_t stub[3] = {0x89, 0xC8, 0xC3};  /* mov eax, ecx; ret */
+        uint8_t saved[3];
+        memcpy(saved, (void *)0x4C0409, 3);
+        reg_ebp = 0, reg_esi = 0, reg_edi = 0;
+        ret_at(0x4C05B9);
+        call_regs(hook_of("chokesrc"), 0, 0, 0);
+        unret(0x4C05B9);
+        ok(averted("chokesrc") == 1, "no source ped: past the choke, counted");
+        static uint8_t ped[0x480];
+        *(uint32_t *)(ped + 0x47C) = 0x1234;
+        reg_ebp = (uint32_t)ped;
+        memcpy((void *)0x4C0409, stub, 3);
+        uint32_t intel = call_regs(hook_of("chokesrc"), 0, 0, 0);
+        memcpy((void *)0x4C0409, saved, 3);
+        ok(intel == 0x1234 && averted("chokesrc") == 1, "a source ped: its intelligence read, as the game does");
+        reg_ebp = 0;
+    }
+
+    printf("== a looping sound of length 0 (soundlen)\n");
+    {
+        ret_at(0x4EF343);
+        ok(call_div(hook_of("soundlen"), 7, 3) == 1 && averted("soundlen") == 0, "7 into a length of 3 leaves 1");
+        ok(call_div(hook_of("soundlen"), 7, 0x10003) == 1, "the length is di, sign-extended");
+        ok(call_div(hook_of("soundlen"), 7, 0) == 0 && averted("soundlen") == 1, "a length of 0: no divide, the loop's start, counted");
+        unret(0x4EF343);
     }
 
     printf("== a camera gone NaN (camnan)\n");

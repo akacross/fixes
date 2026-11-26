@@ -70,6 +70,8 @@ systems or is diagnostics), **covered** (fixes already does it another way).
 | CFileLoader::LoadVehicleObject sscanf | (call) | uninitialised wheel scale on Win11 24H2 | startup |
 | CVehicle_AddUpgrade, CVolumetricShadowMgr Render/Update, printf | | records for MTA's crash reports | MTA |
 | train crossing barrier x3 | 0x59F7A8, 0x5A0C34, 0x5A0C54 | detaches the barrier so objects 1373/1374 can be made apart | MTA (a feature) |
+| CProjectile_FixTearGasCrash (`CMultiplayerSA_1.3.cpp`) | 0x4C0403 | a spray, extinguisher or tear gas with no source ped | port (`chokesrc`) |
+| CClothesDeleteRwObject, PostCPedDress (`CMultiplayerSA_ClothesMemFix.cpp`) | 0x5A8243, 0x5A835C | keeps model 0's clump across MTA's clothes rebuilds | MTA |
 
 Other files with fixes of the same kind: `CMultiplayerSA_FixBadAnimId.cpp`
 (`GetAnimHierarchyFromSkinClump` 0x734A5D, a bad RpHAnimHierarchy: MTA only
@@ -80,6 +82,10 @@ logs it),
 0x72F4C0/0x72F4F0: a port, but a large one), and
 `CMultiplayerSA_ProjectileCollisionFix.cpp` (load time: startup). The
 destructor, RW-resource and clothes hooks feed MTA's own systems.
+
+Rechecked 2026-11-25 against a copy of 23 November: `CMultiplayerSA_CrashFixHacks.cpp` is
+unchanged in size (4380 lines), and every hook address in multiplayer_sa is
+in fixes or in the tables above, except the two rows just added.
 
 Each port needs its stock bytes checked against gta_sa.exe, and SilentPatch
 and SA-MP checked for the same site, as for the existing hooks.

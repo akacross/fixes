@@ -23,7 +23,8 @@
  * stencilveh, stencilobj and ikchain are San Andreas Online's
  * (Dryxio/san-andreas-online, an MTA fork, GPLv3); ikchain checks where the
  * game looks the effector up, after its own checks.
- * camnan is ours: a camera gone NaN is set up again.
+ * camnan is ours: a camera gone NaN is set up again. chokesrc is MTA's from
+ * CMultiplayerSA_1.3.cpp; soundlen is gta-reversed's.
  * A crash averted is one `lock inc` on the hook's counter; fixes reads them.
  * MTA's frame-rate fixes are in framerate.c and FramerateVigilante's in
  * vigilante.c, each switched by its own option; MTA's ped matrix checks are in
@@ -161,6 +162,9 @@
     H(ikchain, "IKChain_c::Init: a bone the ped's skin does not have", 0x6183B2, 6, -1, "\x50\xE8\x88\xC6\x11\x00") \
     H(followtask, "CCam::Process_FollowPed_SA: a followed ped with no primary task", 0x523E6B, 7, -1, \
         "\x8B\x10\x8B\xC8\xFF\x52\x10") \
+    H(chokesrc, "CEventHandler::ComputeDamageResponse: a choking weapon with no source ped", 0x4C0403, 6, -1, \
+        "\x8B\x8D\x7C\x04\x00\x00") \
+    H(soundlen, "CAESound::UpdatePlayTime: a looping sound of length 0", 0x4EF33D, 6, -1, "\x0F\xBF\xFF\x99\xF7\xFF") \
     H(samp,"SA-MP's association helper: bad pointers", 0, 5, -1, "\x74\x12\x8B\x50\x10")
 
 #define DECLARE(k, name, va, len, mi, stock) void cf_hook_##k(void); volatile LONG cf_n_##k;
@@ -1549,6 +1553,29 @@ __asm__(
 "    GO 0x523E72\n"
 "1:  AVERTED followtask\n"
 "    GO 0x523EA0\n"
+
+/* CEventHandler::ComputeDamageResponse: the damage's source ped in ebp, null
+ * for a spray, extinguisher or tear gas whose ped is gone: no choke */
+"HOOK chokesrc\n"
+"    test ebp, ebp\n"
+"    jz 1f\n"
+"    mov ecx, dword ptr [ebp+0x47C]\n"
+"    GO 0x4C0409\n"
+"1:  AVERTED chokesrc\n"
+"    GO 0x4C05B9\n"
+
+/* CAESound::UpdatePlayTime: the play time in eax, the length in di; a length
+ * of 0 puts the time at the loop's start */
+"HOOK soundlen\n"
+"    movsx edi, di\n"
+"    test edi, edi\n"
+"    jz 1f\n"
+"    cdq\n"
+"    idiv edi\n"
+"    GO 0x4EF343\n"
+"1:  AVERTED soundlen\n"
+"    xor edx, edx\n"
+"    GO 0x4EF343\n"
 
 /* CAnimBlendAssocGroup::CopyAnimation (this, id): the group and the id */
 "HOOK copyanim\n"

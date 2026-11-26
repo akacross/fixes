@@ -1509,6 +1509,7 @@ do
         CrashFix_SetSampSite = function(va) cf.sampSite = va; cf.hooks[#cf.hooks].va = va; return 1 end,
         CrashFix_SetShadows = function(on) cf.shadows = on end,
         CrashFix_SetGlassSort = function(on) cf.glasssort = on end,
+        CrashFix_SetParkedCreep = function(on) cf.parkedcreep = on end,
         CrashFix_Install = function(i, found)
             local h = cf.hooks[i + 1]
             cf.installs[#cf.installs + 1] = h.key
@@ -1540,6 +1541,7 @@ do
     ok(lineAfter(from, 'glass2') and lineAfter(from, 'glass2'):find('0x734092 glass list glass2 (vehicle glass): hooked', 1, true),
         'and a glass list row: ' .. tostring(lineAfter(from, 'glass2')))
     ok(cf.shadows == 0, 'blob shadows: volshadows is off')
+    ok(cf.parkedcreep == 1, 'parkedcreep is on by default and reaches the DLL')
     ok(lineAfter(from, 'misc1') and lineAfter(from, 'misc1'):find('0x5D9A6E crash fix misc1 (CPed shadow render): hooked', 1, true),
         'hooked: ' .. tostring(lineAfter(from, 'misc1')))
     ok(lineAfter(from, 'misc2'):find('is owned by code at 0x13371000; standing down', 1, true),
@@ -1639,6 +1641,10 @@ do
     env.fixesCommand('volshadows on')
     ok(cf.shadows == 1, '/fixes volshadows on reaches the DLL')
     env.fixesCommand('volshadows off')
+    env.fixesCommand('parkedcreep on')
+    ok(cf.parkedcreep == 1, '/fixes parkedcreep on reaches the DLL')
+    env.fixesCommand('parkedcreep off')
+    ok(cf.parkedcreep == 0, 'and off')
     env.fixesCommand('frameclone off')
     local fromChat = #chat
     env.fixesCommand('patches')

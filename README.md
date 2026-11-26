@@ -57,6 +57,11 @@ Crashes:
   Andreas Online's fixes).
 - Dragging the scrollbar of a SA-MP list dialog that fits on one page
   divided by zero and froze the game (samp.dll): the divisors are tested.
+- A spray can, extinguisher or tear gas cloud outliving the ped who used it
+  crashed the damage response: with no source ped the choke is skipped
+  (MTA's `FixTearGasCrash`, missed in its 1.3 rewrite).
+- A looping sound of length 0 (a missing or empty sound) divided by zero:
+  its play time stays at the loop's start (gta-reversed's fix).
 
 Game bugs:
 - Tail light damage reads the wrong light.
@@ -196,7 +201,10 @@ Speed:
   off, over 0.3.DL's own 2 ms wait too (given back with `framecaps` off).
 - A parked car that is standing still skips the game's collision step, which
   changed nothing for it but still cost about 6 microseconds a car every
-  frame (0.17 ms a frame for the 28 parked cars around Los Santos).
+  frame (0.17 ms a frame for the 28 parked cars around Los Santos). A parked
+  car still for 10 frames whose speeds are all under 1e-6, a creep that never
+  settles, has them zeroed and is skipped too (`parkedcreep`: 0.11 to
+  0.003 ms a frame on a busy server).
 
 Also: every animation block is preloaded and pinned, SA-MP's F1 help dialog
 is disabled, the smoking animation is fixed, and crashes.asi's visual and
@@ -260,7 +268,9 @@ that averted a crash says so.
 - `/fixes drawcount on` counts the frame's draw calls by what is drawn
   (roads, buildings, vehicles, peds and the rest) and writes a world detail
   to `moonloader/logs/world.log`: peds' and vehicles' update and collision by
-  distance, movement and use. A diagnostic, not a fix.
+  distance, movement and use, objects' by type (game, server, temporary),
+  attachment and movement, and the 8 models with the most object collision.
+  A diagnostic, not a fix.
 - `/fixes hook <key> off` takes one hook out for this session, to test it
   alone; `on` or a restart puts it back.
 - `/fixes cleo` when Car Speed FPS Fix (CLEO) runs: `stop` stops it for this
@@ -303,6 +313,7 @@ that averted a crash says so.
 | `glasssort` | on | a car's see-through parts sorted by their own distance from the camera |
 | `farsideparts` | on | a car's far-side parts drawn at any distance |
 | `parkedcol` | on | a parked car standing still skips the collision step |
+| `parkedcreep` | on | with `parkedcol`, a parked car creeping under 1e-6 for 10 frames is stopped and skipped too |
 | `skygrad` | on | the sky drawn dithered, without colour bands |
 | `widesky` | on | the sky widens with the FOV |
 | `mirroraa` | on | mirrors work with anti-aliasing on |

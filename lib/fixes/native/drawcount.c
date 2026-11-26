@@ -20,7 +20,8 @@
  * rest: the message loop, audio, SA-MP's own work, the menus and fonts.
  * Inside CWorld::Process, its passes over the moving entities are timed a
  * call each: UpdateAnim, ProcessControl and ProcessCollision by the entity's
- * type, ProcessShift.
+ * type, ProcessShift. An object's are also summed by its type, attachment and
+ * movement, and its collision by model.
  */
 #define DRAWCOUNT(FJ, FP) \
     FJ(drawnonroad, "drawcount", "CRenderer::RenderOneNonRoad, counted", 0x553260, 5, "\x56\x8B\x74\x24\x08") \
@@ -210,8 +211,14 @@ static WorldSum world_detail[WD_PASSES][WD_BUCKETS];
  * has it on fake physics (m_nFakePhysics, +0xB8, at 10: speeds reset each
  * frame, the parked state) */
 static WorldSum world_status[32][2];
+/* an object's update and collision by its type (+0x13C), attached to another
+ * entity (+0xFC) or not, and moving or still; its collision also by model
+ * (+0x22) */
+enum { WO_CLASSES = 4, WO_MODELS = 20000, WO_TOP = 8 };
+static WorldSum world_object[WD_PASSES][WO_CLASSES][2][2];
+static WorldSum world_object_model[WO_MODELS];
 static uint32_t world_detail_frame;             /* the frame counter at the last summary */
-static char world_text[4096];
+static char world_text[8192];
 
 static const float *world_position(const void *entity)
 {
@@ -239,15 +246,35 @@ int cf_world_bucket(const void *entity)
     return vehicle * 12 + band * 4 + moving * 2 + flag;
 }
 
+/* -> an object's bucket: type (0 game, 1 mission, 2 temporary, 3 other) * 4
+ * + attached * 2 + moving; -1 for what is not an object */
+int cf_world_object(const void *entity)
+{
+    const uint8_t *e = entity;
+    if ((e[0x36] & 7) != 4) return -1;
+    uint8_t t = e[0x13C];                                               /* CObject::m_nObjectType */
+    int cls = t == 1 ? 0 : t == 2 || t == 6 ? 1 : t == 3 ? 2 : 3;
+    const float *v = (const float *)(e + 0x44);
+    int moving = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > 1e-6f;
+    return cls * 4 + (*(void *const *)(e + 0xFC) != NULL) * 2 + moving;    /* CPhysical::m_pAttachedTo */
+}
+
 static void world_virtual(void *entity, int ph, uint32_t slot, int pass)
 {
     int bucket = pass >= 0 ? cf_world_bucket(entity) : -1;              /* as it is before the call */
+    int object = pass >= 0 ? cf_world_object(entity) : -1;
+    uint32_t model = *(const uint16_t *)((const uint8_t *)entity + 0x22);
     int64_t t0 = stream_now();
     ((EntityFn)(*(void ***)entity)[slot / 4])(entity);
     int64_t d = stream_now() - t0;
     draw_phase[ph].calls++;
     draw_phase[ph].ticks += d;
     if (bucket >= 0) world_detail[pass][bucket].calls++, world_detail[pass][bucket].ticks += d;
+    if (object >= 0) {
+        WorldSum *w = &world_object[pass][object / 4][(object >> 1) & 1][object & 1];
+        w->calls++, w->ticks += d;
+        if (pass == WD_COLLISION && model < WO_MODELS) world_object_model[model].calls++, world_object_model[model].ticks += d;
+    }
     if (pass == WD_COLLISION && bucket >= 12) {
         const uint8_t *e = entity;
         WorldSum *w = &world_status[e[0x36] >> 3][e[0xB8] >= 10];
@@ -307,6 +334,40 @@ __declspec(dllexport) const char *__cdecl CrashFix_DrawWorldDetail(void)
             }
             w->calls = 0, w->ticks = 0;
         }
+    static const char *const class_name[WO_CLASSES] = {"game", "mission", "temporary", "other"};
+    for (int p = 0; p < WD_PASSES; p++)
+        for (int c = 0; c < WO_CLASSES; c++)
+            for (int a = 0; a < 2; a++)
+                for (int m = 0; m < 2; m++) {
+                    WorldSum *w = &world_object[p][c][a][m];
+                    if (w->calls && n < (int)sizeof world_text - 160) {
+                        uint64_t us1000 = stream_us(w->ticks) * 1000u / frames;
+                        uint32_t calls100 = (uint32_t)((uint64_t)w->calls * 100u / frames);
+                        n += snprintf(world_text + n, sizeof world_text - n, "%s objects %s%s %s: %u.%02u a frame, %u.%06u ms\r\n",
+                                      pass_name[p], class_name[c], a ? " attached" : "", m ? "moving" : "still",
+                                      calls100 / 100, calls100 % 100, (unsigned)(us1000 / 1000000u), (unsigned)(us1000 % 1000000u));
+                    }
+                    w->calls = 0, w->ticks = 0;
+                }
+    uint32_t top[WO_TOP];                       /* the models whose collision took longest, longest first */
+    int tops = 0;
+    for (uint32_t id = 0; id < WO_MODELS; id++) {
+        if (!world_object_model[id].calls) continue;
+        int at = tops;
+        while (at > 0 && world_object_model[top[at - 1]].ticks < world_object_model[id].ticks) at--;
+        if (at >= WO_TOP) continue;
+        if (tops < WO_TOP) tops++;
+        for (int i = tops - 1; i > at; i--) top[i] = top[i - 1];
+        top[at] = id;
+    }
+    for (int i = 0; i < tops && n < (int)sizeof world_text - 160; i++) {
+        WorldSum *w = &world_object_model[top[i]];
+        uint64_t us1000 = stream_us(w->ticks) * 1000u / frames;
+        uint32_t calls100 = (uint32_t)((uint64_t)w->calls * 100u / frames);
+        n += snprintf(world_text + n, sizeof world_text - n, "collision objects model %u: %u.%02u a frame, %u.%06u ms\r\n",
+                      top[i], calls100 / 100, calls100 % 100, (unsigned)(us1000 / 1000000u), (unsigned)(us1000 % 1000000u));
+    }
+    memset(world_object_model, 0, sizeof world_object_model);
     return world_text;
 }
 

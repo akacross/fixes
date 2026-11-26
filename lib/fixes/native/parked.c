@@ -10,6 +10,9 @@
  * it already is. For such a car this sets the flags and returns. Everything
  * else, and any car the stock path would treat otherwise, takes the game's
  * path. Integers only: the x87 state is the game's.
+ *
+ * With parkedcreep on, a car whose speeds are all under 1e-6 after 10 still
+ * frames (the stock fake-physics count) has them zeroed and is skipped too.
  */
 #define PARKED(FJ) \
     FJ(parkedcol, "parkedcol", "CPhysical::ProcessCollision: a parked car's no-op skipped", 0x54DFB0, 8, \
@@ -17,7 +20,8 @@
 
 PARKED(FDECLARE_J)
 
-static volatile LONG cf_parked_skips;
+static volatile LONG cf_parked_skips, cf_parked_creeps;
+static int cf_parked_creep;                     /* option parkedcreep */
 /* abandoned or wrecked cars by why they took the game's path: 0 skipped,
  * 1 no collision or simple collision off, 2 flagged, 3 a car park vehicle,
  * 4 moving or turning, 5 a friction speed */
@@ -79,6 +83,15 @@ int __cdecl cf_parked(uint8_t *e)
     if (!(e[0x1C] & 1) || (flags & 0x20000)) return cf_parked_why[1]++, 0;   /* uses collision, simple collision on */
     if (flags & 0x880) return cf_parked_why[2]++, 0;                 /* even if stationary; bDisableZ */
     if (e[0x42C] & 2) return cf_parked_why[3]++, 0;                  /* a car park vehicle */
+    uint32_t *speed = (uint32_t *)(e + 0x44);
+    if (cf_parked_creep && e[0xB8] >= 10) {
+        uint32_t any = 0, tiny = 1;
+        for (int i = 0; i < 12; i++) any |= speed[i] & 0x7FFFFFFF, tiny &= (speed[i] & 0x7FFFFFFF) < 0x358637BD;   /* 1e-6 */
+        if (any && tiny) {
+            for (int i = 0; i < 12; i++) speed[i] = 0;
+            cf_parked_creeps++;
+        }
+    }
     for (int i = 0; i < 12; i++) {                                   /* move, turn, friction move and turn speeds */
         uint32_t f = ((const uint32_t *)(e + 0x44))[i];
         if (f & 0x7FFFFFFF) {
@@ -96,6 +109,12 @@ int __cdecl cf_parked(uint8_t *e)
 
 /* How many times a parked car's collision was skipped since the DLL loaded */
 __declspec(dllexport) uint32_t __cdecl CrashFix_ParkedSkips(void) { return (uint32_t)cf_parked_skips; }
+
+/* Option parkedcreep: also skip a still car whose speeds are all under 1e-6 */
+__declspec(dllexport) void __cdecl CrashFix_SetParkedCreep(int on) { cf_parked_creep = on != 0; }
+
+/* How many of the skips had a creep zeroed since the DLL loaded */
+__declspec(dllexport) uint32_t __cdecl CrashFix_ParkedCreeps(void) { return (uint32_t)cf_parked_creeps; }
 
 /* Since the DLL loaded, abandoned or wrecked cars' calls by why (as cf_parked_why) */
 __declspec(dllexport) uint32_t __cdecl CrashFix_ParkedWhy(int i)

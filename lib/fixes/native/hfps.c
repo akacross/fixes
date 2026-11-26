@@ -177,11 +177,11 @@ uint8_t __attribute__((thiscall)) cf_beat_limit(void *audio);
         0x6B1C9C, 6, "\xD9\x86\xD4\x00\x00\x00") \
     FJ(bikerest, "vehiclefps", "CBike::ProcessControl: the distance moved, per 30 fps step, against the rest limit", 0x6B9955, \
         6, "\xD9\x86\xD4\x00\x00\x00") \
-    FJ(trailerrest, "vehiclefps", "CTrailer::ProcessControl: the distance moved, per 30 fps step, against the rest limit", \
+    FJ(trainrest, "vehiclefps", "CTrain::ProcessControl: the distance moved, per 30 fps step, against the rest limit", \
         0x6F9B92, 6, "\xD9\x86\xD4\x00\x00\x00") \
     FJ(objsleep, "vehiclefps", "CObject::ProcessControl: still frames counted per 30 fps step", 0x5A241F, 8, \
         "\x8A\x8E\xB8\x00\x00\x00\xFE\xC1") \
-    FJ(trailersleep, "vehiclefps", "CTrailer::ProcessControl: still frames counted per 30 fps step", 0x6F9BD1, 8, \
+    FJ(trainsleep, "vehiclefps", "CTrain::ProcessControl: still frames counted per 30 fps step", 0x6F9BD1, 8, \
         "\x8A\x9E\xB8\x00\x00\x00\xFE\xC3") \
     FJ(movingparts, "vehiclefps", "CAutomobile::UpdateMovingCollision: forks, blade, bed and ramps move with the fraction kept", \
         0x6A1691, 24, "\x8B\x0D\x5C\xCB\xB7\x00\x89\x4C\x24\x14\x8B\xCB\xE8\x6E\xE5\xE9\xFF\x0F\xBF\xD0\x89\x54\x24\x10") \
@@ -257,12 +257,12 @@ uint8_t __attribute__((thiscall)) cf_beat_limit(void *audio);
         0x5477F4, 17, "\xD9\x05\x24\x86\x85\x00\xD8\x1D\x5C\xCB\xB7\x00\xDF\xE0\xF6\xC4\x41") \
     FJ(aisteer, "vehiclefps", "an aircraft's autopilot: its turn rate by the real timestep, not max(1, it)", 0x4235D2, 17, \
         "\xD9\x05\x24\x86\x85\x00\xD8\x1D\x5C\xCB\xB7\x00\xDF\xE0\xF6\xC4\x41") \
-    FP(aimtime1, "pedfps", KIND_CALL, "CPlayerPed::EvaluateTarget: the target lock's 1200 ms counter (+8Ah)", 0x60D3AD, 5, "\xE8\x8E\x47\x21\x00", cf_ftol_carry) \
-    FP(aimtime2, "pedfps", KIND_CALL, "CPlayerPed::EvaluateTarget: the target lock's 1200 ms counter (+88h)", 0x60D47C, 5, "\xE8\xBF\x46\x21\x00", cf_ftol_carry) \
+    FP(aimtime1, "pedfps", KIND_CALL, "CPlayerPed::ProcessGroupBehaviour: how long the group-command up button is held (+8Ah)", 0x60D3AD, 5, "\xE8\x8E\x47\x21\x00", cf_ftol_carry) \
+    FP(aimtime2, "pedfps", KIND_CALL, "CPlayerPed::ProcessGroupBehaviour: how long the group-command down button is held (+88h)", 0x60D47C, 5, "\xE8\xBF\x46\x21\x00", cf_ftol_carry) \
     FP(inairstep, "pedfps", KIND_CALL, "CTaskSimpleInAir::ProcessPed: its timer (+28h)", 0x6809A2, 5, "\xE8\x99\x11\x1A\x00", cf_ftol_carry) \
     FP(fightmove, "pedfps", KIND_CALL, "CTaskSimpleFightingControl::CalcMoveCommand: its timer (+1Ch)", 0x624C06, 5, "\xE8\x35\xCF\x1F\x00", cf_ftol_carry) \
     FP(stealthstep, "pedfps", KIND_CALL, "CTaskSimpleStealthKill::ManageAnim: its 10 s timer (+1Ch)", 0x6298AA, 5, "\xE8\x91\x82\x1F\x00", cf_ftol_carry) \
-    FP(killstep, "pedfps", KIND_CALL, "CTaskComplexKillPedOnFootArmed: its countdown (+16h)", 0x62D855, 5, "\xE8\xE6\x42\x1F\x00", cf_ftol_carry) \
+    FP(killstep, "pedfps", KIND_CALL, "CTaskSimpleGangDriveBy::ProcessPed: its attack timer (+16h)", 0x62D855, 5, "\xE8\xE6\x42\x1F\x00", cf_ftol_carry) \
     FP(drivestep, "pedfps", KIND_CALL, "CTaskSimpleCarDrive::ProcessPed: its 2 s timer (+4Ch)", 0x644595, 5, "\xE8\xA6\xD5\x1D\x00", cf_ftol_carry) \
     FP(duckstep, "pedfps", KIND_CALL, "CTaskSimpleDuck::ProcessPed: its timer (+0Eh)", 0x6944DA, 5, "\xE8\x61\xD6\x18\x00", cf_ftol_carry) \
     FP(fallstep2, "pedfps", KIND_CALL, "CTaskSimpleFall::ProcessPed: the down time, its second branch", 0x67FBB3, 5, "\xE8\x88\x1F\x1A\x00", cf_ftol_carry) \
@@ -1172,7 +1172,7 @@ __asm__(
 "    REST 0x6B1CA2\n"
 "HOOK bikerest\n"
 "    REST 0x6B995B\n"
-"HOOK trailerrest\n"
+"HOOK trainrest\n"
 "    REST 0x6F9B98\n"
 
 /* m_nFakePhysics (+B8h) counts on a 30 fps step, and past 10 on every frame */
@@ -1193,7 +1193,7 @@ __asm__(
 ".endm\n"
 "HOOK objsleep\n"
 "    SLEEP cl, 0x5A2427\n"
-"HOOK trailersleep\n"
+"HOOK trainsleep\n"
 "    SLEEP bl, 0x6F9BD9\n"
 
 /* UpdateMovingCollision: edi the vehicle, ebx its driver's pad, [esp+1Ch] the rate */

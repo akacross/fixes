@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.7")
+script_version("0.27.8")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -1009,7 +1009,7 @@ local OPTIONS = {
     -- MTA's, FramerateVigilante's and HighFpsFixes' frame-rate fixes, in crashfix.dll
     turnfps = {default = true, label = "a spinning car, object or aircraft slows its spin as fast at any fps (MTA, HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
-    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke, the fight stance, the target lock and the other task timers last as long, drowning hurts and a drunk steers late at any fps (HighFpsFixes)",
+    pedfps = {default = true, label = "climbing does not kill at high fps; moving while aiming as at 30 fps (MTA); a knock-down, a choke, the fight stance, the group-command buttons and the other task timers last as long, drowning hurts and a drunk steers late at any fps (HighFpsFixes)",
         apply = function() return fixCrashes("game"), 0 end},
     vehiclefps = {default = true,
         label = "boats, helicopter takeoff, swinging doors and chassis, burnouts and parked cars settling as at 30 fps (MTA, FramerateVigilante); a car on its side rolls back onto its wheels as at 30 fps; a burning vehicle and an alarm last as long at any fps; steering, the gearbox's kick, suspension, wheels, hydraulics, forks, sinking, a damaged plane and bike leans as at 30 fps (HighFpsFixes)",
@@ -1092,6 +1092,9 @@ local OPTIONS = {
     parkedcol = {default = true,
         label = "a parked car's collision skipped while it stands still (the game re-links it where it already is every frame)",
         apply = function() return fixCrashes("game"), 0 end},
+    parkedcreep = {default = true,
+        label = "with parkedcol, a car still for 10 frames whose speeds are all under 1e-6 (a creep) is skipped too",
+        apply = function(on) return setCrashFixParkedCreep(on) and 1 or 0, 0 end},
     skygrad = {default = true, label = "the sky's gradient dithered, so it shows no colour bands (as skygrad.asi)",
         apply = function() return fixCrashes("game"), 0 end},
     noheathaze = {default = true, label = "no heat haze"},
@@ -2774,7 +2777,7 @@ FPS.HFPS = {
     ["vehicles.aircraftTurnResistance"] = {"flyturn1", "flyturn2", "flyturn3"},
     ["vehicles.suspensionDampingLimit"] = {"springdamp"},
     ["vehicles.suspensionLoadLean"] = {"loadlean"},
-    ["vehicles.restThreshold"] = {"carrest", "bikerest", "trailerrest"},
+    ["vehicles.restThreshold"] = {"carrest", "bikerest", "trainrest"},
     ["vehicles.movingParts"] = {"movingparts"},
     ["vehicles.vehicleSinking"] = {"sink1", "sink2"},
     ["vehicles.damagedPlaneControl"] = {"planeloss1", "planeloss2", "planeloss3", "sputter1", "sputter2"},
@@ -2797,7 +2800,7 @@ FPS.HFPS = {
     ["vehicles.skimmerResistance"] = {"boatwater"},
     ["vehicles.doorSwing"] = {"chassis1", "chassis2", "doorangle", "doordamp1", "doordamp2", "doordamp3", "doordamp4"},
     ["vehicles.jumpOutCarSpeed"] = {"jumpout1", "jumpout2", "jumpout3", "jumpout4", "jumpout5", "jumpout6"},
-    ["vehicles.physicsSleepRate"] = {"carsleep", "bikesleep", "bikeclamp", "objsleep", "trailersleep"},
+    ["vehicles.physicsSleepRate"] = {"carsleep", "bikesleep", "bikeclamp", "objsleep", "trainsleep"},
     ["vehicles.vehicleTimers"] = {"alarmstep", "aistep1", "aistep2", "aistep3", "flystep", "planestep", "bombstep"},
     ["vehicles.burnTimers"] = {"carburn", "heliburn", "rcburn", "bikeburn", "boatburn"},
     ["vehicles.waterCannon"] = {"cannon"},
@@ -3458,6 +3461,8 @@ pcall(ffi.cdef, [[
     int CrashFix_SetSampObjectSite(uint32_t va);
     void CrashFix_SetShadows(int volumetric);
     void CrashFix_SetGlassSort(int on);
+    void CrashFix_SetParkedCreep(int on);
+    uint32_t CrashFix_ParkedCreeps(void);
     int CrashFix_Install(int i, uint32_t* found);
     int CrashFix_Uninstall(int i);
     int CrashFix_Installed(int i);
@@ -3520,6 +3525,7 @@ function fixCrashes(part)
     end
     lib.CrashFix_SetShadows(options.volshadows and 1 or 0)
     lib.CrashFix_SetGlassSort(options.glasssort and 1 or 0)
+    pcall(function() lib.CrashFix_SetParkedCreep(options.parkedcreep and 1 or 0) end)  -- an older DLL has none
     local changed = 0
     for i = 0, lib.CrashFix_Count() - 1 do
         local key = ffi.string(lib.CrashFix_Key(i))
@@ -3594,6 +3600,11 @@ function setCrashFixGlassSort(on)
     if not crashFixLib then return false end
     crashFixLib.CrashFix_SetGlassSort(on and 1 or 0)
     return true
+end
+
+function setCrashFixParkedCreep(on)
+    if not crashFixLib then return false end
+    return (pcall(function() crashFixLib.CrashFix_SetParkedCreep(on and 1 or 0) end))
 end
 
 -- -> in place, owned elsewhere, refused, off; the hooks of `kind` ("crash"
@@ -4831,6 +4842,12 @@ function DRIFT.sample(now)
                 was[i] = was[i] or 0
                 if now[i] > was[i] then parts[#parts + 1] = string.format("%s %.2f", names[i], (now[i] - was[i]) / n) end
             end
+            local got, creeps = pcall(function() return tonumber(crashFixLib.CrashFix_ParkedCreeps()) end)
+            creeps = got and creeps or 0                                         -- an older DLL has none
+            if DRIFT.parkedCreeps and creeps > DRIFT.parkedCreeps then
+                parts[#parts + 1] = string.format("creep zeroed %.2f", (creeps - DRIFT.parkedCreeps) / n)
+            end
+            DRIFT.parkedCreeps = creeps
             if #parts > 0 then world[#world + 1] = "parked cars a frame: " .. table.concat(parts, ", ") end
         end)
         for _, line in ipairs(drawCounterIdle(n) or {}) do world[#world + 1] = line end
