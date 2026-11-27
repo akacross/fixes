@@ -3203,3 +3203,38 @@ both state setters, and a list of one glass mesh and one panel. Outside the
 list, glass draws as the game draws it. In the list, pass 1 draws the panel
 with depth and pass 2 the glass without. Colour and depth writes are as they
 were afterwards, including off before and a partial colour mask.
+
+## 64. Marker models drawn last (option markerdepth)
+
+**Symptom.** An exit arrow pickup (model 1318) in a mapped interior: inside
+the arrow's cone the wall behind it is missing, and the street beyond shows
+through.
+
+**Cause.** The game's four 3D marker models, 1316 `hoop`, 1317 `Cylinder`,
+1318 `arrow` and 1559 `diamond_3`, are textured with `CJ_W_GRAD`, a white
+DXT3 gradient that fades to clear. Their IDE flags (0 or 0x200000) have no
+draw-last bit, so placed as an object or a pickup they go into the opaque
+render list. That list is not sorted, and the marker writes depth across its
+whole shape. A wall drawn after it fails the depth test inside the cone, and
+the marker blends over what was drawn before it. The game's own markers
+(`C3dMarkers`) draw these clumps separately and are not affected. SA-MP 0.3.7
+fixed the same thing for its EnExMarker2/3 (19197, 19198) by setting IDE
+flags 4 (draw last) and 64 (no depth writes); see the notes at the top of
+`SAMP/SAMP.ide`.
+
+**Fix.** At start, fixes sets `bDrawLast` (0x02) and `bDontWriteZBuffer`
+(0x08) in each marker model's `CBaseModelInfo` flags at +0x12. The model info
+array is read through 0x403DA7, so SA-MP R5's relocated array is used. An
+entity copies `bDrawLast` only when its model is set
+(`CEntity::SetModelIndexNoCreate`, 0x533700), so objects already made get
+`m_bDrawLast` (+0x1D, 0x40) from a sweep of the object pool. These entities
+then go into the sorted alpha list. `CVisibilityPlugins::RenderEntity`
+(0x732B40) draws them after the opaque world, farthest first, with depth
+writes off and the alpha reference at 0. Off puts back each model's own bits
+and clears the objects' flag, except for a model that was drawn last
+already.
+
+**Tests.** `fixes_test.lua`: model bits set and restored with their other
+bits kept, the sweep skips free slots and other models, and a model drawn
+last already keeps its objects as they were. With no model info array, the
+fix refuses.

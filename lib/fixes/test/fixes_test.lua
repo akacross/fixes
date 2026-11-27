@@ -425,6 +425,37 @@ do
     put(CTOR, 0xC6, 0x04, 0x01, 0x01)
 end
 
+print('\n== markerdepth: the marker models drawn last without depth writes')
+do
+    local INFOS, POOL = 0x403DA7, 0xB7449C
+    local infos, objects, flags, pool = 0x06000000, 0x06100000, 0x06200000, 0x06300000
+    local mi = {[1316] = 0x06010000, [1317] = 0x06010100, [1318] = 0x06010200, [1559] = 0x06010300, [1319] = 0x06010400}
+    putU32(INFOS, infos)
+    for id, va in pairs(mi) do putU32(infos + 4 * id, va) end
+    mem[mi[1316] + 0x12], mem[mi[1317] + 0x12], mem[mi[1318] + 0x12] = 0x00, 0x40, 0x01
+    mem[mi[1559] + 0x12], mem[mi[1319] + 0x12] = 0x02, 0x00   -- 1559 drawn last already (another mod)
+    -- objects: an arrow, a free slot holding an arrow, a bollard, a diamond
+    putU32(POOL, pool); putU32(pool, objects); putU32(pool + 4, flags); putU32(pool + 8, 4)
+    put(flags, 0x01, 0x80, 0x02, 0x03)
+    for i, id in ipairs({1318, 1318, 1319, 1559}) do
+        local e = objects + (i - 1) * 0x19C
+        put(e + 0x22, id % 0x100, math.floor(id / 0x100)); mem[e + 0x1D] = 0x01
+    end
+    local function drawLast(i) return mem[objects + i * 0x19C + 0x1D] end
+    ok(env.fixMarkerModels(true) == true, 'on: applied')
+    ok(mem[mi[1316] + 0x12] == 0x0A and mem[mi[1317] + 0x12] == 0x4A and mem[mi[1318] + 0x12] == 0x0B,
+        'hoop, cylinder and arrow: drawn last, no depth writes, their other bits kept')
+    ok(mem[mi[1559] + 0x12] == 0x0A and mem[mi[1319] + 0x12] == 0x00, 'the diamond also stops writing depth; a bollard untouched')
+    ok(drawLast(0) == 0x41 and drawLast(1) == 0x01 and drawLast(2) == 0x01, 'a made arrow drawn last; a free slot and a bollard not')
+    ok(drawLast(3) == 0x01, 'a diamond whose model was drawn last already is left to it')
+    ok(env.fixMarkerModels(false) == true, 'off: applied')
+    ok(mem[mi[1316] + 0x12] == 0x00 and mem[mi[1317] + 0x12] == 0x40 and mem[mi[1318] + 0x12] == 0x01
+        and mem[mi[1559] + 0x12] == 0x02, 'off: every model back to its own bits')
+    ok(drawLast(0) == 0x01, 'off: the made arrow no longer drawn last')
+    putU32(INFOS, 0)
+    ok(env.fixMarkerModels(true) == false, 'no model info array: refused')
+end
+
 print('\n== /fixes shows how many are stored')
 putU32(0x02B20000 + COUNT_RVA, 1242)
 env.fixesCommand('')

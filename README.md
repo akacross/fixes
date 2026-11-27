@@ -82,6 +82,10 @@ Game bugs:
   SkyGFX stand it down too.
 - A server's car vanishes after you get out of it, its upgrade parts left
   behind (a script marking it no longer needed): the car is kept.
+- An exit arrow or other marker pickup (models 1316 to 1318 and 1559) cuts a
+  hole in the wall behind it, showing what lies beyond: these fading models
+  were drawn unsorted and wrote depth. They are drawn last without writing
+  depth, as SA-MP does for its own EnEx markers (`markerdepth`).
 - A ped with broken bone data draws its triangles across the screen: the bad
   bone shrinks to nothing, or the ped is not drawn (MTA's checks).
 - A car's glass and other see-through parts past 20 draw unsorted: the list
@@ -311,6 +315,7 @@ that averted a crash says so.
 | `glasslist` | on | a car's see-through parts drawn in order past 20, and the alpha entity list grows past 200 |
 | `glassdepth` | on | a car's glass drawn after its solid parts without writing depth |
 | `glasssort` | on | a car's see-through parts sorted by their own distance from the camera |
+| `markerdepth` | on | marker arrows, cylinders and diamonds placed as objects or pickups drawn last without writing depth |
 | `farsideparts` | on | a car's far-side parts drawn at any distance |
 | `parkedcol` | on | a parked car standing still skips the collision step |
 | `parkedcreep` | on | with `parkedcol`, a parked car creeping under 1e-6 for 10 frames is stopped and skipped too |

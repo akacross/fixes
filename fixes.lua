@@ -1,5 +1,5 @@
 script_name("fixes")
-script_version("0.27.8")
+script_version("0.27.9")
 
 -- /perf (akacross.perf): first, so it sees this script's waits and handlers. Inert until /perf.
 do local ok, perf = pcall(require, 'akacross.perf'); if ok then perf.setup{env = getfenv(1)} end end
@@ -1123,6 +1123,9 @@ local OPTIONS = {
     glasssort = {default = true,
         label = "a car's glass, lights and other see-through parts drawn farthest first by each part's own distance (needs glasslist)",
         apply = function(on) return setCrashFixGlassSort(on) and 1 or 0, 0 end},
+    markerdepth = {default = true,
+        label = "marker arrows, cylinders and diamonds placed as objects or pickups drawn last without writing depth, so walls never vanish inside them (as SA-MP does for its EnEx markers)",
+        apply = function(on) return fixMarkerModels(on) and 1 or 0, 0 end},
     farsideparts = {default = true,
         label = "a car's far-side parts (windows, doors) drawn at any distance and angle, not culled past 20 m"},
     widemodes = {default = true,
@@ -2040,6 +2043,71 @@ function fixAnisotropic(on)
         on and (level .. "x") or "off", AF.CTOR, level, okSweep and tostring(count) or "no",
         verified and "in place" or "WRITE DID NOT STICK"), verified and "info" or "warn")
     return verified
+end
+end
+
+--------------------------------------------------------------------------------
+-- Marker models drawn last (option markerdepth)
+--------------------------------------------------------------------------------
+-- The 3D marker models (hoop, cylinder, arrow, diamond) fade out through
+-- CJ_W_GRAD but have no draw-last flag, so as an object or a pickup they are
+-- drawn in the opaque pass and write depth: a wall drawn after one shows
+-- what was drawn before it through the marker. Like SA-MP 0.3.7's
+-- EnExMarker2/3 (IDE flags 4 + 64), they get bDrawLast and bDontWriteZBuffer
+-- (CBaseModelInfo +0x12: 0x02, 0x08); objects already made get m_bDrawLast
+-- (CEntity +0x1D: 0x40), which a model's flag sets only at creation.
+do   -- a block: the chunk is at Lua's 200 locals
+local MK = {
+    MODELS = {1316, 1317, 1318, 1559},
+    INFOS = 0x403DA7,       -- CModelInfo::ms_modelInfoPtrs, read where SA-MP R5 moved it
+    POOL = 0xB7449C, SIZE = 0x19C,
+    FLAGS = 0x0A, stock = {},
+}
+
+-- -> how many made objects were switched
+function MK.sweep(on, ours)
+    local pool = readU32(MK.POOL)
+    if pool == 0 then return 0 end
+    local objects, flags, size = readU32(pool), readU32(pool + 4), readU32(pool + 8)
+    local n = 0
+    for i = 0, size - 1 do
+        if readU8(flags + i) < 0x80 then
+            local e = objects + i * MK.SIZE
+            if ours[readU8(e + 0x22) + readU8(e + 0x23) * 0x100] then
+                local p = ffi.cast("uint8_t*", e + 0x1D)
+                p[0] = on and bit.bor(p[0], 0x40) or bit.band(p[0], 0xBF)
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
+function fixMarkerModels(on)
+    local infos = readU32(MK.INFOS)
+    if infos == 0 then
+        log("[fixes] refusing marker models drawn last: no model info array", "warn")
+        return false
+    end
+    local ours, set, verified = {}, 0, true
+    for _, id in ipairs(MK.MODELS) do
+        local mi = readU32(infos + 4 * id)
+        if mi ~= 0 then
+            local p = ffi.cast("uint8_t*", mi + 0x12)
+            if MK.stock[id] == nil then MK.stock[id] = bit.band(p[0], MK.FLAGS) end
+            local want = bit.bor(bit.band(p[0], bit.bnot(MK.FLAGS)), on and MK.FLAGS or MK.stock[id])
+            p[0] = want
+            verified = verified and p[0] == want
+            ours[id] = bit.band(MK.stock[id], 0x02) == 0     -- a model drawn last already keeps its objects'
+            set = set + 1
+        end
+    end
+    local okSweep, count = pcall(MK.sweep, on, ours)
+    log(string.format("[fixes] marker models drawn last %s: %d model(s) %s, %s made object(s) switched -- %s",
+        on and "on" or "off", set, on and "drawn last without depth writes" or "stock",
+        okSweep and tostring(count) or "no", verified and "in place" or "WRITE DID NOT STICK"),
+        verified and "info" or "warn")
+    return verified and set > 0
 end
 end
 
@@ -5476,6 +5544,11 @@ function main()
         noteFix("anisotropic filtering", fixAnisotropic(true))
     else
         otherFixes[#otherFixes + 1] = {"anisotropic filtering", "off (option anisotropic)"}
+    end
+    if options.markerdepth then
+        noteFix("marker models drawn last", fixMarkerModels(true))
+    else
+        otherFixes[#otherFixes + 1] = {"marker models drawn last", "off (option markerdepth)"}
     end
     if options.unfocused then
         noteFix("running unfocused", fixUnfocused(true))
